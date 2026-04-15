@@ -320,7 +320,7 @@ def main():
             "--height=90%",
             "--border=rounded",
             "--prompt=Sessions > ",
-            "--header=Enter: resume | Ctrl-Y: resume (yolo) | Esc: quit | Shift-Up/Down: scroll preview",
+            "--header=Enter: resume (yolo) | Ctrl-S: resume (safe) | Esc: quit | Shift-Up/Down: scroll preview",
             "--header-first",
             "--delimiter=###",
             "--with-nth=1",
@@ -328,7 +328,7 @@ def main():
             f"--preview=python3 {preview_script.name} {{}}",
             "--preview-window=right:45%:wrap",
             "--bind=shift-up:preview-up,shift-down:preview-down",
-            "--bind=ctrl-y:print(YOLO:)+accept",
+            "--bind=ctrl-s:print(SAFE:)+accept",
         ]
 
         result = subprocess.run(
@@ -345,17 +345,18 @@ def main():
         if not output or "###" not in output:
             sys.exit(0)
 
-        # Check if yolo mode was triggered (Ctrl-Y prints "YOLO:" before the line)
-        yolo = False
-        if output.startswith("YOLO:"):
-            yolo = True
-            output = output[5:]  # strip the prefix
+        # Default is yolo (--dangerously-skip-permissions)
+        # Ctrl-S prints "SAFE:" to opt INTO safe mode
+        yolo = True  # default
+        if output.startswith("SAFE:"):
+            yolo = False
+            output = output[5:]
 
-        # Also check if YOLO: ended up on a separate line
+        # Handle multi-line output
         output_lines = output.strip().split("\n")
         if len(output_lines) > 1:
-            if "YOLO:" in output_lines[0] and "###" not in output_lines[0]:
-                yolo = True
+            if "SAFE:" in output_lines[0] and "###" not in output_lines[0]:
+                yolo = False
                 output = output_lines[-1]
             else:
                 output = output_lines[-1]
