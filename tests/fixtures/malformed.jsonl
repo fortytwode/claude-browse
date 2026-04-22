@@ -1,0 +1,5 @@
+{"type":"summary","sessionName":"Malformed test","sessionId":"11111111-2222-3333-4444-555555555555","cwd":"/home/bob/proj","timestamp":"2026-03-20T08:00:00Z"}
+this is not valid json
+{"type":"user","sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-03-20T08:00:01Z","message":{"role":"user","content":"does this still parse?"}}
+{broken json on purpose
+{"type":"assistant","sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-03-20T08:00:02Z","message":{"role":"assistant","content":"yes — parser skips invalid lines"}}

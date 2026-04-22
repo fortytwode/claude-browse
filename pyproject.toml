@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-browse"
+version = "1.0.0"
+description = "Find and resume past Claude Code sessions from the terminal. Interactive fzf browser with preview pane."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Shamanth Rao" }]
+keywords = ["claude", "claude-code", "cli", "terminal", "session", "fzf"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Utilities",
+]
+
+# Zero runtime Python deps — just stdlib. `fzf` is an external binary the
+# user installs via their OS package manager. That's intentional: the tool
+# stays drop-in-safe and has no supply-chain surface.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/fortytwode/claude-browse"
+Repository = "https://github.com/fortytwode/claude-browse"
+Issues = "https://github.com/fortytwode/claude-browse/issues"
+Changelog = "https://github.com/fortytwode/claude-browse/blob/main/CHANGELOG.md"
+Roadmap = "https://github.com/fortytwode/claude-browse/blob/main/ROADMAP.md"
+
+[project.scripts]
+claude-browse = "claude_browse.browse:main"
+claude-resume = "claude_browse.resume:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["claude_browse"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "claude_browse",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "ROADMAP.md",
+    "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]  # line length enforced loosely by tooling
