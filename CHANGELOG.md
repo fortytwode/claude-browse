@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- SQLite FTS5 backed search. fzf is now a pure picker (`--disabled`); each
+  keystroke runs an FTS5 query against an index at
+  `~/.claude/cache/claude-browse-index.db`. The index is rebuilt
+  incrementally on every launch (one stat() per file in steady state).
+- Real search semantics:
+  - `runna` — exact token match, no character-level fuzzy flood
+  - `runna sca2` — implicit AND across both tokens
+  - `"runna sca2"` — phrase match (adjacent in order)
+  - `runna*` — prefix match
+- Matched-context snippet in each row. When a search is active, the row
+  shows the line in the conversation where the match occurred, with the
+  matched terms highlighted.
+
+### Fixed
+- Body search regression introduced in 1.1.0. The `--with-nth=1` +
+  `--nth=1,3,4` combo silently never searched the hidden corpus field
+  because `--with-nth` collapses each row to its selected fields *before*
+  `--nth` runs. Title search kept working; body search did not. Replaced
+  with FTS5.
+- Short queries like `sca2` no longer match nearly every session via fzf's
+  fuzzy scoring. FTS5 is token-based, so 4 chars in arbitrary order across
+  a session no longer trigger a hit.
+
+### Changed
+- `--no-canonicalize` is now a no-op (accepted for compat). Path
+  canonicalization happens at index time, so the display always shows
+  unified paths.
+
 ## [1.1.0] - 2026-05-01
 
 ### Added

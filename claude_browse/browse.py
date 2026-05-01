@@ -1,23 +1,25 @@
-"""Interactive session browser. Fuzzy search + preview pane over fzf."""
+"""Interactive session browser. SQLite FTS5 search + preview pane over fzf.
+
+fzf is used purely as a picker (--disabled). All query matching is done by
+SQLite FTS5 via a keystroke-driven reload binding. This gives us proper
+token-level search with phrase queries, instead of fzf's character-level
+fuzzy match (which floods short queries like "sca2" with false positives).
+"""
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 
+from . import fts
 from .core import (
     SESSIONS_DIR,
-    canonicalize_path,
     display_cwd,
-    extract_search_corpus,
     folder_name,
     format_date,
-    get_session_info,
-    list_session_files,
 )
 
 DEFAULT_LIMIT = 100
@@ -33,62 +35,78 @@ def _folder_prefixes() -> tuple[str, ...]:
     return tuple(p.strip() for p in raw.split(":") if p.strip())
 
 
-def get_sessions(
-    limit: int = DEFAULT_LIMIT,
-    cwd_filter: str | None = None,
-    canonicalize: bool = True,
-) -> list[dict]:
-    """Collect sessions sorted by recency.
+def format_row(
+    info: dict, query: str = "", prefixes: tuple[str, ...] = ()
+) -> str:
+    """Render one session as a fzf row line.
 
-    When `canonicalize=True`, session cwds are normalized (Mac/Linux homes
-    mapped to ~), and duplicates by session_id are collapsed to the most
-    recent file on disk.
+    Layout: `{date} {fname} {msgs} {title}{suffix}  ###{sid}###{cwd}`. The
+    suffix is FTS5's matched-context snippet when a query is active, or a
+    topic-drift hint (latest user message) when the title looks stale.
+
+    The trailing `###{sid}###{cwd}` fields are hidden from display via
+    fzf's --with-nth=1 but remain on the line for selection-time parsing.
     """
-    files = list_session_files()
-    files.sort(key=os.path.getmtime, reverse=True)
+    date = format_date(info.get("timestamp"))
+    cwd = info.get("cwd")
+    fname = folder_name(cwd, prefixes)
+    msgs = f"{info.get('msg_count', 0)}msg"
+    title = ((info.get("name") or info.get("first_msg") or "")[:60]).replace(
+        "\n", " "
+    )
+    sid = info.get("session_id") or "?"
+    ffolder = display_cwd(cwd)
 
-    results: list[dict] = []
-    seen_ids: set[str] = set()
+    suffix = ""
+    if query.strip() and info.get("context"):
+        # FTS5 snippet: \x01 wraps matched terms, \x02 ends the wrap. Render
+        # them as bold yellow (\033[1;33m / \033[0m) inside dim grey text so
+        # the matched terms pop out of the otherwise quiet snippet.
+        snippet = (
+            info["context"]
+            .replace("\x01", "\033[0m\033[1;33m")
+            .replace("\x02", "\033[0m\033[2m")
+        )
+        suffix = f"  \033[2m→ {snippet}\033[0m"
+    else:
+        last = (info.get("last_msg") or "").strip()
+        title_words = {w for w in title.lower().split() if len(w) >= 4}
+        last_words = {w for w in last.lower().split() if len(w) >= 4}
+        if last and last_words and len(title_words & last_words) <= 1:
+            suffix = f"  \033[2m→ {last[:70]}\033[0m"
 
-    for filepath in files[: limit * 4]:
-        info = get_session_info(filepath)
-        if not info or not info["first_msg"]:
-            continue
-
-        if canonicalize:
-            info["cwd"] = canonicalize_path(info.get("cwd"))
-
-        if cwd_filter and not (info.get("cwd") or "").startswith(cwd_filter):
-            continue
-
-        sid = info.get("session_id")
-        if canonicalize and sid:
-            if sid in seen_ids:
-                continue
-            seen_ids.add(sid)
-
-        results.append(info)
-        if len(results) >= limit:
-            break
-
-    results.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
-    return results
+    return f"{date:<8} {fname:<15} {msgs:<7} {title}{suffix}  ###{sid}###{ffolder}"
 
 
-def _write_preview_script(sessions: list[dict], script_path: str) -> None:
-    """Write a helper script fzf calls to render session previews."""
-    mapping = {s["session_id"]: s["path"] for s in sessions if s.get("session_id")}
+def _write_preview_script(script_path: str, db_path: str) -> None:
+    """Write a helper script fzf calls to render session previews.
 
+    The script looks up the session's path in the SQLite index (so it works
+    for any session the FTS search surfaces, not just the initial set).
+    """
     script = f"""#!/usr/bin/env python3
 import sys
 import json
 import os
+import sqlite3
 
-MAPPING = {json.dumps(mapping)}
+DB_PATH = {db_path!r}
 MAX_PREVIEW = 20
 
+
+def _lookup_path(session_id):
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT path FROM sessions WHERE sid = ?", (session_id,)
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
 def get_preview(session_id):
-    path = MAPPING.get(session_id)
+    path = _lookup_path(session_id)
     if not path or not os.path.exists(path):
         print("Session file not found.")
         return
@@ -180,6 +198,48 @@ if __name__ == "__main__":
     os.chmod(script_path, 0o755)
 
 
+def _write_search_script(
+    script_path: str,
+    db_path: str,
+    package_dir: str,
+    cwd_filter: str | None,
+    limit: int,
+) -> None:
+    """Write the keystroke-driven search helper invoked by fzf change:reload.
+
+    fzf passes the current query string as argv[1] (already shell-quoted).
+    The script runs an FTS5 query and prints one row per match, formatted
+    identically to the initial input fzf was started with.
+    """
+    script = f"""#!/usr/bin/env python3
+import sys
+sys.path.insert(0, {package_dir!r})
+
+from claude_browse import fts
+from claude_browse.browse import format_row
+
+DB_PATH = {db_path!r}
+CWD_FILTER = {cwd_filter!r}
+LIMIT = {limit}
+
+q = sys.argv[1] if len(sys.argv) > 1 else ""
+conn = fts.open_db(DB_PATH)
+if q.strip():
+    results = fts.search(conn, q, limit=LIMIT)
+else:
+    results = fts.list_recent(conn, limit=LIMIT)
+
+if CWD_FILTER:
+    results = [r for r in results if (r.get("cwd") or "").startswith(CWD_FILTER)]
+
+for r in results:
+    print(format_row(r, q))
+"""
+    with open(script_path, "w") as f:
+        f.write(script)
+    os.chmod(script_path, 0o755)
+
+
 def _check_fzf() -> None:
     if shutil.which("fzf"):
         return
@@ -204,8 +264,13 @@ def _print_usage() -> None:
         "Options:\n"
         "  --all                 Include every session, not just the most recent 100\n"
         "  --here                Only sessions started in the current directory\n"
-        "  --no-canonicalize     Don't merge Mac/Linux paths (show raw cwds)\n"
         "  -h, --help            Show this help\n"
+        "\n"
+        "Search syntax (typed inside the picker):\n"
+        "  runna                 Sessions containing the token 'runna'\n"
+        "  runna sca2            Sessions containing both tokens (any order)\n"
+        '  "runna sca2"          Sessions where the two words appear adjacent\n'
+        "  runna*                Prefix match: runna, runnathon, runna2026, ...\n"
         "\n"
         "Keys while browsing:\n"
         "  Enter                 Resume the selected session (yolo)\n"
@@ -235,10 +300,10 @@ def main() -> None:
         args.remove("--here")
         cwd_filter = os.getcwd()
 
-    canonicalize = True
+    # --no-canonicalize is a legacy flag; canonicalization now happens at
+    # index time, not at display time. Accept and ignore for compat.
     if "--no-canonicalize" in args:
         args.remove("--no-canonicalize")
-        canonicalize = False
 
     if args:
         print(f"Unknown argument: {args[0]}", file=sys.stderr)
@@ -252,56 +317,54 @@ def main() -> None:
         print("Run `claude` at least once to create it.")
         sys.exit(1)
 
+    # Build / refresh the FTS index. First run on a populated ~/.claude is
+    # several seconds; steady-state is a stat() per file (~tens of ms).
+    conn = fts.open_db()
+    total_pre = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    if total_pre == 0:
+        print("Indexing sessions for the first time...", file=sys.stderr)
+    added, updated, removed = fts.reindex(conn)
+    if added + updated + removed > 0 and total_pre == 0:
+        print(
+            f"  indexed {added} sessions",
+            file=sys.stderr,
+        )
+    conn.close()
+
+    prefixes = _folder_prefixes()
     limit = 999 if show_all else DEFAULT_LIMIT
-    sessions = get_sessions(
-        limit=limit, cwd_filter=cwd_filter, canonicalize=canonicalize
-    )
-    if not sessions:
+
+    # Initial display: recent sessions, no query active.
+    conn = fts.open_db()
+    initial = fts.list_recent(conn, limit=limit)
+    if cwd_filter:
+        initial = [r for r in initial if (r.get("cwd") or "").startswith(cwd_filter)]
+    conn.close()
+
+    if not initial:
         print("No sessions found.")
         sys.exit(1)
 
-    prefixes = _folder_prefixes()
+    initial_lines = [format_row(r, "", prefixes) for r in initial]
 
-    lines: list[str] = []
-    for r in sessions:
-        date = format_date(r["timestamp"])
-        fname = folder_name(r["cwd"], prefixes)
-        msgs = f"{r['msg_count']}msg"
-        title = (r.get("name") or r["first_msg"])[:60]
-        sid = r["session_id"] or "?"
-        ffolder = display_cwd(r["cwd"])
-
-        # Topic-drift suffix: Claude Code's auto-generated title locks on
-        # the first user message and never updates, so a long-running
-        # session that pivoted to a new topic looks misleading. Show the
-        # most recent substantive user message in dim ANSI when it's
-        # clearly a different topic from the title.
-        last = (r.get("last_msg") or "").strip()
-        title_words = {w for w in title.lower().split() if len(w) >= 4}
-        last_words = {w for w in last.lower().split() if len(w) >= 4}
-        suffix = ""
-        if last and last_words and len(title_words & last_words) <= 1:
-            # \033[2m = dim, \033[0m = reset
-            suffix = f"  \033[2m→ {last[:70]}\033[0m"
-
-        # Hidden 4th field carries the full searchable corpus (user +
-        # assistant text), so fzf's --nth=1,3,4 matches across topics
-        # discussed anywhere in the session, not just the first message.
-        corpus = extract_search_corpus(r["path"])
-        # Tabs would break the ### delimiter scheme; spaces are safe.
-        corpus_field = corpus.replace("###", " ").replace("\n", " ")[:32000]
-
-        line = (
-            f"{date:<8} {fname:<15} {msgs:<7} {title}{suffix}"
-            f"  ###{sid}###{ffolder}###{corpus_field}"
-        )
-        lines.append(line)
+    # Both helper scripts get the package directory baked in so they import
+    # claude_browse correctly whether we were started from a pip entry point
+    # or the direct-script shim.
+    package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     preview_script = tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", delete=False, prefix="claude_browse_preview_"
     )
     preview_script.close()
-    _write_preview_script(sessions, preview_script.name)
+    _write_preview_script(preview_script.name, fts.DB_PATH)
+
+    search_script = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".py", delete=False, prefix="claude_browse_search_"
+    )
+    search_script.close()
+    _write_search_script(
+        search_script.name, fts.DB_PATH, package_dir, cwd_filter, limit
+    )
 
     try:
         fzf_cmd = [
@@ -316,10 +379,10 @@ def main() -> None:
             "--header-first",
             "--delimiter=###",
             "--with-nth=1",
-            # Search across visible row, full cwd path, and the hidden
-            # corpus field, so a query matches a topic discussed mid- or
-            # late-session, not only what appeared in the first message.
-            "--nth=1,3,4",
+            # fzf is a picker only; SQLite FTS5 does the matching. Each
+            # keystroke re-runs the search script, which prints fresh rows.
+            "--disabled",
+            f"--bind=change:reload(python3 {search_script.name} {{q}})",
             f"--preview=python3 {preview_script.name} {{}}",
             "--preview-window=right:45%:wrap",
             "--bind=shift-up:preview-up,shift-down:preview-down",
@@ -328,7 +391,7 @@ def main() -> None:
 
         result = subprocess.run(
             fzf_cmd,
-            input="\n".join(lines),
+            input="\n".join(initial_lines),
             capture_output=True,
             text=True,
         )
@@ -357,9 +420,9 @@ def main() -> None:
         parts = output.split("###")
         session_id = parts[1].strip() if len(parts) >= 2 else ""
 
-        session = next(
-            (s for s in sessions if s["session_id"] == session_id), None
-        )
+        conn = fts.open_db()
+        session = fts.get_by_sid(conn, session_id)
+        conn.close()
         if not session:
             print(f"Session not found: {session_id}", file=sys.stderr)
             sys.exit(1)
@@ -380,10 +443,11 @@ def main() -> None:
         os.execvp("claude", cmd)
 
     finally:
-        try:
-            os.unlink(preview_script.name)
-        except OSError:
-            pass
+        for path in (preview_script.name, search_script.name):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
