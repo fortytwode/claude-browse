@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-05-01
+
 ### Added
 - Modern title support: read `ai-title` (Claude Code's auto-generated)
   and `custom-title` (manual via `/name`) events. Older sessions used
@@ -80,7 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (keyword resume)
 - `install.sh` symlinks scripts into `~/.local/bin/`
 
-[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/fortytwode/claude-browse/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/fortytwode/claude-browse/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/fortytwode/claude-browse/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/fortytwode/claude-browse/compare/v0.1.1...v0.1.2
