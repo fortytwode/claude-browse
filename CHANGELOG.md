@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-05-01
+
 ### Added
 - SQLite FTS5 backed search. fzf is now a pure picker (`--disabled`); each
   keystroke runs an FTS5 query against an index at
@@ -111,7 +113,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (keyword resume)
 - `install.sh` symlinks scripts into `~/.local/bin/`
 
-[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/fortytwode/claude-browse/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/fortytwode/claude-browse/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/fortytwode/claude-browse/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/fortytwode/claude-browse/compare/v0.1.2...v0.2.0
