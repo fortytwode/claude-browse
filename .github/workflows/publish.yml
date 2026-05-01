@@ -1,0 +1,75 @@
+name: Publish to PyPI
+
+# Triggers:
+#   release: published   - automatic when you cut a GitHub release
+#   workflow_dispatch    - manual: pick a tag and run from the Actions tab
+#
+# Authentication uses PyPI Trusted Publishing (OIDC). No API token is stored
+# in the repo. PyPI side: register fortytwode/claude-browse as a publisher
+# under the project settings (one-time setup, see CONTRIBUTING.md).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g., v1.1.0). Must already exist."
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # On release, use the tag the release points at; on dispatch, the
+          # input. github.ref handles release events; manual runs override.
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Validate metadata with twine
+        run: twine check dist/*
+
+      - name: Upload distributions as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # GitHub Environment recommended by PyPI for trusted publishing. Create
+    # it in repo Settings -> Environments -> New environment "release".
+    # Optional but recommended: require manual approval before deploys run.
+    environment:
+      name: release
+      url: https://pypi.org/p/claude-browse
+    permissions:
+      # Required for OIDC token exchange with PyPI.
+      id-token: write
+    steps:
+      - name: Download built distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
