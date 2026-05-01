@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Modern title support: read `ai-title` (Claude Code's auto-generated)
+  and `custom-title` (manual via `/name`) events. Older sessions used
+  `summary` only, so most modern sessions had no title surfaced before.
+- Topic-drift suffix in the list view: when a session's most recent
+  substantive user message describes a different topic from the title,
+  it's appended in dim ANSI. Claude Code's auto-title locks on the first
+  message and never updates, so a long-running session that pivots looks
+  misleading without this hint.
+- Search across the full conversation: assistant text is now indexed
+  alongside user messages, so a query for an acronym or named concept
+  the assistant introduced (e.g. "BANP", "search corpus") still finds
+  the session. Surfaced via a hidden 4th fzf field, `--nth=1,3,4`.
+- 7 new unit tests covering modern title parsing, last-message
+  extraction, confirmation filtering, and the expanded corpus.
+
+### Changed
+- `extract_user_text` renamed to `extract_search_corpus` to reflect the
+  new semantics. The old name remains as an alias so existing callers
+  keep working without changes.
+- Pure confirmations ("yes", "go ahead please", "sounds good") are now
+  filtered out of the topic-drift suffix; they're not topic signal.
+- Auto-compaction preambles ("This session is being continued from a
+  previous conversation…") are filtered out of both the snippet and the
+  search corpus; they're machinery, not user voice.
+
+## [1.0.0] - 2026-04-22
+
+### Added
 - ROADMAP.md documenting v1.0 scope and paid-product direction
 - LICENSE (MIT)
 - CHANGELOG.md
@@ -52,7 +80,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (keyword resume)
 - `install.sh` symlinks scripts into `~/.local/bin/`
 
-[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/fortytwode/claude-browse/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/fortytwode/claude-browse/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/fortytwode/claude-browse/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/fortytwode/claude-browse/compare/v0.1.0...v0.1.1

@@ -16,17 +16,72 @@ from datetime import datetime, timezone
 SESSIONS_DIR = os.path.expanduser("~/.claude/projects")
 
 
+_NOISE_PREFIXES = (
+    "<local-command",
+    "<command",
+    "<task-notification",
+    "<system-reminder",
+    "Caveat:",
+    "[Request interrupted",
+    # Auto-compaction inserts a synthetic user message that begins with
+    # this preamble. It's machinery, not the user's voice.
+    "This session is being continued from a previous conversation",
+)
+
+# Pure confirmations: recognized so they don't get picked as the "latest
+# substantive user message" for the list-view topic-drift suffix.
+_CONFIRMATION_WORDS = frozenset({
+    "yes", "yep", "yeah", "ok", "okay", "k", "sure",
+    "go ahead", "go ahead please", "yes please",
+    "yes go ahead", "yes go ahead please",
+    "please go ahead", "please do", "please",
+    "sounds good", "looks good", "great", "perfect",
+    "nice", "thanks", "thank you", "done", "cool",
+    "yes thanks", "ok thanks", "yep thanks",
+    "all good", "got it", "noted",
+})
+
+
+def _extract_text(content) -> str:
+    """Pull plain text from a message's content field, regardless of shape.
+
+    Claude Code emits content as either a string or a list of typed parts
+    ({"type": "text", "text": "..."}). Returns "" if no text is present.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for c in content:
+            if isinstance(c, dict) and c.get("text"):
+                # Tool-use entries lack a top-level text key, so this naturally
+                # skips them. Only "text" parts contribute to the corpus.
+                if c.get("type") in (None, "text"):
+                    parts.append(c["text"])
+        return " ".join(parts)
+    return ""
+
+
 def get_session_info(jsonl_path: str) -> dict | None:
     """Extract session metadata from a session JSONL file.
 
     Returns None if the file is unreadable. Missing fields are returned as
     empty strings or 0 — callers should check for truthiness, not None.
+
+    Reads three title-event shapes for compatibility:
+      - "ai-title" (modern Claude Code, auto-generated, locked early)
+      - "custom-title" (modern Claude Code, user-set via /name)
+      - "summary" (legacy, sessionName field)
+    Custom titles win over AI titles win over legacy summaries.
     """
     first_user_msg = None
+    last_user_msg = None
     session_id = None
     timestamp = None
     cwd = None
-    name = None
+    ai_title = None
+    custom_title = None
+    legacy_name = None
     msg_count = 0
 
     try:
@@ -40,8 +95,12 @@ def get_session_info(jsonl_path: str) -> dict | None:
                 msg = data.get("message", data)
                 msg_type = data.get("type", "")
 
-                if msg_type == "summary":
-                    name = data.get("sessionName")
+                if msg_type == "custom-title":
+                    custom_title = data.get("customTitle") or custom_title
+                elif msg_type == "ai-title":
+                    ai_title = data.get("aiTitle") or ai_title
+                elif msg_type == "summary":
+                    legacy_name = data.get("sessionName") or legacy_name
 
                 if not session_id and data.get("sessionId"):
                     session_id = data.get("sessionId")
@@ -52,24 +111,36 @@ def get_session_info(jsonl_path: str) -> dict | None:
 
                 if msg.get("role") == "user":
                     msg_count += 1
-                    if not first_user_msg:
-                        content = msg.get("content", "")
-                        if isinstance(content, list):
-                            for c in content:
-                                if isinstance(c, dict) and c.get("text"):
-                                    first_user_msg = c["text"]
-                                    break
-                        elif isinstance(content, str) and len(content) > 3:
-                            first_user_msg = content
+                    text = _extract_text(msg.get("content", ""))
+                    if text and len(text) > 3:
+                        cleaned = text.replace("\n", " ").strip()
+                        is_noise = any(
+                            cleaned.startswith(p) for p in _NOISE_PREFIXES
+                        )
+                        if not is_noise:
+                            if not first_user_msg:
+                                first_user_msg = cleaned
+                            # Track the most recent substantive message.
+                            # Skip pure confirmations like "yes" / "go ahead"
+                            # since they're not topic signal.
+                            stripped = cleaned.lower().strip(".,!?;: ")
+                            if (
+                                stripped not in _CONFIRMATION_WORDS
+                                and len(cleaned) >= 25
+                            ):
+                                last_user_msg = cleaned
                 elif msg.get("role") == "assistant":
                     msg_count += 1
     except Exception:
         return None
 
+    name = custom_title or ai_title or legacy_name
+
     return {
         "path": jsonl_path,
         "session_id": session_id,
         "first_msg": (first_user_msg or "").replace("\n", " ").strip()[:200],
+        "last_msg": (last_user_msg or "").replace("\n", " ").strip()[:200],
         "timestamp": timestamp,
         "cwd": cwd,
         "name": name,
@@ -77,12 +148,17 @@ def get_session_info(jsonl_path: str) -> dict | None:
     }
 
 
-def extract_user_text(jsonl_path: str) -> str:
-    """Concatenate all user message text from a session, lowercased.
+def extract_search_corpus(jsonl_path: str) -> str:
+    """Concatenate user + assistant message text from a session, lowercased.
 
-    Used for keyword search. Deliberately excludes assistant output, tool
-    results, and system context so searches don't match on things like
-    `cwd:` paths or CLAUDE.md contents.
+    Used for keyword search. Includes both sides of the conversation so a
+    query for an acronym or named concept the assistant introduced (e.g.
+    "BANP", "search corpus") still finds the session. Users typically
+    don't remember whether *they* or the *assistant* first said the word.
+
+    Tool-use blocks, tool results, and system context are filtered out via
+    the typed-parts shape (only `type: text` entries contribute), so paths
+    in `cwd:` lines and CLAUDE.md contents do not leak in.
     """
     parts: list[str] = []
     try:
@@ -93,18 +169,26 @@ def extract_user_text(jsonl_path: str) -> str:
                 except json.JSONDecodeError:
                     continue
                 msg = data.get("message", data)
-                if msg.get("role") != "user":
+                role = msg.get("role")
+                if role not in ("user", "assistant"):
                     continue
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    parts.append(content)
-                elif isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict) and c.get("text"):
-                            parts.append(c["text"])
+                text = _extract_text(msg.get("content", ""))
+                if not text:
+                    continue
+                if role == "user":
+                    cleaned = text.lstrip()
+                    if any(cleaned.startswith(p) for p in _NOISE_PREFIXES):
+                        continue
+                parts.append(text)
     except Exception:
         return ""
     return " ".join(parts).lower()
+
+
+# Backwards-compatible alias. Older callers of extract_user_text get the
+# expanded corpus automatically; the rename makes the new semantics
+# discoverable while keeping the old import path working.
+extract_user_text = extract_search_corpus
 
 
 def list_session_files() -> list[str]:

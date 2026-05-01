@@ -1,4 +1,4 @@
-"""Tests for claude_browse.core — parsing, formatting, path canonicalization.
+"""Tests for claude_browse.core: parsing, formatting, path canonicalization.
 
 No network. No real ~/.claude/projects access. Everything uses fixture files
 under tests/fixtures/.
@@ -67,25 +67,118 @@ def test_get_session_info_nonexistent_file():
     assert info is None
 
 
-# --- extract_user_text ------------------------------------------------------
+def test_get_session_info_modern_titles():
+    """Modern sessions emit ai-title (auto) and custom-title (manual).
+    Custom should win over AI when both are present.
+    """
+    info = core.get_session_info(str(FIXTURES / "modern_session.jsonl"))
+    assert info is not None
+    # Fixture has both ai-title and a later custom-title; custom wins
+    assert info["name"] == "Q3 platform hiring plan"
 
 
-def test_extract_user_text_only_user_messages():
-    text = core.extract_user_text(str(FIXTURES / "sample_session.jsonl"))
-    assert "login page crashes" in text
-    assert "email validation" in text
-    # Assistant text must NOT leak in
-    assert "login handler" not in text
-    assert "short-circuiting" not in text
+def test_get_session_info_ai_title_only():
+    """When only ai-title is present (most common modern shape), it's used."""
+    import json
+    import tempfile
+
+    events = [
+        {
+            "type": "ai-title",
+            "aiTitle": "Refactor billing service",
+            "sessionId": "x",
+            "cwd": "/Users/alice/x",
+            "timestamp": "2026-04-01T00:00:00Z",
+        },
+        {
+            "type": "user",
+            "sessionId": "x",
+            "cwd": "/Users/alice/x",
+            "timestamp": "2026-04-01T00:00:01Z",
+            "message": {"role": "user", "content": "let's refactor billing"},
+        },
+    ]
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".jsonl", delete=False
+    ) as f:
+        for e in events:
+            f.write(json.dumps(e) + "\n")
+        path = f.name
+    try:
+        info = core.get_session_info(path)
+        assert info["name"] == "Refactor billing service"
+    finally:
+        import os as _os
+        _os.unlink(path)
 
 
-def test_extract_user_text_lowercases():
-    text = core.extract_user_text(str(FIXTURES / "sample_session.jsonl"))
+def test_get_session_info_last_msg_skips_confirmations():
+    """last_msg should be the latest substantive user message, not 'yes go ahead'."""
+    info = core.get_session_info(str(FIXTURES / "modern_session.jsonl"))
+    assert info is not None
+    # The fixture's final user messages are "yes go ahead" and a tool-result
+    # wrapper. The latest substantive message is the topic switch to hiring.
+    assert "hiring plan" in info["last_msg"].lower()
+    assert "yes go ahead" not in info["last_msg"].lower()
+
+
+def test_get_session_info_first_and_last_can_differ():
+    """When the conversation drifts to a new topic, first_msg and last_msg
+    capture the start and the end. That's what the list view uses to
+    surface topic drift.
+    """
+    info = core.get_session_info(str(FIXTURES / "modern_session.jsonl"))
+    assert "signup is broken" in info["first_msg"].lower()
+    assert "hiring plan" in info["last_msg"].lower()
+
+
+def test_get_session_info_legacy_summary_still_works():
+    """Older sessions only had `summary` events. Still produce a name."""
+    info = core.get_session_info(str(FIXTURES / "sample_session.jsonl"))
+    assert info["name"] == "Debug login flow"
+
+
+# --- extract_search_corpus --------------------------------------------------
+
+
+def test_extract_search_corpus_includes_both_sides():
+    """User AND assistant text should be findable.
+
+    Users searching for a term don't remember whether they or the assistant
+    first said it. Older versions excluded assistant text and missed
+    obvious cases like assistant-introduced acronyms.
+    """
+    text = core.extract_search_corpus(str(FIXTURES / "sample_session.jsonl"))
+    assert "login page crashes" in text  # user
+    assert "email validation" in text  # user
+    assert "login handler" in text  # assistant
+    assert "short-circuiting" in text  # assistant
+
+
+def test_extract_search_corpus_lowercases():
+    text = core.extract_search_corpus(str(FIXTURES / "sample_session.jsonl"))
     assert text == text.lower()
 
 
-def test_extract_user_text_missing_file():
-    assert core.extract_user_text("/does/not/exist.jsonl") == ""
+def test_extract_search_corpus_missing_file():
+    assert core.extract_search_corpus("/does/not/exist.jsonl") == ""
+
+
+def test_extract_search_corpus_filters_user_noise():
+    """Tool-result wrappers and system-reminders shouldn't pollute the corpus."""
+    text = core.extract_search_corpus(str(FIXTURES / "modern_session.jsonl"))
+    # The modern fixture includes a user message wrapped in
+    # <task-notification>; it must not appear in the searchable text.
+    assert "task-notification" not in text
+    assert "tool noise that should be filtered" not in text
+
+
+def test_extract_user_text_alias_still_works():
+    """Backwards compat: existing code that imports extract_user_text gets
+    the same expanded corpus without behavior changes mid-import path."""
+    a = core.extract_user_text(str(FIXTURES / "sample_session.jsonl"))
+    b = core.extract_search_corpus(str(FIXTURES / "sample_session.jsonl"))
+    assert a == b
 
 
 # --- format_date ------------------------------------------------------------

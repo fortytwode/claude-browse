@@ -13,6 +13,7 @@ from .core import (
     SESSIONS_DIR,
     canonicalize_path,
     display_cwd,
+    extract_search_corpus,
     folder_name,
     format_date,
     get_session_info,
@@ -109,7 +110,13 @@ def get_preview(session_id):
             msg = data.get("message", data)
             msg_type = data.get("type", "")
 
-            if msg_type == "summary" and data.get("sessionName"):
+            # Read modern title events (custom + ai), with summary fallback
+            # so older sessions still show their name in the preview header.
+            if msg_type == "custom-title" and data.get("customTitle"):
+                name = data.get("customTitle")
+            elif msg_type == "ai-title" and data.get("aiTitle") and not name:
+                name = data.get("aiTitle")
+            elif msg_type == "summary" and data.get("sessionName") and not name:
                 name = data.get("sessionName")
             if not cwd and data.get("cwd"):
                 cwd = data.get("cwd")
@@ -260,10 +267,34 @@ def main() -> None:
         date = format_date(r["timestamp"])
         fname = folder_name(r["cwd"], prefixes)
         msgs = f"{r['msg_count']}msg"
-        first_msg = r["first_msg"][:100]
+        title = (r.get("name") or r["first_msg"])[:60]
         sid = r["session_id"] or "?"
         ffolder = display_cwd(r["cwd"])
-        line = f"{date:<8} {fname:<15} {msgs:<7} {first_msg}  ###{sid}###{ffolder}"
+
+        # Topic-drift suffix: Claude Code's auto-generated title locks on
+        # the first user message and never updates, so a long-running
+        # session that pivoted to a new topic looks misleading. Show the
+        # most recent substantive user message in dim ANSI when it's
+        # clearly a different topic from the title.
+        last = (r.get("last_msg") or "").strip()
+        title_words = {w for w in title.lower().split() if len(w) >= 4}
+        last_words = {w for w in last.lower().split() if len(w) >= 4}
+        suffix = ""
+        if last and last_words and len(title_words & last_words) <= 1:
+            # \033[2m = dim, \033[0m = reset
+            suffix = f"  \033[2m→ {last[:70]}\033[0m"
+
+        # Hidden 4th field carries the full searchable corpus (user +
+        # assistant text), so fzf's --nth=1,3,4 matches across topics
+        # discussed anywhere in the session, not just the first message.
+        corpus = extract_search_corpus(r["path"])
+        # Tabs would break the ### delimiter scheme; spaces are safe.
+        corpus_field = corpus.replace("###", " ").replace("\n", " ")[:32000]
+
+        line = (
+            f"{date:<8} {fname:<15} {msgs:<7} {title}{suffix}"
+            f"  ###{sid}###{ffolder}###{corpus_field}"
+        )
         lines.append(line)
 
     preview_script = tempfile.NamedTemporaryFile(
@@ -285,7 +316,10 @@ def main() -> None:
             "--header-first",
             "--delimiter=###",
             "--with-nth=1",
-            "--nth=1,3",
+            # Search across visible row, full cwd path, and the hidden
+            # corpus field, so a query matches a topic discussed mid- or
+            # late-session, not only what appeared in the first message.
+            "--nth=1,3,4",
             f"--preview=python3 {preview_script.name} {{}}",
             "--preview-window=right:45%:wrap",
             "--bind=shift-up:preview-up,shift-down:preview-down",
