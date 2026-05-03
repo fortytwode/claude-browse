@@ -300,3 +300,70 @@ def test_display_cwd_outside_home():
 def test_display_cwd_empty():
     assert core.display_cwd(None) == ""
     assert core.display_cwd("") == ""
+
+
+# --- extract_query_terms ---------------------------------------------------
+
+
+def test_extract_query_terms_single_word():
+    assert core.extract_query_terms("postiz") == ["postiz"]
+
+
+def test_extract_query_terms_multiple_words():
+    assert core.extract_query_terms("postiz tiktok") == ["postiz", "tiktok"]
+
+
+def test_extract_query_terms_phrase():
+    assert core.extract_query_terms('"tiktok ads"') == ["tiktok ads"]
+
+
+def test_extract_query_terms_word_and_phrase():
+    assert core.extract_query_terms('postiz "tiktok ads"') == [
+        "postiz",
+        "tiktok ads",
+    ]
+
+
+def test_extract_query_terms_empty():
+    assert core.extract_query_terms("") == []
+    assert core.extract_query_terms("   ") == []
+
+
+# --- highlight_terms -------------------------------------------------------
+
+
+def test_highlight_terms_wraps_match():
+    out = core.highlight_terms(
+        "the postiz pipeline", ["postiz"], open_marker="[", close_marker="]"
+    )
+    assert out == "the [postiz] pipeline"
+
+
+def test_highlight_terms_case_insensitive():
+    out = core.highlight_terms(
+        "Postiz and POSTIZ", ["postiz"], open_marker="[", close_marker="]"
+    )
+    assert out == "[Postiz] and [POSTIZ]"
+
+
+def test_highlight_terms_longer_first():
+    """Phrase 'tiktok ads' should highlight as one span, not 'tiktok' + ' ads'."""
+    out = core.highlight_terms(
+        "scaling tiktok ads spend",
+        ["tiktok", "tiktok ads"],
+        open_marker="[",
+        close_marker="]",
+    )
+    assert out == "scaling [tiktok ads] spend"
+
+
+def test_highlight_terms_empty_terms_returns_text_unchanged():
+    assert core.highlight_terms("hello world", []) == "hello world"
+
+
+def test_highlight_terms_regex_chars_escaped():
+    """Terms that look like regex shouldn't break the matcher."""
+    out = core.highlight_terms(
+        "use a.b? and c+d", ["a.b?"], open_marker="[", close_marker="]"
+    )
+    assert out == "use [a.b?] and c+d"

@@ -300,6 +300,58 @@ def folder_name(cwd: str | None, known_prefixes: Iterable[str] = ()) -> str:
     return rel.rstrip("/").rsplit("/", 1)[-1] if "/" in rel else (rel or "?")
 
 
+def extract_query_terms(query: str) -> list[str]:
+    """Pull the literal search terms out of a user query.
+
+    Mirrors fts.normalize_query's parser, but returns plain strings suitable
+    for case-insensitive substring highlighting (not FTS5 syntax). Bare words
+    each become a term; double-quoted spans become phrase terms — so a query
+    of `postiz "tiktok ads"` returns ["postiz", "tiktok ads"].
+    """
+    terms: list[str] = []
+    in_quote = False
+    current: list[str] = []
+    for ch in query:
+        if ch == '"':
+            if current:
+                terms.append("".join(current).strip())
+                current = []
+            in_quote = not in_quote
+        elif ch.isspace() and not in_quote:
+            if current:
+                terms.append("".join(current).strip())
+                current = []
+        else:
+            current.append(ch)
+    if current:
+        terms.append("".join(current).strip())
+    return [t for t in terms if t]
+
+
+def highlight_terms(
+    text: str,
+    terms: list[str],
+    open_marker: str = "\033[1;33m",
+    close_marker: str = "\033[0m",
+) -> str:
+    """Wrap each case-insensitive occurrence of any term with ANSI markers.
+
+    Longer terms match first so a phrase like "tiktok ads" highlights as one
+    span instead of "tiktok" leaving an orphaned " ads" beside it.
+    """
+    if not terms or not text:
+        return text
+    import re
+
+    ordered = sorted({t for t in terms if t}, key=len, reverse=True)
+    if not ordered:
+        return text
+    pattern = re.compile("|".join(re.escape(t) for t in ordered), re.IGNORECASE)
+    return pattern.sub(
+        lambda m: f"{open_marker}{m.group(0)}{close_marker}", text
+    )
+
+
 def display_cwd(cwd: str | None) -> str:
     """Home-abbreviated full path for display. ~/foo/bar style."""
     if not cwd:

@@ -78,17 +78,25 @@ def format_row(
     return f"{date:<8} {fname:<15} {msgs:<7} {title}{suffix}  ###{sid}###{ffolder}"
 
 
-def _write_preview_script(script_path: str, db_path: str) -> None:
+def _write_preview_script(
+    script_path: str, db_path: str, package_dir: str
+) -> None:
     """Write a helper script fzf calls to render session previews.
 
     The script looks up the session's path in the SQLite index (so it works
-    for any session the FTS search surfaces, not just the initial set).
+    for any session the FTS search surfaces, not just the initial set), and
+    when fzf passes a non-empty query as argv[2] it highlights occurrences
+    of each query term in the printed messages.
     """
     script = f"""#!/usr/bin/env python3
 import sys
+sys.path.insert(0, {package_dir!r})
+
 import json
 import os
 import sqlite3
+
+from claude_browse.core import extract_query_terms, highlight_terms
 
 DB_PATH = {db_path!r}
 MAX_PREVIEW = 20
@@ -105,7 +113,7 @@ def _lookup_path(session_id):
         conn.close()
 
 
-def get_preview(session_id):
+def get_preview(session_id, query=""):
     path = _lookup_path(session_id)
     if not path or not os.path.exists(path):
         print("Session file not found.")
@@ -164,8 +172,13 @@ def get_preview(session_id):
                     wrapped = text[:140]
                     all_messages.append((msg_num, wrapped))
 
+    terms = extract_query_terms(query)
+
+    def hl(s):
+        return highlight_terms(s, terms) if terms else s
+
     if name:
-        print(f"Session: {{name}}")
+        print(f"Session: {{hl(name)}}")
     if cwd:
         home = os.path.expanduser("~")
         if cwd.startswith(home):
@@ -176,21 +189,38 @@ def get_preview(session_id):
     print(f"Total user messages: {{total_user}}")
     print()
 
+    # If a query is active and at least one of the latest MAX_PREVIEW user
+    # messages contains a match, show those (highlighted). If a query is
+    # active but no match landed in the recent window, prefer matched
+    # messages from earlier in the conversation so the user actually sees
+    # *why* this session matched.
     recent = all_messages[-MAX_PREVIEW:]
+    if terms and not any(
+        any(t.lower() in m.lower() for t in terms) for _, m in recent
+    ):
+        matched = [
+            (n, m) for n, m in all_messages
+            if any(t.lower() in m.lower() for t in terms)
+        ]
+        if matched:
+            recent = matched[-MAX_PREVIEW:]
     recent.reverse()
 
-    print("Messages (latest first):")
+    label = "Messages (matches first):" if terms else "Messages (latest first):"
+    print(label)
     print()
     for num, text in recent:
-        print(f"  {{num}}. {{text}}")
+        print(f"  {{num}}. {{hl(text)}}")
+
 
 if __name__ == "__main__":
     line = sys.argv[1] if len(sys.argv) > 1 else ""
+    query = sys.argv[2] if len(sys.argv) > 2 else ""
     if "###" in line:
         parts = line.split("###")
         sid = parts[1].strip() if len(parts) >= 2 else ""
         if sid:
-            get_preview(sid)
+            get_preview(sid, query)
 """
 
     with open(script_path, "w") as f:
@@ -356,7 +386,7 @@ def main() -> None:
         mode="w", suffix=".py", delete=False, prefix="claude_browse_preview_"
     )
     preview_script.close()
-    _write_preview_script(preview_script.name, fts.DB_PATH)
+    _write_preview_script(preview_script.name, fts.DB_PATH, package_dir)
 
     search_script = tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", delete=False, prefix="claude_browse_search_"
@@ -383,7 +413,7 @@ def main() -> None:
             # keystroke re-runs the search script, which prints fresh rows.
             "--disabled",
             f"--bind=change:reload(python3 {search_script.name} {{q}})",
-            f"--preview=python3 {preview_script.name} {{}}",
+            f"--preview=python3 {preview_script.name} {{}} {{q}}",
             "--preview-window=right:45%:wrap",
             "--bind=shift-up:preview-up,shift-down:preview-down",
             "--bind=ctrl-s:print(SAFE:)+accept",

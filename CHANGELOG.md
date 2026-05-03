@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [1.2.1] - 2026-05-03
+## [1.2.2] - 2026-05-03
+
+### Added
+- Preview pane now highlights query matches. When you type a query, each
+  occurrence of the search terms in the preview is wrapped in bold yellow,
+  matching the row-snippet treatment. fzf's `{q}` is now passed to the
+  preview script alongside the row.
+- When a query is active, the preview prefers user messages that contain
+  a match. If no match lands in the latest 20 messages, the preview falls
+  back to the matched messages from earlier in the conversation, so you
+  can see *why* the session matched without scrolling. Header label
+  switches from "Messages (latest first)" to "Messages (matches first)".
+- New `core.extract_query_terms` and `core.highlight_terms` helpers
+  (10 unit tests), reused by the preview script via the package import
+  path the search script already uses.
 
 ### Fixed
 - Initial list ordering regressed in 1.2.0. The SQLite migration switched
@@ -128,7 +142,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (keyword resume)
 - `install.sh` symlinks scripts into `~/.local/bin/`
 
-[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/fortytwode/claude-browse/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/fortytwode/claude-browse/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/fortytwode/claude-browse/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/fortytwode/claude-browse/compare/v1.0.0...v1.1.0
