@@ -214,9 +214,10 @@ def search(
 ) -> list[dict]:
     """Run an FTS5 query against the session index.
 
-    Empty or whitespace-only query returns recent sessions by mtime, so the
-    initial fzf list looks just like before. Non-empty query is normalized
-    into FTS5 syntax (see normalize_query) and ranked by BM25.
+    Empty or whitespace-only query returns recent sessions by timestamp, so
+    the initial fzf list looks just like before. Non-empty query is normalized
+    into FTS5 syntax (see normalize_query); FTS5 filters, and the result set
+    is then ordered reverse-chronologically (newest session first).
     """
     if not query.strip():
         return list_recent(conn, limit)
@@ -225,6 +226,9 @@ def search(
     if not fts_query:
         return list_recent(conn, limit)
 
+    # Filter by FTS5 match, but order by recency, not BM25. Users already
+    # know what they searched for; what they want is "the newest session
+    # that mentions runna," not "the session where runna scored best."
     sql = """
         SELECT s.sid, s.path, s.cwd, s.timestamp, s.title, s.first_msg,
                s.last_msg, s.msg_count, s.mtime,
@@ -232,7 +236,7 @@ def search(
         FROM sessions_fts
         JOIN sessions s ON s.sid = sessions_fts.sid
         WHERE sessions_fts MATCH ?
-        ORDER BY bm25(sessions_fts)
+        ORDER BY COALESCE(s.timestamp, '') DESC, s.mtime DESC
         LIMIT ?
     """
     try:
@@ -244,13 +248,19 @@ def search(
 
 
 def list_recent(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
-    """Return recent sessions for the empty-query / initial-display state."""
+    """Return recent sessions for the empty-query / initial-display state.
+
+    Ordered by session *start* time (the JSONL's first timestamp), not file
+    mtime. Resuming an old session bumps its mtime but the user still thinks
+    of "newest" as "most recently started." mtime is kept on the row as a
+    tiebreaker for sessions with missing/equal timestamps.
+    """
     rows = conn.execute(
         """
         SELECT sid, path, cwd, timestamp, title, first_msg, last_msg,
                msg_count, mtime, '' AS context
         FROM sessions
-        ORDER BY mtime DESC
+        ORDER BY COALESCE(timestamp, '') DESC, mtime DESC
         LIMIT ?
         """,
         (limit,),

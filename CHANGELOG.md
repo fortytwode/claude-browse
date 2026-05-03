@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-05-03
+
+### Fixed
+- Initial list ordering regressed in 1.2.0. The SQLite migration switched
+  the empty-query sort from session start time (`timestamp DESC`) to file
+  mtime (`mtime DESC`), so resuming an old session bumped it above sessions
+  that were actually started later. Restored "newest started first" as the
+  default, with mtime kept only as a tiebreaker.
+
+### Changed
+- Search results are now also ordered reverse-chronologically by session
+  start time, not by FTS5's BM25 relevance. Users already know what they
+  searched for; what they want is "the newest session that mentions X,"
+  not "the session where X scored best."
+
 ## [1.2.0] - 2026-05-01
 
 ### Added
@@ -113,7 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (keyword resume)
 - `install.sh` symlinks scripts into `~/.local/bin/`
 
-[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/fortytwode/claude-browse/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/fortytwode/claude-browse/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/fortytwode/claude-browse/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/fortytwode/claude-browse/compare/v0.2.0...v1.0.0
