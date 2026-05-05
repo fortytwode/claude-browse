@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-05-05
+
 ### Changed
 - The list view (and the empty-query default) now sorts by **last activity**
   instead of session start time. A thread you started weeks ago and resumed
@@ -16,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   latter only when it differs from the start time).
 - Schema bumped to v2 (added `last_timestamp` column). The cache is pure
   derived state, so `claude-browse` drops and rebuilds the index on first
-  run after upgrade — takes a few seconds for hundreds of sessions.
+  run after upgrade. Takes a few seconds for hundreds of sessions.
 
 ## [1.2.2] - 2026-05-03
 
