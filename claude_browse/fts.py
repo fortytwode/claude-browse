@@ -22,7 +22,9 @@ from .core import (
 )
 
 DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
-SCHEMA_VERSION = 1
+# v2: added last_timestamp column so the list view can sort by most recent
+# activity instead of session start time.
+SCHEMA_VERSION = 2
 
 
 def open_db(path: str = DB_PATH) -> sqlite3.Connection:
@@ -35,23 +37,46 @@ def open_db(path: str = DB_PATH) -> sqlite3.Connection:
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
-    """Create tables on first run; no-op afterwards."""
+    """Create tables on first run; migrate (drop+recreate) on schema bump.
+
+    The DB is pure cache, so a stale schema version just blows the tables
+    away and the next reindex() rebuilds from JSONL. Cheaper than writing
+    real ALTER TABLE migrations for what's effectively a derived index.
+    """
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER PRIMARY KEY
         );
+        """
+    )
+    cur = conn.execute("SELECT version FROM schema_version LIMIT 1")
+    row = cur.fetchone()
+    existing_version = row[0] if row else None
+    if existing_version is not None and existing_version != SCHEMA_VERSION:
+        conn.executescript(
+            """
+            DROP TABLE IF EXISTS sessions_fts;
+            DROP TABLE IF EXISTS sessions;
+            DELETE FROM schema_version;
+            """
+        )
+        existing_version = None
+
+    conn.executescript(
+        """
         CREATE TABLE IF NOT EXISTS sessions (
-            sid         TEXT PRIMARY KEY,
-            path        TEXT NOT NULL UNIQUE,
-            cwd         TEXT,
-            timestamp   TEXT,
-            title       TEXT,
-            first_msg   TEXT,
-            last_msg    TEXT,
-            msg_count   INTEGER NOT NULL DEFAULT 0,
-            mtime       REAL NOT NULL,
-            indexed_at  REAL NOT NULL
+            sid             TEXT PRIMARY KEY,
+            path            TEXT NOT NULL UNIQUE,
+            cwd             TEXT,
+            timestamp       TEXT,
+            last_timestamp  TEXT,
+            title           TEXT,
+            first_msg       TEXT,
+            last_msg        TEXT,
+            msg_count       INTEGER NOT NULL DEFAULT 0,
+            mtime           REAL NOT NULL,
+            indexed_at      REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_mtime
             ON sessions(mtime DESC);
@@ -62,8 +87,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
-    cur = conn.execute("SELECT version FROM schema_version LIMIT 1")
-    if cur.fetchone() is None:
+    if existing_version is None:
         conn.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
     conn.commit()
 
@@ -125,13 +149,14 @@ def _index_file(
     conn.execute(
         """
         INSERT INTO sessions (
-            sid, path, cwd, timestamp, title, first_msg, last_msg,
-            msg_count, mtime, indexed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            sid, path, cwd, timestamp, last_timestamp, title, first_msg,
+            last_msg, msg_count, mtime, indexed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(sid) DO UPDATE SET
             path = excluded.path,
             cwd = excluded.cwd,
             timestamp = excluded.timestamp,
+            last_timestamp = excluded.last_timestamp,
             title = excluded.title,
             first_msg = excluded.first_msg,
             last_msg = excluded.last_msg,
@@ -144,6 +169,7 @@ def _index_file(
             path,
             canonicalize_path(info.get("cwd")),
             info.get("timestamp"),
+            info.get("last_timestamp"),
             info.get("name"),
             info.get("first_msg"),
             info.get("last_msg"),
@@ -230,13 +256,13 @@ def search(
     # know what they searched for; what they want is "the newest session
     # that mentions runna," not "the session where runna scored best."
     sql = """
-        SELECT s.sid, s.path, s.cwd, s.timestamp, s.title, s.first_msg,
-               s.last_msg, s.msg_count, s.mtime,
+        SELECT s.sid, s.path, s.cwd, s.timestamp, s.last_timestamp, s.title,
+               s.first_msg, s.last_msg, s.msg_count, s.mtime,
                snippet(sessions_fts, 1, '\x01', '\x02', '…', 12) AS context
         FROM sessions_fts
         JOIN sessions s ON s.sid = sessions_fts.sid
         WHERE sessions_fts MATCH ?
-        ORDER BY COALESCE(s.timestamp, '') DESC, s.mtime DESC
+        ORDER BY COALESCE(s.last_timestamp, s.timestamp, '') DESC, s.mtime DESC
         LIMIT ?
     """
     try:
@@ -250,17 +276,17 @@ def search(
 def list_recent(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
     """Return recent sessions for the empty-query / initial-display state.
 
-    Ordered by session *start* time (the JSONL's first timestamp), not file
-    mtime. Resuming an old session bumps its mtime but the user still thinks
-    of "newest" as "most recently started." mtime is kept on the row as a
-    tiebreaker for sessions with missing/equal timestamps.
+    Ordered by last activity (the JSONL's most recent event timestamp), so
+    a session resumed today floats to the top even if it was started weeks
+    ago. Falls back to start timestamp when last_timestamp is missing
+    (older index rows, malformed sessions); mtime is the final tiebreaker.
     """
     rows = conn.execute(
         """
-        SELECT sid, path, cwd, timestamp, title, first_msg, last_msg,
-               msg_count, mtime, '' AS context
+        SELECT sid, path, cwd, timestamp, last_timestamp, title, first_msg,
+               last_msg, msg_count, mtime, '' AS context
         FROM sessions
-        ORDER BY COALESCE(timestamp, '') DESC, mtime DESC
+        ORDER BY COALESCE(last_timestamp, timestamp, '') DESC, mtime DESC
         LIMIT ?
         """,
         (limit,),
@@ -272,8 +298,8 @@ def get_by_sid(conn: sqlite3.Connection, sid: str) -> dict | None:
     """Look up one session by its ID. Used to resolve fzf's selection."""
     row = conn.execute(
         """
-        SELECT sid, path, cwd, timestamp, title, first_msg, last_msg,
-               msg_count, mtime, '' AS context
+        SELECT sid, path, cwd, timestamp, last_timestamp, title, first_msg,
+               last_msg, msg_count, mtime, '' AS context
         FROM sessions
         WHERE sid = ?
         """,
@@ -288,10 +314,11 @@ def _row_to_dict(r) -> dict:
         "path": r[1],
         "cwd": r[2],
         "timestamp": r[3],
-        "name": r[4],
-        "first_msg": r[5],
-        "last_msg": r[6],
-        "msg_count": r[7] or 0,
-        "mtime": r[8],
-        "context": r[9],
+        "last_timestamp": r[4],
+        "name": r[5],
+        "first_msg": r[6],
+        "last_msg": r[7],
+        "msg_count": r[8] or 0,
+        "mtime": r[9],
+        "context": r[10],
     }

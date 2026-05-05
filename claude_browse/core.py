@@ -78,6 +78,7 @@ def get_session_info(jsonl_path: str) -> dict | None:
     last_user_msg = None
     session_id = None
     timestamp = None
+    last_timestamp = None
     cwd = None
     ai_title = None
     custom_title = None
@@ -106,8 +107,10 @@ def get_session_info(jsonl_path: str) -> dict | None:
                     session_id = data.get("sessionId")
                 if not cwd and data.get("cwd"):
                     cwd = data.get("cwd")
-                if not timestamp and data.get("timestamp"):
-                    timestamp = data.get("timestamp")
+                if data.get("timestamp"):
+                    if not timestamp:
+                        timestamp = data.get("timestamp")
+                    last_timestamp = data.get("timestamp")
 
                 if msg.get("role") == "user":
                     msg_count += 1
@@ -142,6 +145,7 @@ def get_session_info(jsonl_path: str) -> dict | None:
         "first_msg": (first_user_msg or "").replace("\n", " ").strip()[:200],
         "last_msg": (last_user_msg or "").replace("\n", " ").strip()[:200],
         "timestamp": timestamp,
+        "last_timestamp": last_timestamp,
         "cwd": cwd,
         "name": name,
         "msg_count": msg_count,

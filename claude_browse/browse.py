@@ -47,7 +47,7 @@ def format_row(
     The trailing `###{sid}###{cwd}` fields are hidden from display via
     fzf's --with-nth=1 but remain on the line for selection-time parsing.
     """
-    date = format_date(info.get("timestamp"))
+    date = format_date(info.get("last_timestamp") or info.get("timestamp"))
     cwd = info.get("cwd")
     fname = folder_name(cwd, prefixes)
     msgs = f"{info.get('msg_count', 0)}msg"
@@ -123,6 +123,7 @@ def get_preview(session_id, query=""):
     msg_num = 0
     cwd = None
     timestamp = None
+    last_timestamp = None
     name = None
     total_user = 0
 
@@ -146,8 +147,10 @@ def get_preview(session_id, query=""):
                 name = data.get("sessionName")
             if not cwd and data.get("cwd"):
                 cwd = data.get("cwd")
-            if not timestamp and data.get("timestamp"):
-                timestamp = data.get("timestamp")
+            if data.get("timestamp"):
+                if not timestamp:
+                    timestamp = data.get("timestamp")
+                last_timestamp = data.get("timestamp")
 
             if msg.get("role") == "user":
                 msg_num += 1
@@ -186,6 +189,8 @@ def get_preview(session_id, query=""):
         print(f"Folder:  {{cwd}}")
     if timestamp:
         print(f"Started: {{timestamp[:19].replace('T', ' ')}}")
+    if last_timestamp and last_timestamp != timestamp:
+        print(f"Last activity: {{last_timestamp[:19].replace('T', ' ')}}")
     print(f"Total user messages: {{total_user}}")
     print()
 

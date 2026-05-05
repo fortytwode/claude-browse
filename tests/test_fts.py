@@ -33,17 +33,20 @@ def db():
 def _seed(conn, sid: str, corpus: str, **meta) -> None:
     """Insert one session with a synthetic corpus, bypassing the file walk."""
     now = time.time()
+    timestamp = meta.get("timestamp", "2026-05-01T10:00:00Z")
     conn.execute(
         """
-        INSERT INTO sessions (sid, path, cwd, timestamp, title, first_msg,
-                              last_msg, msg_count, mtime, indexed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sessions (sid, path, cwd, timestamp, last_timestamp,
+                              title, first_msg, last_msg, msg_count, mtime,
+                              indexed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             sid,
             meta.get("path", f"/tmp/{sid}.jsonl"),
             meta.get("cwd", "/tmp"),
-            meta.get("timestamp", "2026-05-01T10:00:00Z"),
+            timestamp,
+            meta.get("last_timestamp", timestamp),
             meta.get("title", f"Title for {sid}"),
             meta.get("first_msg", f"first message for {sid}"),
             meta.get("last_msg", ""),
@@ -145,6 +148,30 @@ def test_search_empty_returns_recent(db):
 
     results = fts.search(db, "")
     assert [r["session_id"] for r in results] == ["newer", "older"]
+
+
+def test_recent_sorts_by_last_activity_not_start(db):
+    """An old session resumed today should outrank a newer session that
+    hasn't been touched in months."""
+    _seed(
+        db,
+        "old_resumed",
+        "x",
+        mtime=99.0,
+        timestamp="2026-01-01T00:00:00Z",
+        last_timestamp="2026-05-05T00:00:00Z",
+    )
+    _seed(
+        db,
+        "newer_dormant",
+        "y",
+        mtime=1.0,
+        timestamp="2026-04-01T00:00:00Z",
+        last_timestamp="2026-04-01T00:30:00Z",
+    )
+
+    results = fts.list_recent(db)
+    assert [r["session_id"] for r in results] == ["old_resumed", "newer_dormant"]
 
 
 def test_search_invalid_fts_query_returns_empty(db):
