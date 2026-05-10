@@ -260,7 +260,13 @@ LIMIT = {limit}
 q = sys.argv[1] if len(sys.argv) > 1 else ""
 conn = fts.open_db(DB_PATH)
 if q.strip():
-    results = fts.search(conn, q, limit=LIMIT)
+    # ranker_v1: multi-column BM25 + exp-decay recency. See fts.search_ranked.
+    # Set CLAUDE_BROWSE_RANKER=current to fall back to recency-only.
+    import os as _os
+    if _os.environ.get("CLAUDE_BROWSE_RANKER") == "current":
+        results = fts.search(conn, q, limit=LIMIT)
+    else:
+        results = fts.search_ranked(conn, q, limit=LIMIT)
 else:
     results = fts.list_recent(conn, limit=LIMIT)
 

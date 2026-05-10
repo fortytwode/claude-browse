@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Search now ranks by relevance, not just recency. Previous behavior was
+  "filter by FTS5 token match, then sort by last activity," which meant
+  any session that mentioned a term once (a Toggl rollup, a passing
+  mention in a status doc) could outrank a session that was actually
+  *about* that term. New ranker (`fts.search_ranked`) blends multi-column
+  weighted BM25 with exponential-decay recency.
+- Schema bumped to v3. The single `corpus` column in `sessions_fts` is
+  now six fielded columns (`cwd`, `title`, `first_msg`, `user_text`,
+  `asst_text`, `boilerplate`) so each can carry a different BM25 weight.
+  cwd is the strongest topic anchor (weight 10); assistant text is
+  weakest (0.3); Toggl-style rollup lines like `- musopia: 1.0h` are
+  routed to a low-weight `boilerplate` column so they're still
+  retrievable but stop dominating client-name queries.
+- Recency contribution is `alpha * exp(-age_days / half_life)` with
+  `alpha=3`, `half_life=30d`. A 30-day-old strong topical match can beat
+  a 1-day-old weak mention, but recent strong matches still win.
+- First launch after upgrade rebuilds the index from JSONL (~10s for
+  ~4000 sessions). Subsequent launches use the existing per-file mtime
+  fast-path.
+
+### Added
+- `eval/` directory: pluggable ranker registry, MRR / P@1 / NDCG@5 /
+  Recall@10 metrics, interactive labeler. Per-user labeled query set
+  lives outside the repo at `~/.claude/cache/claude-browse-eval/queries.json`
+  (override with `$CLAUDE_BROWSE_EVAL_QUERIES`).
+- `CLAUDE_BROWSE_RANKER=current` escape hatch reverts the picker to the
+  pre-v3 recency-only ranker without uninstalling.
+
 ## [1.3.0] - 2026-05-05
 
 ### Changed

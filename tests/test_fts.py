@@ -31,7 +31,13 @@ def db():
 
 
 def _seed(conn, sid: str, corpus: str, **meta) -> None:
-    """Insert one session with a synthetic corpus, bypassing the file walk."""
+    """Insert one session with a synthetic corpus, bypassing the file walk.
+
+    `corpus` is treated as user_text by default (preserves pre-v3 test
+    semantics: 'this text exists' -> findable). Per-column overrides via
+    fts_cwd / fts_title / fts_first_msg / fts_user / fts_asst / fts_boiler
+    let v1-ranker tests target specific fields.
+    """
     now = time.time()
     timestamp = meta.get("timestamp", "2026-05-01T10:00:00Z")
     conn.execute(
@@ -56,7 +62,18 @@ def _seed(conn, sid: str, corpus: str, **meta) -> None:
         ),
     )
     conn.execute(
-        "INSERT INTO sessions_fts (sid, corpus) VALUES (?, ?)", (sid, corpus)
+        """INSERT INTO sessions_fts
+           (sid, cwd, title, first_msg, user_text, asst_text, boilerplate)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            sid,
+            meta.get("fts_cwd", meta.get("cwd", "")),
+            meta.get("fts_title", ""),
+            meta.get("fts_first_msg", ""),
+            meta.get("fts_user", corpus),
+            meta.get("fts_asst", ""),
+            meta.get("fts_boiler", ""),
+        ),
     )
     conn.commit()
 

@@ -10,10 +10,23 @@ import getpass
 import glob
 import json
 import os
+import re
 from collections.abc import Iterable
 from datetime import datetime, timezone
 
 SESSIONS_DIR = os.path.expanduser("~/.claude/projects")
+
+# Toggl-style rollup lines ('- musopia: 1.0h', '* maxrewards: 0.5h') are
+# templated noise: they mention every client equally and dominate FTS hits
+# for client names. Routed to a separate low-weight index column rather than
+# stripped, so a deliberate query like '0.5h' still retrieves them.
+_BOILERPLATE_RE = re.compile(
+    r"^\s*[-*]\s*[\w][\w\s.&'-]*?:\s*\d+(?:\.\d+)?\s*h\s*$"
+)
+
+
+def _is_boilerplate_line(line: str) -> bool:
+    return bool(_BOILERPLATE_RE.match(line))
 
 
 _NOISE_PREFIXES = (
@@ -152,19 +165,33 @@ def get_session_info(jsonl_path: str) -> dict | None:
     }
 
 
-def extract_search_corpus(jsonl_path: str) -> str:
-    """Concatenate user + assistant message text from a session, lowercased.
+def extract_fielded_corpus(jsonl_path: str) -> dict[str, str]:
+    """Extract per-field text for the multi-column FTS index.
 
-    Used for keyword search. Includes both sides of the conversation so a
-    query for an acronym or named concept the assistant introduced (e.g.
-    "BANP", "search corpus") still finds the session. Users typically
-    don't remember whether *they* or the *assistant* first said the word.
+    Splits a session's text into named fields so the ranker can weight each
+    one differently (cwd is a strong topic anchor, assistant text is the
+    weakest signal, etc.):
 
-    Tool-use blocks, tool results, and system context are filtered out via
-    the typed-parts shape (only `type: text` entries contribute), so paths
-    in `cwd:` lines and CLAUDE.md contents do not leak in.
+      cwd         - working directory the session was started in
+      title       - custom-title > ai-title > legacy summary
+      first_msg   - the first substantive user message (the brief)
+      user_text   - subsequent user messages, minus boilerplate lines
+      asst_text   - all assistant message text
+      boilerplate - Toggl-style rollup lines split out from user_text
+
+    All fields lowercased. cwd kept raw (slashes/dashes); FTS5's unicode61
+    tokenizer handles path component splitting.
     """
-    parts: list[str] = []
+    cwd = ""
+    title_custom = ""
+    title_ai = ""
+    title_legacy = ""
+    first_msg = ""
+    first_user_seen = False
+    user_parts: list[str] = []
+    asst_parts: list[str] = []
+    boilerplate_parts: list[str] = []
+
     try:
         with open(jsonl_path) as f:
             for line in f:
@@ -172,21 +199,75 @@ def extract_search_corpus(jsonl_path: str) -> str:
                     data = json.loads(line.strip())
                 except json.JSONDecodeError:
                     continue
+
+                if not cwd and data.get("cwd"):
+                    cwd = data["cwd"]
+
+                msg_type = data.get("type", "")
+                if msg_type == "custom-title":
+                    title_custom = data.get("customTitle") or title_custom
+                elif msg_type == "ai-title":
+                    title_ai = data.get("aiTitle") or title_ai
+                elif msg_type == "summary":
+                    title_legacy = data.get("sessionName") or title_legacy
+
                 msg = data.get("message", data)
                 role = msg.get("role")
                 if role not in ("user", "assistant"):
                     continue
+
                 text = _extract_text(msg.get("content", ""))
                 if not text:
                     continue
+
                 if role == "user":
                     cleaned = text.lstrip()
                     if any(cleaned.startswith(p) for p in _NOISE_PREFIXES):
                         continue
-                parts.append(text)
+                    keep_lines: list[str] = []
+                    for ln in text.split("\n"):
+                        if _is_boilerplate_line(ln):
+                            boilerplate_parts.append(ln.strip())
+                        else:
+                            keep_lines.append(ln)
+                    body = "\n".join(keep_lines).strip()
+                    if not body:
+                        continue
+                    if not first_user_seen:
+                        first_msg = body
+                        first_user_seen = True
+                    else:
+                        user_parts.append(body)
+                else:
+                    asst_parts.append(text)
     except Exception:
-        return ""
-    return " ".join(parts).lower()
+        return {
+            "cwd": "", "title": "", "first_msg": "",
+            "user_text": "", "asst_text": "", "boilerplate": "",
+        }
+
+    title = title_custom or title_ai or title_legacy or ""
+    return {
+        "cwd": cwd,
+        "title": title.lower(),
+        "first_msg": first_msg.lower(),
+        "user_text": " ".join(user_parts).lower(),
+        "asst_text": " ".join(asst_parts).lower(),
+        "boilerplate": " ".join(boilerplate_parts).lower(),
+    }
+
+
+def extract_search_corpus(jsonl_path: str) -> str:
+    """Backward-compat: returns the user + assistant text concatenated.
+
+    Equivalent to the old single-blob corpus. Used by the test helper and
+    any external caller; new internal code uses extract_fielded_corpus().
+    """
+    fields = extract_fielded_corpus(jsonl_path)
+    return " ".join(
+        v for k, v in fields.items()
+        if k in ("first_msg", "user_text", "asst_text") and v
+    )
 
 
 # Backwards-compatible alias. Older callers of extract_user_text get the
