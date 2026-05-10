@@ -62,14 +62,23 @@ def format_row(
         # FTS5 snippet: \x01 wraps matched terms, \x02 ends the wrap. Render
         # them as bold yellow (\033[1;33m / \033[0m) inside dim grey text so
         # the matched terms pop out of the otherwise quiet snippet.
+        # Newlines/tabs MUST be flattened: fzf treats embedded \n as a row
+        # delimiter, which would split one logical session row into two
+        # visual rows (only the second carries the ###sid### tail, so
+        # selecting the first becomes a silent no-op). Markdown tables and
+        # multi-line first-message content hit this regularly under v3's
+        # multi-column snippets.
         snippet = (
             info["context"]
             .replace("\x01", "\033[0m\033[1;33m")
             .replace("\x02", "\033[0m\033[2m")
+            .replace("\n", " ")
+            .replace("\r", " ")
+            .replace("\t", " ")
         )
         suffix = f"  \033[2m→ {snippet}\033[0m"
     else:
-        last = (info.get("last_msg") or "").strip()
+        last = (info.get("last_msg") or "").strip().replace("\n", " ").replace("\r", " ").replace("\t", " ")
         title_words = {w for w in title.lower().split() if len(w) >= 4}
         last_words = {w for w in last.lower().split() if len(w) >= 4}
         if last and last_words and len(title_words & last_words) <= 1:
