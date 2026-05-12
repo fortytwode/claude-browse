@@ -6,213 +6,31 @@ session data from disk. No network calls ever — by design.
 
 from __future__ import annotations
 
-import glob
-import json
 import os
-import sqlite3
 import tempfile
 from collections.abc import Iterable
 from datetime import datetime, timezone
 
-from .providers import get_provider
-from .providers.claude import SESSIONS_DIR
-from .providers.codex import (
-    _CODEX_HISTORY_CACHE,
-    CODEX_HISTORY_PATH,
-    CODEX_STATE_DB,
-)
-from .providers.common import (
-    canonicalize_path,
-)
-from .providers.common import (
-    epoch_ms_to_iso as _epoch_ms_to_iso,
-)
-from .providers.common import (
-    epoch_s_to_iso as _epoch_s_to_iso,
-)
-from .providers.common import (
-    extract_text as _extract_text,
-)
-from .providers.common import (
-    flatten_text as _flatten_text,
-)
-from .providers.common import (
-    is_noise_text as _is_noise_text,
-)
-from .providers.common import (
-    is_substantive_text as _is_substantive_text,
-)
-from .providers.common import (
-    split_boilerplate as _split_boilerplate,
-)
+from .providers import claude as claude_provider
+from .providers import codex as codex_provider
+from .providers import common as provider_common
+from .providers import get_provider, provider_ids
+
+SESSIONS_DIR = claude_provider.SESSIONS_DIR
+CODEX_STATE_DB = codex_provider.CODEX_STATE_DB
+CODEX_HISTORY_PATH = codex_provider.CODEX_HISTORY_PATH
+_CODEX_HISTORY_CACHE = codex_provider._CODEX_HISTORY_CACHE
+canonicalize_path = provider_common.canonicalize_path
 
 
 def get_session_info(jsonl_path: str) -> dict | None:
-    """Extract session metadata from a Claude session JSONL file.
-
-    Returns None if the file is unreadable. Missing fields are returned as
-    empty strings or 0 — callers should check for truthiness, not None.
-
-    Reads three title-event shapes for compatibility:
-      - "ai-title" (modern Claude Code, auto-generated, locked early)
-      - "custom-title" (modern Claude Code, user-set via /name)
-      - "summary" (legacy, sessionName field)
-    Custom titles win over AI titles win over legacy summaries.
-    """
-    first_user_msg = None
-    last_user_msg = None
-    session_id = None
-    timestamp = None
-    last_timestamp = None
-    cwd = None
-    ai_title = None
-    custom_title = None
-    legacy_name = None
-    msg_count = 0
-
-    try:
-        with open(jsonl_path) as f:
-            for line in f:
-                try:
-                    data = json.loads(line.strip())
-                except json.JSONDecodeError:
-                    continue
-
-                msg = data.get("message", data)
-                msg_type = data.get("type", "")
-
-                if msg_type == "custom-title":
-                    custom_title = data.get("customTitle") or custom_title
-                elif msg_type == "ai-title":
-                    ai_title = data.get("aiTitle") or ai_title
-                elif msg_type == "summary":
-                    legacy_name = data.get("sessionName") or legacy_name
-
-                if not session_id and data.get("sessionId"):
-                    session_id = data.get("sessionId")
-                if not cwd and data.get("cwd"):
-                    cwd = data.get("cwd")
-                if data.get("timestamp"):
-                    if not timestamp:
-                        timestamp = data.get("timestamp")
-                    last_timestamp = data.get("timestamp")
-
-                if msg.get("role") == "user":
-                    msg_count += 1
-                    text = _extract_text(msg.get("content", ""))
-                    if text and len(text) > 3:
-                        cleaned = _flatten_text(text)
-                        if not _is_noise_text(cleaned):
-                            if not first_user_msg:
-                                first_user_msg = cleaned
-                            if _is_substantive_text(cleaned):
-                                last_user_msg = cleaned
-                elif msg.get("role") == "assistant":
-                    msg_count += 1
-    except Exception:
-        return None
-
-    name = custom_title or ai_title or legacy_name
-
-    return {
-        "path": jsonl_path,
-        "provider": "claude",
-        "session_id": session_id,
-        "first_msg": (first_user_msg or "").strip()[:200],
-        "last_msg": (last_user_msg or "").strip()[:200],
-        "timestamp": timestamp,
-        "last_timestamp": last_timestamp,
-        "cwd": cwd,
-        "name": name,
-        "msg_count": msg_count,
-    }
+    """Backward-compatible Claude session metadata wrapper."""
+    return get_provider("claude").session_info(jsonl_path)
 
 
 def extract_fielded_corpus(jsonl_path: str) -> dict[str, str]:
-    """Extract per-field text for the multi-column FTS index.
-
-    Splits a Claude session's text into named fields so the ranker can weight
-    each one differently (cwd is a strong topic anchor, assistant text is the
-    weakest signal, etc.):
-
-      cwd         - working directory the session was started in
-      title       - custom-title > ai-title > legacy summary
-      first_msg   - the first substantive user message (the brief)
-      user_text   - subsequent user messages, minus boilerplate lines
-      asst_text   - all assistant message text
-      boilerplate - Toggl-style rollup lines split out from user_text
-
-    All fields lowercased. cwd kept raw (slashes/dashes); FTS5's unicode61
-    tokenizer handles path component splitting.
-    """
-    cwd = ""
-    title_custom = ""
-    title_ai = ""
-    title_legacy = ""
-    first_msg = ""
-    first_user_seen = False
-    user_parts: list[str] = []
-    asst_parts: list[str] = []
-    boilerplate_parts: list[str] = []
-
-    try:
-        with open(jsonl_path) as f:
-            for line in f:
-                try:
-                    data = json.loads(line.strip())
-                except json.JSONDecodeError:
-                    continue
-
-                if not cwd and data.get("cwd"):
-                    cwd = data["cwd"]
-
-                msg_type = data.get("type", "")
-                if msg_type == "custom-title":
-                    title_custom = data.get("customTitle") or title_custom
-                elif msg_type == "ai-title":
-                    title_ai = data.get("aiTitle") or title_ai
-                elif msg_type == "summary":
-                    title_legacy = data.get("sessionName") or title_legacy
-
-                msg = data.get("message", data)
-                role = msg.get("role")
-                if role not in ("user", "assistant"):
-                    continue
-
-                text = _extract_text(msg.get("content", ""))
-                if not text:
-                    continue
-
-                if role == "user":
-                    cleaned = text.lstrip()
-                    if _is_noise_text(cleaned):
-                        continue
-                    body, boilerplate = _split_boilerplate(text)
-                    boilerplate_parts.extend(boilerplate)
-                    if not body:
-                        continue
-                    if not first_user_seen:
-                        first_msg = body
-                        first_user_seen = True
-                    else:
-                        user_parts.append(body)
-                else:
-                    asst_parts.append(text)
-    except Exception:
-        return {
-            "cwd": "", "title": "", "first_msg": "",
-            "user_text": "", "asst_text": "", "boilerplate": "",
-        }
-
-    title = title_custom or title_ai or title_legacy or ""
-    return {
-        "cwd": cwd,
-        "title": title.lower(),
-        "first_msg": first_msg.lower(),
-        "user_text": " ".join(user_parts).lower(),
-        "asst_text": " ".join(asst_parts).lower(),
-        "boilerplate": " ".join(boilerplate_parts).lower(),
-    }
+    """Backward-compatible Claude fielded-corpus wrapper."""
+    return get_provider("claude").fielded_corpus(jsonl_path)
 
 
 def extract_search_corpus(jsonl_path: str) -> str:
@@ -236,241 +54,54 @@ extract_user_text = extract_search_corpus
 
 def list_session_files() -> list[str]:
     """All Claude session files on disk, excluding subagent-spawned ones."""
-    pattern = os.path.join(SESSIONS_DIR, "*", "*.jsonl")
-    return [f for f in glob.glob(pattern) if "/subagents/" not in f]
+    return get_provider("claude").session_files()
 
 
 def _load_codex_history() -> dict[str, list[dict[str, object]]]:
-    """Parse ~/.codex/history.jsonl once per mtime and cache the result."""
-    if not os.path.exists(CODEX_HISTORY_PATH):
-        return {}
-
-    mtime = os.path.getmtime(CODEX_HISTORY_PATH)
-    cached_mtime = _CODEX_HISTORY_CACHE.get("mtime")
-    if cached_mtime == mtime:
-        return _CODEX_HISTORY_CACHE["entries"]  # type: ignore[return-value]
-
-    entries: dict[str, list[dict[str, object]]] = {}
-    try:
-        with open(CODEX_HISTORY_PATH) as f:
-            for line in f:
-                try:
-                    data = json.loads(line.strip())
-                except json.JSONDecodeError:
-                    continue
-
-                sid = data.get("session_id")
-                text = data.get("text")
-                if not sid or not isinstance(text, str) or not text.strip():
-                    continue
-                entries.setdefault(sid, []).append({
-                    "text": text,
-                    "ts": data.get("ts"),
-                })
-    except Exception:
-        entries = {}
-
-    _CODEX_HISTORY_CACHE["mtime"] = mtime
-    _CODEX_HISTORY_CACHE["entries"] = entries
-    return entries
+    """Backward-compatible wrapper for the CodeX history cache."""
+    return codex_provider.load_history()
 
 
 def _list_codex_index_records() -> list[dict]:
-    """Return Codex threads normalized into the shared index-record shape."""
-    if not os.path.exists(CODEX_STATE_DB):
-        return []
-
-    history = _load_codex_history()
-    history_mtime = (
-        os.path.getmtime(CODEX_HISTORY_PATH)
-        if os.path.exists(CODEX_HISTORY_PATH)
-        else 0.0
-    )
-    state_mtime = os.path.getmtime(CODEX_STATE_DB)
-
-    conn = sqlite3.connect(CODEX_STATE_DB)
-    try:
-        rows = conn.execute(
-            """
-            SELECT id, cwd, title, first_user_message, created_at_ms,
-                   updated_at_ms, created_at, updated_at
-            FROM threads
-            WHERE COALESCE(thread_source, '') != 'subagent'
-            ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC
-            """
-        ).fetchall()
-    finally:
-        conn.close()
-
-    records: list[dict] = []
-    for row in rows:
-        sid, cwd, title, first_user_message, created_ms, updated_ms, created_s, updated_s = row
-        events = history.get(sid, [])
-        event_texts = [str(e.get("text", "")) for e in events]
-
-        msg_count = len(events)
-        first_msg = _flatten_text(first_user_message or "").strip()
-        if not first_msg:
-            for text in event_texts:
-                cleaned = _flatten_text(text)
-                if cleaned and not _is_noise_text(cleaned):
-                    first_msg = cleaned
-                    break
-
-        last_msg = ""
-        user_parts: list[str] = []
-        boilerplate_parts: list[str] = []
-        for text in event_texts:
-            cleaned = _flatten_text(text)
-            if not cleaned or _is_noise_text(cleaned):
-                continue
-            body, boilerplate = _split_boilerplate(text)
-            if not body:
-                continue
-            user_parts.append(body)
-            boilerplate_parts.extend(boilerplate)
-            body_flat = _flatten_text(body)
-            if _is_substantive_text(body_flat):
-                last_msg = body_flat
-
-        created_at = _epoch_ms_to_iso(created_ms) or _epoch_s_to_iso(created_s)
-        updated_at = _epoch_ms_to_iso(updated_ms) or _epoch_s_to_iso(updated_s)
-        mtime = max(state_mtime, history_mtime)
-
-        records.append({
-            "path": f"codex://{sid}",
-            "provider": "codex",
-            "session_id": sid,
-            "first_msg": first_msg[:200],
-            "last_msg": last_msg[:200],
-            "timestamp": created_at,
-            "last_timestamp": updated_at,
-            "cwd": canonicalize_path(cwd),
-            "name": (title or "").strip() or first_msg[:200],
-            "msg_count": msg_count,
-            "mtime": mtime,
-            "fields": {
-                "cwd": (cwd or "").lower(),
-                "title": (title or "").lower(),
-                "first_msg": first_msg.lower(),
-                "user_text": " ".join(user_parts).lower(),
-                "asst_text": "",
-                "boilerplate": " ".join(boilerplate_parts).lower(),
-            },
-        })
-
-    return records
+    """Backward-compatible wrapper for CodeX index records."""
+    return get_provider("codex").list_index_records()
 
 
 def list_index_records() -> list[dict]:
     """Return every Claude and Codex session in one normalized record shape."""
     records: list[dict] = []
-
-    for filepath in list_session_files():
-        info = get_session_info(filepath)
-        if not info or not info.get("session_id") or not info.get("first_msg"):
-            continue
-        records.append({
-            **info,
-            "provider": "claude",
-            "cwd": canonicalize_path(info.get("cwd")),
-            "mtime": os.path.getmtime(filepath),
-            "fields": extract_fielded_corpus(filepath),
-        })
-
-    records.extend(_list_codex_index_records())
+    for provider in provider_ids():
+        records.extend(get_provider(provider).list_index_records())
     return records
 
 
 def _claude_user_preview_messages(path: str) -> list[tuple[int, str]]:
-    messages: list[tuple[int, str]] = []
-    msg_num = 0
-
-    try:
-        with open(path) as f:
-            for line in f:
-                try:
-                    data = json.loads(line.strip())
-                except json.JSONDecodeError:
-                    continue
-                msg = data.get("message", data)
-                if msg.get("role") != "user":
-                    continue
-                msg_num += 1
-                text = _extract_text(msg.get("content", ""))
-                if not text:
-                    continue
-                cleaned = _flatten_text(text)
-                if len(cleaned) <= 3 or _is_noise_text(cleaned):
-                    continue
-                messages.append((msg_num, cleaned[:140]))
-    except Exception:
-        return []
-
-    return messages
+    return get_provider("claude").preview_messages(path, "")
 
 
 def _codex_user_preview_messages(session_id: str) -> list[tuple[int, str]]:
-    messages: list[tuple[int, str]] = []
-    for idx, entry in enumerate(_load_codex_history().get(session_id, []), 1):
-        text = str(entry.get("text", ""))
-        cleaned = _flatten_text(text)
-        if len(cleaned) <= 3 or _is_noise_text(cleaned):
-            continue
-        messages.append((idx, cleaned[:140]))
-    return messages
+    return get_provider("codex").preview_messages("", session_id)
 
 
 def get_preview_messages(provider: str, path: str, session_id: str) -> list[tuple[int, str]]:
     """Latest user-message preview corpus for a session, provider-aware."""
-    if provider == "codex":
-        return _codex_user_preview_messages(session_id)
-    return _claude_user_preview_messages(path)
+    return get_provider(provider).preview_messages(path, session_id)
 
 
 def _claude_transcript_excerpt(path: str, limit: int = 24) -> list[tuple[str, str]]:
-    return _claude_transcript_turns(path)[-limit:]
+    return get_provider("claude").transcript_excerpt(path, "", limit)
 
 
 def _claude_transcript_turns(path: str) -> list[tuple[str, str]]:
-    excerpt: list[tuple[str, str]] = []
-
-    try:
-        with open(path) as f:
-            for line in f:
-                try:
-                    data = json.loads(line.strip())
-                except json.JSONDecodeError:
-                    continue
-                msg = data.get("message", data)
-                role = msg.get("role")
-                if role not in ("user", "assistant"):
-                    continue
-                text = _extract_text(msg.get("content", ""))
-                cleaned = _flatten_text(text)
-                if len(cleaned) <= 3:
-                    continue
-                if role == "user" and _is_noise_text(cleaned):
-                    continue
-                excerpt.append((role, cleaned))
-    except Exception:
-        return []
-
-    return excerpt
+    return get_provider("claude").transcript_turns(path, "")
 
 
 def _codex_transcript_excerpt(session_id: str, limit: int = 24) -> list[tuple[str, str]]:
-    return _codex_transcript_turns(session_id)[-limit:]
+    return get_provider("codex").transcript_excerpt("", session_id, limit)
 
 
 def _codex_transcript_turns(session_id: str) -> list[tuple[str, str]]:
-    excerpt: list[tuple[str, str]] = []
-    for entry in _load_codex_history().get(session_id, []):
-        cleaned = _flatten_text(str(entry.get("text", "")))
-        if len(cleaned) <= 3 or _is_noise_text(cleaned):
-            continue
-        excerpt.append(("user", cleaned))
-    return excerpt
+    return get_provider("codex").transcript_turns("", session_id)
 
 
 def _latest_turn_text(excerpt: list[tuple[str, str]], role: str) -> str:
@@ -491,10 +122,7 @@ def _matching_turns(
     if not terms:
         return []
 
-    if provider == "codex":
-        turns = _codex_transcript_turns(session_id)
-    else:
-        turns = _claude_transcript_turns(path)
+    turns = get_provider(provider).transcript_turns(path, session_id)
 
     matched = [
         (role, text)
@@ -520,11 +148,8 @@ def build_import_markdown(
     last_msg = session.get("last_msg") or ""
     target_name = provider_display_name(target_provider)
     path = session.get("path") or ""
-
-    if provider == "codex":
-        excerpt = _codex_transcript_excerpt(session_id)
-    else:
-        excerpt = _claude_transcript_excerpt(path)
+    source_spec = get_provider(provider)
+    excerpt = source_spec.transcript_excerpt(path, session_id)
     recent_excerpt = list(reversed(excerpt[-10:]))
     latest_assistant = _latest_turn_text(excerpt, "assistant")
     matched_turns = _matching_turns(
@@ -605,7 +230,7 @@ def build_import_markdown(
         lines.append("No recent transcript excerpt was available.")
         return "\n".join(lines) + "\n"
 
-    if provider == "codex":
+    if not source_spec.assistant_turns_available:
         lines.append("Note: Codex local history only exposes user turns here.")
         lines.append("Most recent turns are shown first.")
         lines.append("")

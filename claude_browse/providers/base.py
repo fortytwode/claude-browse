@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-IndexRecord = dict[str, object]
-PreviewMessage = tuple[int, str]
-TranscriptTurn = tuple[str, str]
+if TYPE_CHECKING:
+    IndexRecord = dict[str, object]
+    PreviewMessage = tuple[int, str]
+    TranscriptTurn = tuple[str, str]
+else:
+    IndexRecord = dict
+    PreviewMessage = tuple
+    TranscriptTurn = tuple
 
 
 @dataclass(frozen=True)

@@ -9,10 +9,13 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from claude_browse import core
+from claude_browse.providers import claude as claude_provider
+from claude_browse.providers import codex as codex_provider
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -310,11 +313,15 @@ def test_list_index_records_includes_codex(monkeypatch, tmp_path):
         ]) + "\n"
     )
 
-    monkeypatch.setattr(core, "CODEX_STATE_DB", str(state_path))
-    monkeypatch.setattr(core, "CODEX_HISTORY_PATH", str(history_path))
-    monkeypatch.setattr(core, "list_session_files", lambda: [])
-    core._CODEX_HISTORY_CACHE["mtime"] = None
-    core._CODEX_HISTORY_CACHE["entries"] = {}
+    empty_sessions_dir = tmp_path / "claude-projects"
+    empty_sessions_dir.mkdir()
+
+    monkeypatch.setattr(core, "provider_ids", lambda: ("codex",))
+    monkeypatch.setattr(codex_provider, "CODEX_STATE_DB", str(state_path))
+    monkeypatch.setattr(codex_provider, "CODEX_HISTORY_PATH", str(history_path))
+    monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(empty_sessions_dir))
+    codex_provider._CODEX_HISTORY_CACHE["mtime"] = None
+    codex_provider._CODEX_HISTORY_CACHE["entries"] = {}
 
     records = core.list_index_records()
     assert len(records) == 1
@@ -329,12 +336,21 @@ def test_list_index_records_includes_codex(monkeypatch, tmp_path):
 def test_build_import_markdown_targets_codex(monkeypatch):
     monkeypatch.setattr(
         core,
-        "_claude_transcript_excerpt",
-        lambda _path, limit=24: [
-            ("user", "Please fix the onboarding flow"),
-            ("assistant", "I found the regression in auth."),
-            ("user", "Ship it after the auth fix."),
-        ],
+        "get_provider",
+        lambda provider: (
+            SimpleNamespace(
+                display_name="Claude",
+                transcript_excerpt=lambda _path, _session_id, limit=24: [
+                    ("user", "Please fix the onboarding flow"),
+                    ("assistant", "I found the regression in auth."),
+                    ("user", "Ship it after the auth fix."),
+                ],
+                transcript_turns=lambda _path, _session_id: [],
+                assistant_turns_available=True,
+            )
+            if provider == "claude"
+            else SimpleNamespace(display_name="CodeX")
+        ),
     )
 
     text = core.build_import_markdown(
@@ -365,21 +381,25 @@ def test_build_import_markdown_targets_codex(monkeypatch):
 def test_build_import_markdown_includes_search_match_context(monkeypatch):
     monkeypatch.setattr(
         core,
-        "_claude_transcript_excerpt",
-        lambda _path, limit=24: [
-            ("user", "Can you review the pokpok brief?"),
-            ("assistant", "I checked the Sherlock output for pokpok."),
-            ("user", "Now archive the backups after that."),
-        ],
-    )
-    monkeypatch.setattr(
-        core,
-        "_claude_transcript_turns",
-        lambda _path: [
-            ("user", "Can you review the pokpok brief?"),
-            ("assistant", "I checked the Sherlock output for pokpok."),
-            ("user", "Now archive the backups after that."),
-        ],
+        "get_provider",
+        lambda provider: (
+            SimpleNamespace(
+                display_name="Claude",
+                transcript_excerpt=lambda _path, _session_id, limit=24: [
+                    ("user", "Can you review the pokpok brief?"),
+                    ("assistant", "I checked the Sherlock output for pokpok."),
+                    ("user", "Now archive the backups after that."),
+                ],
+                transcript_turns=lambda _path, _session_id: [
+                    ("user", "Can you review the pokpok brief?"),
+                    ("assistant", "I checked the Sherlock output for pokpok."),
+                    ("user", "Now archive the backups after that."),
+                ],
+                assistant_turns_available=True,
+            )
+            if provider == "claude"
+            else SimpleNamespace(display_name="CodeX")
+        ),
     )
 
     text = core.build_import_markdown(
@@ -407,8 +427,19 @@ def test_build_import_markdown_includes_search_match_context(monkeypatch):
 def test_build_import_markdown_targets_claude_from_codex(monkeypatch):
     monkeypatch.setattr(
         core,
-        "_codex_transcript_excerpt",
-        lambda _session_id, limit=24: [("user", "Review the launch checklist")],
+        "get_provider",
+        lambda provider: (
+            SimpleNamespace(
+                display_name="CodeX",
+                transcript_excerpt=lambda _path, _session_id, limit=24: [
+                    ("user", "Review the launch checklist")
+                ],
+                transcript_turns=lambda _path, _session_id: [],
+                assistant_turns_available=False,
+            )
+            if provider == "codex"
+            else SimpleNamespace(display_name="Claude")
+        ),
     )
 
     text = core.build_import_markdown(
@@ -432,6 +463,20 @@ def test_build_import_markdown_targets_claude_from_codex(monkeypatch):
     assert "Most recent turns are shown first." in text
     assert "### User" in text
     assert "Review the launch checklist" in text
+
+
+def test_get_preview_messages_dispatches_through_provider(monkeypatch):
+    monkeypatch.setattr(
+        core,
+        "get_provider",
+        lambda provider: SimpleNamespace(
+            preview_messages=lambda path, session_id: [(7, f"{provider}:{path}:{session_id}")],
+        ),
+    )
+
+    assert core.get_preview_messages("codex", "ignored", "abc-123") == [
+        (7, "codex:ignored:abc-123")
+    ]
 
 
 # --- folder_name ------------------------------------------------------------

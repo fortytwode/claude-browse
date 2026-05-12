@@ -10,16 +10,17 @@ out of scope.
 git clone https://github.com/fortytwode/claude-browse.git
 cd claude-browse
 ./install.sh
-pip install -e '.[dev]'
-pytest
+python3 -m venv .venv
+./.venv/bin/pip install -e '.[dev]'
+./.venv/bin/python -m pytest
 ```
 
 ## Running tests
 
 ```bash
-pytest                # all tests
-pytest -k parsing     # filter by name
-pytest -v             # verbose
+./.venv/bin/python -m pytest            # all tests
+./.venv/bin/python -m pytest -k parsing # filter by name
+./.venv/bin/python -m pytest -v         # verbose
 ```
 
 Tests don't make network calls and don't require a real Claude Code install —
