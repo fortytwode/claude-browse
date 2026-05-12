@@ -6,6 +6,7 @@ under tests/fixtures/.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -256,6 +257,133 @@ def test_canonicalize_custom_alias_exact_match(monkeypatch):
         "/workspaces/repo=/home/alice/repo",
     )
     assert core.canonicalize_path("/workspaces/repo") == "/home/alice/repo"
+
+
+def test_list_index_records_includes_codex(monkeypatch, tmp_path):
+    """Codex threads should surface as provider=codex records."""
+    state_path = tmp_path / "state.sqlite"
+    history_path = tmp_path / "history.jsonl"
+
+    conn = sqlite3.connect(state_path)
+    conn.execute(
+        """
+        CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            cwd TEXT NOT NULL,
+            title TEXT NOT NULL,
+            first_user_message TEXT NOT NULL DEFAULT '',
+            created_at_ms INTEGER,
+            updated_at_ms INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            thread_source TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO threads (
+            id, cwd, title, first_user_message, created_at_ms, updated_at_ms,
+            created_at, updated_at, thread_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "019e-test-aaaa-bbbb-cccccccccccc",
+            "/Users/alice/code/codex-app",
+            "Fix onboarding bug",
+            "Please debug the onboarding flow",
+            1_776_000_000_000,
+            1_776_000_600_000,
+            1_776_000_000,
+            1_776_000_600,
+            "user",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    history_path.write_text(
+        "\n".join([
+            '{"session_id":"019e-test-aaaa-bbbb-cccccccccccc","ts":1776000000,"text":"Please debug the onboarding flow"}',
+            '{"session_id":"019e-test-aaaa-bbbb-cccccccccccc","ts":1776000060,"text":"yes go ahead"}',
+            '{"session_id":"019e-test-aaaa-bbbb-cccccccccccc","ts":1776000120,"text":"Now switch to paywall copy after that"}',
+        ]) + "\n"
+    )
+
+    monkeypatch.setattr(core, "CODEX_STATE_DB", str(state_path))
+    monkeypatch.setattr(core, "CODEX_HISTORY_PATH", str(history_path))
+    monkeypatch.setattr(core, "list_session_files", lambda: [])
+    core._CODEX_HISTORY_CACHE["mtime"] = None
+    core._CODEX_HISTORY_CACHE["entries"] = {}
+
+    records = core.list_index_records()
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["provider"] == "codex"
+    assert rec["session_id"] == "019e-test-aaaa-bbbb-cccccccccccc"
+    assert rec["first_msg"] == "Please debug the onboarding flow"
+    assert "paywall copy" in rec["last_msg"]
+    assert rec["cwd"] == "/home/alice/code/codex-app"
+
+
+def test_build_import_markdown_targets_codex(monkeypatch):
+    monkeypatch.setattr(
+        core,
+        "_claude_transcript_excerpt",
+        lambda _path, limit=24: [
+            ("user", "Please fix the onboarding flow"),
+            ("assistant", "I found the regression in auth."),
+        ],
+    )
+
+    text = core.build_import_markdown(
+        {
+            "provider": "claude",
+            "session_id": "abc-123",
+            "cwd": "/home/alice/proj",
+            "timestamp": "2026-05-12T07:00:00Z",
+            "last_timestamp": "2026-05-12T07:30:00Z",
+            "name": "Auth follow-up",
+            "first_msg": "Please fix the onboarding flow",
+            "last_msg": "Ship it after the auth fix.",
+            "path": "/tmp/session.jsonl",
+        },
+        "codex",
+    )
+
+    assert "handed into a new CodeX session." in text
+    assert "- Source app: Claude" in text
+    assert "### Assistant" in text
+    assert "I found the regression in auth." in text
+
+
+def test_build_import_markdown_targets_claude_from_codex(monkeypatch):
+    monkeypatch.setattr(
+        core,
+        "_codex_transcript_excerpt",
+        lambda _session_id, limit=24: [("user", "Review the launch checklist")],
+    )
+
+    text = core.build_import_markdown(
+        {
+            "provider": "codex",
+            "session_id": "019e-test-aaaa-bbbb-cccccccccccc",
+            "cwd": "/home/alice/proj",
+            "timestamp": "2026-05-12T07:00:00Z",
+            "last_timestamp": "2026-05-12T07:30:00Z",
+            "name": "Launch review",
+            "first_msg": "Review the launch checklist",
+            "last_msg": "Check the rollback notes too.",
+            "path": "codex://019e-test-aaaa-bbbb-cccccccccccc",
+        },
+        "claude",
+    )
+
+    assert "handed into a new Claude session." in text
+    assert "- Source app: CodeX" in text
+    assert "Note: Codex local history only exposes user turns here." in text
+    assert "### User" in text
+    assert "Review the launch checklist" in text
 
 
 # --- folder_name ------------------------------------------------------------

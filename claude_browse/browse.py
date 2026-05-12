@@ -16,10 +16,13 @@ import tempfile
 
 from . import fts
 from .core import (
+    CODEX_STATE_DB,
     SESSIONS_DIR,
     display_cwd,
     folder_name,
     format_date,
+    provider_display_name,
+    write_import_file,
 )
 
 DEFAULT_LIMIT = 100
@@ -40,14 +43,14 @@ def format_row(
 ) -> str:
     """Render one session as a fzf row line.
 
-    Layout: `{date} {fname} {msgs} {title}{suffix}  ###{sid}###{cwd}`. The
-    suffix is FTS5's matched-context snippet when a query is active, or a
-    topic-drift hint (latest user message) when the title looks stale.
+    Layout:
+      `{date} {provider} {fname} {msgs} {title}{suffix}  ###{sid}###{cwd}###{provider}`
 
-    The trailing `###{sid}###{cwd}` fields are hidden from display via
-    fzf's --with-nth=1 but remain on the line for selection-time parsing.
+    The suffix is FTS5's matched-context snippet when a query is active, or a
+    topic-drift hint (latest user message) when the title looks stale.
     """
     date = format_date(info.get("last_timestamp") or info.get("timestamp"))
+    provider = (info.get("provider") or "claude").lower()
     cwd = info.get("cwd")
     fname = folder_name(cwd, prefixes)
     msgs = f"{info.get('msg_count', 0)}msg"
@@ -60,14 +63,7 @@ def format_row(
     suffix = ""
     if query.strip() and info.get("context"):
         # FTS5 snippet: \x01 wraps matched terms, \x02 ends the wrap. Render
-        # them as bold yellow (\033[1;33m / \033[0m) inside dim grey text so
-        # the matched terms pop out of the otherwise quiet snippet.
-        # Newlines/tabs MUST be flattened: fzf treats embedded \n as a row
-        # delimiter, which would split one logical session row into two
-        # visual rows (only the second carries the ###sid### tail, so
-        # selecting the first becomes a silent no-op). Markdown tables and
-        # multi-line first-message content hit this regularly under v3's
-        # multi-column snippets.
+        # them as bold yellow inside dim grey text so matched terms pop.
         snippet = (
             info["context"]
             .replace("\x01", "\033[0m\033[1;33m")
@@ -78,117 +74,76 @@ def format_row(
         )
         suffix = f"  \033[2m→ {snippet}\033[0m"
     else:
-        last = (info.get("last_msg") or "").strip().replace("\n", " ").replace("\r", " ").replace("\t", " ")
+        last = (
+            (info.get("last_msg") or "")
+            .strip()
+            .replace("\n", " ")
+            .replace("\r", " ")
+            .replace("\t", " ")
+        )
         title_words = {w for w in title.lower().split() if len(w) >= 4}
         last_words = {w for w in last.lower().split() if len(w) >= 4}
         if last and last_words and len(title_words & last_words) <= 1:
             suffix = f"  \033[2m→ {last[:70]}\033[0m"
 
-    return f"{date:<8} {fname:<15} {msgs:<7} {title}{suffix}  ###{sid}###{ffolder}"
+    return (
+        f"{date:<8} {provider:<6} {fname:<15} {msgs:<7} {title}{suffix}  "
+        f"###{sid}###{ffolder}###{provider}"
+    )
 
 
 def _write_preview_script(
     script_path: str, db_path: str, package_dir: str
 ) -> None:
-    """Write a helper script fzf calls to render session previews.
-
-    The script looks up the session's path in the SQLite index (so it works
-    for any session the FTS search surfaces, not just the initial set), and
-    when fzf passes a non-empty query as argv[2] it highlights occurrences
-    of each query term in the printed messages.
-    """
+    """Write a helper script fzf calls to render session previews."""
     script = f"""#!/usr/bin/env python3
-import sys
-sys.path.insert(0, {package_dir!r})
-
-import json
 import os
 import sqlite3
+import sys
 
-from claude_browse.core import extract_query_terms, highlight_terms
+sys.path.insert(0, {package_dir!r})
+
+from claude_browse.core import (
+    extract_query_terms,
+    get_preview_messages,
+    highlight_terms,
+    provider_display_name,
+)
 
 DB_PATH = {db_path!r}
 MAX_PREVIEW = 20
 
 
-def _lookup_path(session_id):
+def _lookup_session(session_id):
     conn = sqlite3.connect(DB_PATH)
     try:
-        row = conn.execute(
-            "SELECT path FROM sessions WHERE sid = ?", (session_id,)
+        return conn.execute(
+            '''
+            SELECT provider, path, cwd, timestamp, last_timestamp, title
+            FROM sessions
+            WHERE sid = ?
+            ''',
+            (session_id,),
         ).fetchone()
-        return row[0] if row else None
     finally:
         conn.close()
 
 
 def get_preview(session_id, query=""):
-    path = _lookup_path(session_id)
-    if not path or not os.path.exists(path):
-        print("Session file not found.")
+    session = _lookup_session(session_id)
+    if not session:
+        print("Session not found.")
         return
 
-    all_messages = []
-    msg_num = 0
-    cwd = None
-    timestamp = None
-    last_timestamp = None
-    name = None
-    total_user = 0
-
-    with open(path, "r") as f:
-        for line in f:
-            try:
-                data = json.loads(line.strip())
-            except json.JSONDecodeError:
-                continue
-
-            msg = data.get("message", data)
-            msg_type = data.get("type", "")
-
-            # Read modern title events (custom + ai), with summary fallback
-            # so older sessions still show their name in the preview header.
-            if msg_type == "custom-title" and data.get("customTitle"):
-                name = data.get("customTitle")
-            elif msg_type == "ai-title" and data.get("aiTitle") and not name:
-                name = data.get("aiTitle")
-            elif msg_type == "summary" and data.get("sessionName") and not name:
-                name = data.get("sessionName")
-            if not cwd and data.get("cwd"):
-                cwd = data.get("cwd")
-            if data.get("timestamp"):
-                if not timestamp:
-                    timestamp = data.get("timestamp")
-                last_timestamp = data.get("timestamp")
-
-            if msg.get("role") == "user":
-                msg_num += 1
-                total_user += 1
-                content = msg.get("content", "")
-                text = ""
-                if isinstance(content, str):
-                    text = content
-                elif isinstance(content, list):
-                    parts = []
-                    for c in content:
-                        if isinstance(c, dict) and c.get("text"):
-                            parts.append(c["text"])
-                        elif isinstance(c, dict) and c.get("type") == "image":
-                            parts.append("[image]")
-                    text = " ".join(parts)
-
-                text = text.replace("\\n", " ").strip()
-                if text.startswith("<local-command") or text.startswith("<command"):
-                    continue
-                if len(text) > 3:
-                    wrapped = text[:140]
-                    all_messages.append((msg_num, wrapped))
-
+    provider, path, cwd, timestamp, last_timestamp, name = session
+    all_messages = get_preview_messages(provider, path, session_id)
+    total_user = len(all_messages)
     terms = extract_query_terms(query)
 
-    def hl(s):
-        return highlight_terms(s, terms) if terms else s
+    def hl(text):
+        return highlight_terms(text, terms) if terms else text
 
+    print(f"Source:  {{provider_display_name(provider)}}")
     if name:
         print(f"Session: {{hl(name)}}")
     if cwd:
@@ -203,18 +158,13 @@ def get_preview(session_id, query=""):
     print(f"Total user messages: {{total_user}}")
     print()
 
-    # If a query is active and at least one of the latest MAX_PREVIEW user
-    # messages contains a match, show those (highlighted). If a query is
-    # active but no match landed in the recent window, prefer matched
-    # messages from earlier in the conversation so the user actually sees
-    # *why* this session matched.
     recent = all_messages[-MAX_PREVIEW:]
     if terms and not any(
-        any(t.lower() in m.lower() for t in terms) for _, m in recent
+        any(term.lower() in msg.lower() for term in terms) for _, msg in recent
     ):
         matched = [
-            (n, m) for n, m in all_messages
-            if any(t.lower() in m.lower() for t in terms)
+            (n, msg) for n, msg in all_messages
+            if any(term.lower() in msg.lower() for term in terms)
         ]
         if matched:
             recent = matched[-MAX_PREVIEW:]
@@ -249,12 +199,7 @@ def _write_search_script(
     cwd_filter: str | None,
     limit: int,
 ) -> None:
-    """Write the keystroke-driven search helper invoked by fzf change:reload.
-
-    fzf passes the current query string as argv[1] (already shell-quoted).
-    The script runs an FTS5 query and prints one row per match, formatted
-    identically to the initial input fzf was started with.
-    """
+    """Write the keystroke-driven search helper invoked by fzf change:reload."""
     script = f"""#!/usr/bin/env python3
 import sys
 sys.path.insert(0, {package_dir!r})
@@ -323,8 +268,9 @@ def _print_usage() -> None:
         "  runna*                Prefix match: runna, runnathon, runna2026, ...\n"
         "\n"
         "Keys while browsing:\n"
-        "  Enter                 Resume the selected session (yolo)\n"
-        "  Ctrl-S                Resume in safe mode (prompt for permissions)\n"
+        "  Enter                 Native resume in the source app (yolo)\n"
+        "  Ctrl-S                Native resume in the source app (safe)\n"
+        "  Ctrl-X                Continue the selected thread in the other app\n"
         "  Shift-Up / Shift-Down Scroll the preview pane\n"
         "  Esc                   Quit\n"
         "\n"
@@ -332,6 +278,67 @@ def _print_usage() -> None:
         "  CLAUDE_BROWSE_PATH_ALIASES      src=dst[:src2=dst2...] custom cwd aliases\n"
         "  CLAUDE_BROWSE_FOLDER_PREFIXES   colon-separated prefixes for short folder names"
     )
+
+
+def _native_resume(
+    session: dict,
+    provider: str,
+    session_id: str,
+    cwd: str,
+    prefixes: tuple[str, ...],
+    yolo: bool,
+) -> None:
+    if provider == "codex":
+        cmd = ["codex", "resume", session_id]
+        if yolo:
+            cmd.append("--dangerously-bypass-approvals-and-sandbox")
+        mode = " (yolo)" if yolo else ""
+        print(f"Resuming{mode} in CodeX ({folder_name(cwd, prefixes)})...")
+        os.execvp("codex", cmd)
+
+    cmd = ["claude", "--resume", session_id]
+    if yolo:
+        cmd.append("--dangerously-skip-permissions")
+    mode = " (yolo)" if yolo else ""
+    print(f"Resuming{mode} in {folder_name(cwd, prefixes)}...")
+    os.execvp("claude", cmd)
+
+
+def _continue_in_other_app(
+    session: dict,
+    provider: str,
+    session_id: str,
+    cwd: str,
+    prefixes: tuple[str, ...],
+) -> None:
+    target_provider = "claude" if provider == "codex" else "codex"
+    target_name = provider_display_name(target_provider)
+
+    if not shutil.which(target_provider):
+        print(
+            f"Target app not found on PATH: {target_provider}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        import_path = write_import_file(session, target_provider)
+    except OSError as exc:
+        print(f"Could not write import brief: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    import_dir = os.path.dirname(import_path) or cwd
+    prompt = (
+        f"Continue the imported {provider_display_name(provider)} session "
+        f"context from {import_path}. Treat it as prior conversation state, "
+        "read that file first, then continue the work in this directory."
+    )
+    if target_provider == "claude":
+        cmd = ["claude", "--add-dir", import_dir, prompt]
+    else:
+        cmd = ["codex", "--add-dir", import_dir, prompt]
+    print(f"Continuing in {target_name} from {folder_name(cwd, prefixes)}...")
+    os.execvp(target_provider, cmd)
 
 
 def main() -> None:
@@ -362,29 +369,23 @@ def main() -> None:
 
     _check_fzf()
 
-    if not os.path.isdir(SESSIONS_DIR):
-        print(f"No Claude Code sessions found — {SESSIONS_DIR} doesn't exist.")
-        print("Run `claude` at least once to create it.")
+    if not os.path.isdir(SESSIONS_DIR) and not os.path.exists(CODEX_STATE_DB):
+        print("No local Claude Code or CodeX sessions found.")
+        print("Run `claude` or `codex` at least once to create session history.")
         sys.exit(1)
 
-    # Build / refresh the FTS index. First run on a populated ~/.claude is
-    # several seconds; steady-state is a stat() per file (~tens of ms).
     conn = fts.open_db()
     total_pre = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
     if total_pre == 0:
         print("Indexing sessions for the first time...", file=sys.stderr)
     added, updated, removed = fts.reindex(conn)
     if added + updated + removed > 0 and total_pre == 0:
-        print(
-            f"  indexed {added} sessions",
-            file=sys.stderr,
-        )
+        print(f"  indexed {added} sessions", file=sys.stderr)
     conn.close()
 
     prefixes = _folder_prefixes()
     limit = 999 if show_all else DEFAULT_LIMIT
 
-    # Initial display: recent sessions, no query active.
     conn = fts.open_db()
     initial = fts.list_recent(conn, limit=limit)
     if cwd_filter:
@@ -396,10 +397,6 @@ def main() -> None:
         sys.exit(1)
 
     initial_lines = [format_row(r, "", prefixes) for r in initial]
-
-    # Both helper scripts get the package directory baked in so they import
-    # claude_browse correctly whether we were started from a pip entry point
-    # or the direct-script shim.
     package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     preview_script = tempfile.NamedTemporaryFile(
@@ -425,18 +422,17 @@ def main() -> None:
             "--height=90%",
             "--border=rounded",
             "--prompt=Sessions > ",
-            "--header=Enter: resume (yolo) | Ctrl-S: resume (safe) | Esc: quit | Shift-Up/Down: scroll preview",
+            "--header=Enter: native resume (yolo) | Ctrl-S: native resume (safe) | Ctrl-X: continue in the other app | Esc: quit | Shift-Up/Down: scroll preview",
             "--header-first",
             "--delimiter=###",
             "--with-nth=1",
-            # fzf is a picker only; SQLite FTS5 does the matching. Each
-            # keystroke re-runs the search script, which prints fresh rows.
             "--disabled",
             f"--bind=change:reload(python3 {search_script.name} {{q}})",
             f"--preview=python3 {preview_script.name} {{}} {{q}}",
             "--preview-window=right:45%:wrap",
             "--bind=shift-up:preview-up,shift-down:preview-down",
             "--bind=ctrl-s:print(SAFE:)+accept",
+            "--bind=ctrl-x:print(XAPP:)+accept",
         ]
 
         result = subprocess.run(
@@ -453,22 +449,27 @@ def main() -> None:
         if not output or "###" not in output:
             sys.exit(0)
 
-        # Default is yolo. Ctrl-S prepends "SAFE:" to opt into safe mode.
+        action = "native"
         yolo = True
         if output.startswith("SAFE:"):
+            action = "native"
+            yolo = False
+            output = output[5:]
+        elif output.startswith("XAPP:"):
+            action = "handoff"
             yolo = False
             output = output[5:]
 
         output_lines = output.strip().split("\n")
         if len(output_lines) > 1:
-            if "SAFE:" in output_lines[0] and "###" not in output_lines[0]:
-                yolo = False
+            if "###" in output_lines[-1]:
                 output = output_lines[-1]
             else:
-                output = output_lines[-1]
+                output = next((line for line in reversed(output_lines) if "###" in line), "")
 
         parts = output.split("###")
         session_id = parts[1].strip() if len(parts) >= 2 else ""
+        provider = parts[3].strip() if len(parts) >= 4 else "claude"
 
         conn = fts.open_db()
         session = fts.get_by_sid(conn, session_id)
@@ -480,17 +481,16 @@ def main() -> None:
         cwd = session.get("cwd")
         if not cwd or not os.path.isdir(cwd):
             print(f"Original folder no longer exists: {cwd}", file=sys.stderr)
-            print(f"Try: claude --resume {session_id}", file=sys.stderr)
+            if provider == "codex":
+                print(f"Try: codex resume {session_id}", file=sys.stderr)
+            else:
+                print(f"Try: claude --resume {session_id}", file=sys.stderr)
             sys.exit(1)
 
-        cmd = ["claude", "--resume", session_id]
-        if yolo:
-            cmd.append("--dangerously-skip-permissions")
-
-        mode = " (yolo)" if yolo else ""
-        print(f"Resuming{mode} in {folder_name(cwd, prefixes)}...")
         os.chdir(cwd)
-        os.execvp("claude", cmd)
+        if action == "handoff":
+            _continue_in_other_app(session, provider, session_id, cwd, prefixes)
+        _native_resume(session, provider, session_id, cwd, prefixes, yolo)
 
     finally:
         for path in (preview_script.name, search_script.name):

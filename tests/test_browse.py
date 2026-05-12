@@ -8,12 +8,16 @@ row into multiple visual rows in the picker.
 
 from __future__ import annotations
 
+import pytest
+
+from claude_browse import browse
 from claude_browse.browse import format_row
 
 
 def _info(**overrides) -> dict:
     base = {
         "session_id": "abc-123",
+        "provider": "claude",
         "cwd": "/home/alice/proj",
         "name": "my session",
         "first_msg": "first user message",
@@ -62,4 +66,114 @@ def test_format_row_keeps_sid_tail_attached():
     fzf's --delimiter=### selection logic finds the sid."""
     info = _info(context="a\nb\nc\nd")
     row = format_row(info, query="anything")
-    assert row.rstrip().endswith("abc-123###/home/alice/proj")
+    assert row.rstrip().endswith("abc-123###/home/alice/proj###claude")
+
+
+def test_continue_in_other_app_from_claude_execs_codex_with_add_dir(
+    monkeypatch,
+):
+    session = _info(path="/tmp/session.jsonl")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        browse,
+        "write_import_file",
+        lambda _session, target_provider: (
+            "/tmp/claude_browse_import.md"
+            if target_provider == "codex"
+            else "/tmp/unexpected.md"
+        ),
+    )
+    monkeypatch.setattr(browse.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def fake_execvp(binary: str, cmd: list[str]) -> None:
+        captured["binary"] = binary
+        captured["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(browse.os, "execvp", fake_execvp)
+
+    with pytest.raises(SystemExit):
+        browse._continue_in_other_app(
+            session,
+            "claude",
+            "abc-123",
+            "/home/alice/proj",
+            (),
+        )
+
+    assert captured["binary"] == "codex"
+    assert captured["cmd"] == [
+        "codex",
+        "--add-dir",
+        "/tmp",
+        (
+            "Continue the imported Claude session context from "
+            "/tmp/claude_browse_import.md. Treat it as prior conversation "
+            "state, read that file first, then continue the work in this "
+            "directory."
+        ),
+    ]
+
+
+def test_continue_in_other_app_from_codex_execs_claude_with_add_dir(
+    monkeypatch,
+):
+    session = _info(provider="codex", path="codex://abc-123")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        browse,
+        "write_import_file",
+        lambda _session, target_provider: (
+            "/tmp/codex_browse_import.md"
+            if target_provider == "claude"
+            else "/tmp/unexpected.md"
+        ),
+    )
+    monkeypatch.setattr(browse.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def fake_execvp(binary: str, cmd: list[str]) -> None:
+        captured["binary"] = binary
+        captured["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(browse.os, "execvp", fake_execvp)
+
+    with pytest.raises(SystemExit):
+        browse._continue_in_other_app(
+            session,
+            "codex",
+            "abc-123",
+            "/home/alice/proj",
+            (),
+        )
+
+    assert captured["binary"] == "claude"
+    assert captured["cmd"] == [
+        "claude",
+        "--add-dir",
+        "/tmp",
+        (
+            "Continue the imported CodeX session context from "
+            "/tmp/codex_browse_import.md. Treat it as prior conversation "
+            "state, read that file first, then continue the work in this "
+            "directory."
+        ),
+    ]
+
+
+def test_continue_in_other_app_errors_when_target_binary_missing(monkeypatch):
+    session = _info(provider="codex", path="codex://abc-123")
+    monkeypatch.setattr(browse.shutil, "which", lambda _binary: None)
+
+    with pytest.raises(SystemExit) as exc:
+        browse._continue_in_other_app(
+            session,
+            "codex",
+            "abc-123",
+            "/home/alice/proj",
+            (),
+        )
+
+    assert exc.value.code == 1

@@ -1,7 +1,7 @@
 """Shared session parsing and formatting utilities.
 
 Both claude-browse and claude-resume use these. No I/O side effects beyond
-reading session JSONL files from disk. No network calls ever — by design.
+reading local session data from disk. No network calls ever — by design.
 """
 
 from __future__ import annotations
@@ -11,10 +11,14 @@ import glob
 import json
 import os
 import re
+import sqlite3
+import tempfile
 from collections.abc import Iterable
 from datetime import datetime, timezone
 
 SESSIONS_DIR = os.path.expanduser("~/.claude/projects")
+CODEX_STATE_DB = os.path.expanduser("~/.codex/state_5.sqlite")
+CODEX_HISTORY_PATH = os.path.expanduser("~/.codex/history.jsonl")
 
 # Toggl-style rollup lines ('- musopia: 1.0h', '* maxrewards: 0.5h') are
 # templated noise: they mention every client equally and dominate FTS hits
@@ -54,6 +58,11 @@ _CONFIRMATION_WORDS = frozenset({
     "all good", "got it", "noted",
 })
 
+_CODEX_HISTORY_CACHE: dict[str, object] = {
+    "mtime": None,
+    "entries": {},
+}
+
 
 def _extract_text(content) -> str:
     """Pull plain text from a message's content field, regardless of shape.
@@ -75,8 +84,36 @@ def _extract_text(content) -> str:
     return ""
 
 
+def _flatten_text(text: str) -> str:
+    return text.replace("\n", " ").strip()
+
+
+def _is_noise_text(cleaned: str) -> bool:
+    return any(cleaned.startswith(p) for p in _NOISE_PREFIXES)
+
+
+def _is_substantive_text(cleaned: str) -> bool:
+    stripped = cleaned.lower().strip(".,!?;: ")
+    return (
+        stripped not in _CONFIRMATION_WORDS
+        and len(cleaned) >= 25
+        and not _is_noise_text(cleaned)
+    )
+
+
+def _split_boilerplate(text: str) -> tuple[str, list[str]]:
+    keep_lines: list[str] = []
+    boilerplate: list[str] = []
+    for line in text.split("\n"):
+        if _is_boilerplate_line(line):
+            boilerplate.append(line.strip())
+        else:
+            keep_lines.append(line)
+    return ("\n".join(keep_lines).strip(), boilerplate)
+
+
 def get_session_info(jsonl_path: str) -> dict | None:
-    """Extract session metadata from a session JSONL file.
+    """Extract session metadata from a Claude session JSONL file.
 
     Returns None if the file is unreadable. Missing fields are returned as
     empty strings or 0 — callers should check for truthiness, not None.
@@ -129,21 +166,11 @@ def get_session_info(jsonl_path: str) -> dict | None:
                     msg_count += 1
                     text = _extract_text(msg.get("content", ""))
                     if text and len(text) > 3:
-                        cleaned = text.replace("\n", " ").strip()
-                        is_noise = any(
-                            cleaned.startswith(p) for p in _NOISE_PREFIXES
-                        )
-                        if not is_noise:
+                        cleaned = _flatten_text(text)
+                        if not _is_noise_text(cleaned):
                             if not first_user_msg:
                                 first_user_msg = cleaned
-                            # Track the most recent substantive message.
-                            # Skip pure confirmations like "yes" / "go ahead"
-                            # since they're not topic signal.
-                            stripped = cleaned.lower().strip(".,!?;: ")
-                            if (
-                                stripped not in _CONFIRMATION_WORDS
-                                and len(cleaned) >= 25
-                            ):
+                            if _is_substantive_text(cleaned):
                                 last_user_msg = cleaned
                 elif msg.get("role") == "assistant":
                     msg_count += 1
@@ -154,9 +181,10 @@ def get_session_info(jsonl_path: str) -> dict | None:
 
     return {
         "path": jsonl_path,
+        "provider": "claude",
         "session_id": session_id,
-        "first_msg": (first_user_msg or "").replace("\n", " ").strip()[:200],
-        "last_msg": (last_user_msg or "").replace("\n", " ").strip()[:200],
+        "first_msg": (first_user_msg or "").strip()[:200],
+        "last_msg": (last_user_msg or "").strip()[:200],
         "timestamp": timestamp,
         "last_timestamp": last_timestamp,
         "cwd": cwd,
@@ -168,8 +196,8 @@ def get_session_info(jsonl_path: str) -> dict | None:
 def extract_fielded_corpus(jsonl_path: str) -> dict[str, str]:
     """Extract per-field text for the multi-column FTS index.
 
-    Splits a session's text into named fields so the ranker can weight each
-    one differently (cwd is a strong topic anchor, assistant text is the
+    Splits a Claude session's text into named fields so the ranker can weight
+    each one differently (cwd is a strong topic anchor, assistant text is the
     weakest signal, etc.):
 
       cwd         - working directory the session was started in
@@ -222,15 +250,10 @@ def extract_fielded_corpus(jsonl_path: str) -> dict[str, str]:
 
                 if role == "user":
                     cleaned = text.lstrip()
-                    if any(cleaned.startswith(p) for p in _NOISE_PREFIXES):
+                    if _is_noise_text(cleaned):
                         continue
-                    keep_lines: list[str] = []
-                    for ln in text.split("\n"):
-                        if _is_boilerplate_line(ln):
-                            boilerplate_parts.append(ln.strip())
-                        else:
-                            keep_lines.append(ln)
-                    body = "\n".join(keep_lines).strip()
+                    body, boilerplate = _split_boilerplate(text)
+                    boilerplate_parts.extend(boilerplate)
                     if not body:
                         continue
                     if not first_user_seen:
@@ -277,9 +300,343 @@ extract_user_text = extract_search_corpus
 
 
 def list_session_files() -> list[str]:
-    """All session files on disk, excluding subagent-spawned ones."""
+    """All Claude session files on disk, excluding subagent-spawned ones."""
     pattern = os.path.join(SESSIONS_DIR, "*", "*.jsonl")
     return [f for f in glob.glob(pattern) if "/subagents/" not in f]
+
+
+def _epoch_ms_to_iso(value: int | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(
+            value / 1000.0, tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return None
+
+
+def _epoch_s_to_iso(value: int | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(
+            float(value), tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return None
+
+
+def _load_codex_history() -> dict[str, list[dict[str, object]]]:
+    """Parse ~/.codex/history.jsonl once per mtime and cache the result."""
+    if not os.path.exists(CODEX_HISTORY_PATH):
+        return {}
+
+    mtime = os.path.getmtime(CODEX_HISTORY_PATH)
+    cached_mtime = _CODEX_HISTORY_CACHE.get("mtime")
+    if cached_mtime == mtime:
+        return _CODEX_HISTORY_CACHE["entries"]  # type: ignore[return-value]
+
+    entries: dict[str, list[dict[str, object]]] = {}
+    try:
+        with open(CODEX_HISTORY_PATH) as f:
+            for line in f:
+                try:
+                    data = json.loads(line.strip())
+                except json.JSONDecodeError:
+                    continue
+
+                sid = data.get("session_id")
+                text = data.get("text")
+                if not sid or not isinstance(text, str) or not text.strip():
+                    continue
+                entries.setdefault(sid, []).append({
+                    "text": text,
+                    "ts": data.get("ts"),
+                })
+    except Exception:
+        entries = {}
+
+    _CODEX_HISTORY_CACHE["mtime"] = mtime
+    _CODEX_HISTORY_CACHE["entries"] = entries
+    return entries
+
+
+def _list_codex_index_records() -> list[dict]:
+    """Return Codex threads normalized into the shared index-record shape."""
+    if not os.path.exists(CODEX_STATE_DB):
+        return []
+
+    history = _load_codex_history()
+    history_mtime = (
+        os.path.getmtime(CODEX_HISTORY_PATH)
+        if os.path.exists(CODEX_HISTORY_PATH)
+        else 0.0
+    )
+    state_mtime = os.path.getmtime(CODEX_STATE_DB)
+
+    conn = sqlite3.connect(CODEX_STATE_DB)
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, cwd, title, first_user_message, created_at_ms,
+                   updated_at_ms, created_at, updated_at
+            FROM threads
+            WHERE COALESCE(thread_source, '') != 'subagent'
+            ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    records: list[dict] = []
+    for row in rows:
+        sid, cwd, title, first_user_message, created_ms, updated_ms, created_s, updated_s = row
+        events = history.get(sid, [])
+        event_texts = [str(e.get("text", "")) for e in events]
+
+        msg_count = len(events)
+        first_msg = _flatten_text(first_user_message or "").strip()
+        if not first_msg:
+            for text in event_texts:
+                cleaned = _flatten_text(text)
+                if cleaned and not _is_noise_text(cleaned):
+                    first_msg = cleaned
+                    break
+
+        last_msg = ""
+        user_parts: list[str] = []
+        boilerplate_parts: list[str] = []
+        for text in event_texts:
+            cleaned = _flatten_text(text)
+            if not cleaned or _is_noise_text(cleaned):
+                continue
+            body, boilerplate = _split_boilerplate(text)
+            if not body:
+                continue
+            user_parts.append(body)
+            boilerplate_parts.extend(boilerplate)
+            body_flat = _flatten_text(body)
+            if _is_substantive_text(body_flat):
+                last_msg = body_flat
+
+        created_at = _epoch_ms_to_iso(created_ms) or _epoch_s_to_iso(created_s)
+        updated_at = _epoch_ms_to_iso(updated_ms) or _epoch_s_to_iso(updated_s)
+        mtime = max(state_mtime, history_mtime)
+
+        records.append({
+            "path": f"codex://{sid}",
+            "provider": "codex",
+            "session_id": sid,
+            "first_msg": first_msg[:200],
+            "last_msg": last_msg[:200],
+            "timestamp": created_at,
+            "last_timestamp": updated_at,
+            "cwd": canonicalize_path(cwd),
+            "name": (title or "").strip() or first_msg[:200],
+            "msg_count": msg_count,
+            "mtime": mtime,
+            "fields": {
+                "cwd": (cwd or "").lower(),
+                "title": (title or "").lower(),
+                "first_msg": first_msg.lower(),
+                "user_text": " ".join(user_parts).lower(),
+                "asst_text": "",
+                "boilerplate": " ".join(boilerplate_parts).lower(),
+            },
+        })
+
+    return records
+
+
+def list_index_records() -> list[dict]:
+    """Return every Claude and Codex session in one normalized record shape."""
+    records: list[dict] = []
+
+    for filepath in list_session_files():
+        info = get_session_info(filepath)
+        if not info or not info.get("session_id") or not info.get("first_msg"):
+            continue
+        records.append({
+            **info,
+            "provider": "claude",
+            "cwd": canonicalize_path(info.get("cwd")),
+            "mtime": os.path.getmtime(filepath),
+            "fields": extract_fielded_corpus(filepath),
+        })
+
+    records.extend(_list_codex_index_records())
+    return records
+
+
+def _claude_user_preview_messages(path: str) -> list[tuple[int, str]]:
+    messages: list[tuple[int, str]] = []
+    msg_num = 0
+
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    data = json.loads(line.strip())
+                except json.JSONDecodeError:
+                    continue
+                msg = data.get("message", data)
+                if msg.get("role") != "user":
+                    continue
+                msg_num += 1
+                text = _extract_text(msg.get("content", ""))
+                if not text:
+                    continue
+                cleaned = _flatten_text(text)
+                if len(cleaned) <= 3 or _is_noise_text(cleaned):
+                    continue
+                messages.append((msg_num, cleaned[:140]))
+    except Exception:
+        return []
+
+    return messages
+
+
+def _codex_user_preview_messages(session_id: str) -> list[tuple[int, str]]:
+    messages: list[tuple[int, str]] = []
+    for idx, entry in enumerate(_load_codex_history().get(session_id, []), 1):
+        text = str(entry.get("text", ""))
+        cleaned = _flatten_text(text)
+        if len(cleaned) <= 3 or _is_noise_text(cleaned):
+            continue
+        messages.append((idx, cleaned[:140]))
+    return messages
+
+
+def get_preview_messages(provider: str, path: str, session_id: str) -> list[tuple[int, str]]:
+    """Latest user-message preview corpus for a session, provider-aware."""
+    if provider == "codex":
+        return _codex_user_preview_messages(session_id)
+    return _claude_user_preview_messages(path)
+
+
+def _claude_transcript_excerpt(path: str, limit: int = 24) -> list[tuple[str, str]]:
+    excerpt: list[tuple[str, str]] = []
+
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    data = json.loads(line.strip())
+                except json.JSONDecodeError:
+                    continue
+                msg = data.get("message", data)
+                role = msg.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+                text = _extract_text(msg.get("content", ""))
+                cleaned = _flatten_text(text)
+                if len(cleaned) <= 3:
+                    continue
+                if role == "user" and _is_noise_text(cleaned):
+                    continue
+                excerpt.append((role, cleaned))
+    except Exception:
+        return []
+
+    return excerpt[-limit:]
+
+
+def _codex_transcript_excerpt(session_id: str, limit: int = 24) -> list[tuple[str, str]]:
+    excerpt: list[tuple[str, str]] = []
+    for entry in _load_codex_history().get(session_id, [])[-limit:]:
+        cleaned = _flatten_text(str(entry.get("text", "")))
+        if len(cleaned) <= 3 or _is_noise_text(cleaned):
+            continue
+        excerpt.append(("user", cleaned))
+    return excerpt
+
+
+def build_import_markdown(session: dict, target_provider: str) -> str:
+    """Create a compact Markdown brief so another app can continue a thread."""
+    provider = session.get("provider") or "claude"
+    session_id = session.get("session_id") or "?"
+    cwd = session.get("cwd") or ""
+    started = session.get("timestamp") or "unknown"
+    last_activity = session.get("last_timestamp") or started
+    title = session.get("name") or session.get("first_msg") or ""
+    first_msg = session.get("first_msg") or ""
+    last_msg = session.get("last_msg") or ""
+    target_name = provider_display_name(target_provider)
+
+    if provider == "codex":
+        excerpt = _codex_transcript_excerpt(session_id)
+    else:
+        excerpt = _claude_transcript_excerpt(session.get("path") or "")
+
+    lines = [
+        "# Imported Session Context",
+        "",
+        (
+            "This is prior conversation context being handed into a new "
+            f"{target_name} session."
+        ),
+        "It is not a native cross-vendor resume.",
+        "",
+        f"- Source app: {provider_display_name(provider)}",
+        f"- Original session id: `{session_id}`",
+        f"- Original folder: `{cwd}`" if cwd else "- Original folder: unknown",
+        f"- Started: {started}",
+        f"- Last activity: {last_activity}",
+    ]
+    if title:
+        lines.append(f"- Title: {title}")
+    if first_msg:
+        lines.append(f"- First user prompt: {first_msg}")
+    if last_msg:
+        lines.append(f"- Latest substantive user message: {last_msg}")
+
+    lines.extend([
+        "",
+        "## Transcript Excerpt",
+        "",
+    ])
+
+    if not excerpt:
+        lines.append("No transcript excerpt was available.")
+        return "\n".join(lines) + "\n"
+
+    if provider == "codex":
+        lines.append("Note: Codex local history only exposes user turns here.")
+        lines.append("")
+
+    for role, text in excerpt:
+        label = "User" if role == "user" else "Assistant"
+        lines.append(f"### {label}")
+        lines.append(text)
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_import_file(session: dict, target_provider: str) -> str:
+    """Write a temporary Markdown import brief and return its path."""
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".md",
+        prefix="claude_browse_import_",
+        delete=False,
+    )
+    try:
+        tmp.write(build_import_markdown(session, target_provider))
+    finally:
+        tmp.close()
+    return tmp.name
+
+
+def build_codex_import_markdown(session: dict) -> str:
+    """Backward-compatible wrapper for the original one-way handoff helper."""
+    return build_import_markdown(session, "codex")
+
+
+def write_codex_import_file(session: dict) -> str:
+    """Backward-compatible wrapper for the original one-way handoff helper."""
+    return write_import_file(session, "codex")
 
 
 def format_date(ts: str | None) -> str:
@@ -385,6 +742,12 @@ def folder_name(cwd: str | None, known_prefixes: Iterable[str] = ()) -> str:
     return rel.rstrip("/").rsplit("/", 1)[-1] if "/" in rel else (rel or "?")
 
 
+def provider_display_name(provider: str | None) -> str:
+    if provider == "codex":
+        return "CodeX"
+    return "Claude"
+
+
 def extract_query_terms(query: str) -> list[str]:
     """Pull the literal search terms out of a user query.
 
@@ -426,12 +789,12 @@ def highlight_terms(
     """
     if not terms or not text:
         return text
-    import re
+    import re as _re
 
     ordered = sorted({t for t in terms if t}, key=len, reverse=True)
     if not ordered:
         return text
-    pattern = re.compile("|".join(re.escape(t) for t in ordered), re.IGNORECASE)
+    pattern = _re.compile("|".join(_re.escape(t) for t in ordered), _re.IGNORECASE)
     return pattern.sub(
         lambda m: f"{open_marker}{m.group(0)}{close_marker}", text
     )
