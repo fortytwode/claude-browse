@@ -39,6 +39,7 @@ jobs:
         run: |
           claude-browse --help
           codex-browse --help
+          gemini-browse --help
 
   shim-smoke:
     name: Direct-script shim works (no pip install)
@@ -53,9 +54,10 @@ jobs:
 
       - name: Run shims directly
         run: |
-          chmod +x ./claude-browse ./codex-browse
+          chmod +x ./claude-browse ./codex-browse ./gemini-browse
           ./claude-browse --help
           ./codex-browse --help
+          ./gemini-browse --help
 
       - name: install.sh dry-run check
         run: bash -n install.sh

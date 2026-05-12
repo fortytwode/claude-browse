@@ -25,12 +25,14 @@ class ProviderSpec:
     list_index_records_reader: Callable[[], list[IndexRecord]]
     preview_messages_reader: Callable[[str, str], list[PreviewMessage]]
     transcript_turns_reader: Callable[[str, str], list[TranscriptTurn]]
+    has_local_state_reader: Callable[[], bool] | None = None
     session_info_reader: Callable[[str], dict | None] | None = None
     fielded_corpus_reader: Callable[[str], dict[str, str]] | None = None
     session_files_reader: Callable[[], list[str]] | None = None
     native_yolo_flag: str | None = None
     handoff_yolo_flag: str | None = None
     add_dir_flag: str = "--add-dir"
+    handoff_prompt_flag: str | None = None
     can_native_resume: bool = True
     assistant_turns_available: bool = True
 
@@ -44,11 +46,20 @@ class ProviderSpec:
         cmd = [self.binary]
         if yolo and self.handoff_yolo_flag:
             cmd.append(self.handoff_yolo_flag)
-        cmd.extend([self.add_dir_flag, import_dir, prompt])
+        cmd.extend([self.add_dir_flag, import_dir])
+        if self.handoff_prompt_flag:
+            cmd.extend([self.handoff_prompt_flag, prompt])
+        else:
+            cmd.append(prompt)
         return cmd
 
     def list_index_records(self) -> list[IndexRecord]:
         return self.list_index_records_reader()
+
+    def has_local_state(self) -> bool:
+        if self.has_local_state_reader is None:
+            return False
+        return self.has_local_state_reader()
 
     def preview_messages(
         self, path: str, session_id: str

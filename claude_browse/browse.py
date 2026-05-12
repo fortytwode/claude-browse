@@ -16,15 +16,13 @@ import tempfile
 
 from . import fts
 from .core import (
-    CODEX_STATE_DB,
-    SESSIONS_DIR,
     display_cwd,
     folder_name,
     format_date,
     provider_display_name,
     write_import_file,
 )
-from .providers import alternate_provider, get_provider, provider_ids
+from .providers import get_provider, provider_ids
 
 DEFAULT_LIMIT = 100
 
@@ -257,11 +255,9 @@ def _default_target_provider(argv0: str) -> str:
     program = os.path.basename(argv0 or "claude-browse")
     if program == "codex-browse":
         return "codex"
+    if program == "gemini-browse":
+        return "gemini"
     return "claude"
-
-
-def _other_target_provider(target_provider: str) -> str:
-    return alternate_provider(target_provider)
 
 
 def _parse_target_provider(args: list[str], argv0: str) -> tuple[str, list[str]]:
@@ -298,14 +294,14 @@ def _parse_target_provider(args: list[str], argv0: str) -> tuple[str, list[str]]
 def _print_usage(argv0: str, target_provider: str) -> None:
     program = os.path.basename(argv0 or "claude-browse")
     target_name = provider_display_name(target_provider)
-    other_name = provider_display_name(_other_target_provider(target_provider))
+    valid_targets = "`, `".join(provider_ids())
     print(
         f"Usage: {program} [options]\n"
         "\n"
         "Options:\n"
         "  --all                 Include every session, not just the most recent 100\n"
         "  --here                Only sessions started in the current directory\n"
-        "  --target PROVIDER     Override launch target (`claude` or `codex`)\n"
+        f"  --target PROVIDER     Override launch target (`{valid_targets}`)\n"
         "  -h, --help            Show this help\n"
         "\n"
         "Search syntax (typed inside the picker):\n"
@@ -317,7 +313,6 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         "Keys while browsing:\n"
         f"  Enter                 Open in {target_name} (yolo)\n"
         f"  Ctrl-S                Open in {target_name} (safe)\n"
-        f"  Ctrl-X                Open in {other_name} instead (yolo)\n"
         "  Shift-Up / Shift-Down Scroll the preview pane\n"
         "  Esc                   Quit\n"
         "\n"
@@ -386,25 +381,6 @@ def _continue_in_provider(
     os.execvp(target_spec.binary, cmd)
 
 
-def _continue_in_other_app(
-    session: dict,
-    provider: str,
-    session_id: str,
-    cwd: str,
-    prefixes: tuple[str, ...],
-) -> None:
-    del session_id
-    _continue_in_provider(
-        session,
-        provider,
-        _other_target_provider(provider),
-        cwd,
-        prefixes,
-        True,
-        "",
-    )
-
-
 def _open_in_target_provider(
     session: dict,
     source_provider: str,
@@ -441,15 +417,15 @@ def _parse_fzf_output(
     if not lines:
         return None
 
-    # fzf --print-query prints the query first. ctrl-s / ctrl-x add a separate
+    # fzf --print-query prints the query first. ctrl-s adds a separate
     # marker line via print(...)+accept before the selected row.
     selection_query = lines[0]
     marker = ""
     row_lines = lines[1:]
 
-    if row_lines and row_lines[0] in {"SAFE:", "XAPP:"}:
+    if row_lines and row_lines[0] == "SAFE:":
         marker = row_lines.pop(0)
-    elif selection_query.startswith(("SAFE:", "XAPP:")):
+    elif selection_query.startswith("SAFE:"):
         original = selection_query
         marker = selection_query[:5]
         selection_query = ""
@@ -459,8 +435,6 @@ def _parse_fzf_output(
     yolo = True
     if marker == "SAFE:":
         yolo = False
-    elif marker == "XAPP:":
-        selected_target = _other_target_provider(target_provider)
 
     row = next((line for line in reversed(row_lines) if "###" in line), "")
     if not row and "###" in selection_query:
@@ -470,6 +444,10 @@ def _parse_fzf_output(
     if not row or "###" not in row:
         return None
     return row, selected_target, yolo, selection_query
+
+
+def _providers_with_local_state() -> list[str]:
+    return [provider for provider in provider_ids() if get_provider(provider).has_local_state()]
 
 
 def main() -> None:
@@ -500,9 +478,10 @@ def main() -> None:
 
     _check_fzf()
 
-    if not os.path.isdir(SESSIONS_DIR) and not os.path.exists(CODEX_STATE_DB):
-        print("No local Claude Code or CodeX sessions found.")
-        print("Run `claude` or `codex` at least once to create session history.")
+    available_providers = _providers_with_local_state()
+    if not available_providers:
+        print("No local Claude Code, CodeX, or Gemini sessions found.")
+        print("Run `claude`, `codex`, or `gemini` at least once to create session history.")
         sys.exit(1)
 
     conn = fts.open_db()
@@ -546,8 +525,6 @@ def main() -> None:
 
     try:
         target_name = provider_display_name(target_provider)
-        alternate_target = _other_target_provider(target_provider)
-        alternate_name = provider_display_name(alternate_target)
         fzf_cmd = [
             "fzf",
             "--ansi",
@@ -560,7 +537,6 @@ def main() -> None:
                 "--header="
                 f"Enter: open in {target_name} (yolo) | "
                 f"Ctrl-S: open in {target_name} (safe) | "
-                f"Ctrl-X: open in {alternate_name} (yolo) | "
                 "Esc: quit | Shift-Up/Down: scroll preview"
             ),
             "--header-first",
@@ -573,7 +549,6 @@ def main() -> None:
             "--preview-window=right:45%:wrap",
             "--bind=shift-up:preview-up,shift-down:preview-down",
             "--bind=ctrl-s:print(SAFE:)+accept",
-            "--bind=ctrl-x:print(XAPP:)+accept",
         ]
 
         result = subprocess.run(
@@ -608,6 +583,8 @@ def main() -> None:
             print(f"Original folder no longer exists: {cwd}", file=sys.stderr)
             if provider == "codex":
                 print(f"Try: codex resume {session_id}", file=sys.stderr)
+            elif provider == "gemini":
+                print(f"Try: gemini --resume {session_id}", file=sys.stderr)
             else:
                 print(f"Try: claude --resume {session_id}", file=sys.stderr)
             sys.exit(1)

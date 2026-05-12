@@ -72,6 +72,7 @@ def test_format_row_keeps_sid_tail_attached():
 def test_default_target_provider_follows_entrypoint_name():
     assert browse._default_target_provider("claude-browse") == "claude"
     assert browse._default_target_provider("/tmp/codex-browse") == "codex"
+    assert browse._default_target_provider("/tmp/gemini-browse") == "gemini"
 
 
 def test_parse_target_provider_allows_override():
@@ -83,6 +84,15 @@ def test_parse_target_provider_allows_override():
     assert remaining == ["--all"]
 
 
+def test_parse_target_provider_allows_gemini_override():
+    target, remaining = browse._parse_target_provider(
+        ["--target=gemini", "--here"],
+        "claude-browse",
+    )
+    assert target == "gemini"
+    assert remaining == ["--here"]
+
+
 def test_parse_fzf_output_handles_print_query_safe_marker():
     row = "match ###abc-123###/home/alice/proj###claude"
     parsed = browse._parse_fzf_output(
@@ -90,15 +100,6 @@ def test_parse_fzf_output_handles_print_query_safe_marker():
         "claude",
     )
     assert parsed == (row, "claude", False, "pokpok")
-
-
-def test_parse_fzf_output_handles_print_query_xapp_marker():
-    row = "match ###abc-123###/home/alice/proj###claude"
-    parsed = browse._parse_fzf_output(
-        f"pokpok\nXAPP:\n{row}\n",
-        "claude",
-    )
-    assert parsed == (row, "codex", True, "pokpok")
 
 
 def test_parse_fzf_output_handles_print_query_default_accept():
@@ -170,7 +171,7 @@ def test_open_in_target_provider_handoffs_when_source_differs_from_target(
     assert captured and captured[0][0] == "handoff"
 
 
-def test_continue_in_other_app_from_claude_execs_codex_with_add_dir(
+def test_continue_in_provider_from_claude_execs_gemini_with_include_directories(
     monkeypatch,
 ):
     session = _info(path="/tmp/session.jsonl")
@@ -181,7 +182,7 @@ def test_continue_in_other_app_from_claude_execs_codex_with_add_dir(
         "write_import_file",
         lambda _session, target_provider, selection_query="": (
             "/tmp/claude_browse_import.md"
-            if target_provider == "codex"
+            if target_provider == "gemini"
             else "/tmp/unexpected.md"
         ),
     )
@@ -195,20 +196,23 @@ def test_continue_in_other_app_from_claude_execs_codex_with_add_dir(
     monkeypatch.setattr(browse.os, "execvp", fake_execvp)
 
     with pytest.raises(SystemExit):
-        browse._continue_in_other_app(
+        browse._continue_in_provider(
             session,
             "claude",
-            "abc-123",
+            "gemini",
             "/home/alice/proj",
             (),
+            True,
+            "",
         )
 
-    assert captured["binary"] == "codex"
+    assert captured["binary"] == "gemini"
     assert captured["cmd"] == [
-        "codex",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--add-dir",
+        "gemini",
+        "--yolo",
+        "--include-directories",
         "/tmp",
+        "--prompt-interactive",
         (
             "Continue the imported Claude session context from "
             "/tmp/claude_browse_import.md. Treat it as prior conversation "
@@ -220,10 +224,10 @@ def test_continue_in_other_app_from_claude_execs_codex_with_add_dir(
     ]
 
 
-def test_continue_in_other_app_from_codex_execs_claude_with_add_dir(
+def test_continue_in_provider_from_gemini_execs_claude_with_add_dir(
     monkeypatch,
 ):
-    session = _info(provider="codex", path="codex://abc-123")
+    session = _info(provider="gemini", path="/tmp/gemini-session.json")
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
@@ -245,12 +249,14 @@ def test_continue_in_other_app_from_codex_execs_claude_with_add_dir(
     monkeypatch.setattr(browse.os, "execvp", fake_execvp)
 
     with pytest.raises(SystemExit):
-        browse._continue_in_other_app(
+        browse._continue_in_provider(
             session,
-            "codex",
-            "abc-123",
+            "gemini",
+            "claude",
             "/home/alice/proj",
             (),
+            True,
+            "",
         )
 
     assert captured["binary"] == "claude"
@@ -260,7 +266,7 @@ def test_continue_in_other_app_from_codex_execs_claude_with_add_dir(
         "--add-dir",
         "/tmp",
         (
-            "Continue the imported CodeX session context from "
+            "Continue the imported Gemini session context from "
             "/tmp/codex_browse_import.md. Treat it as prior conversation "
             "state, read that file first, use the Reopen Intent section as "
             "the reason this thread was selected, prioritize the "
@@ -270,17 +276,19 @@ def test_continue_in_other_app_from_codex_execs_claude_with_add_dir(
     ]
 
 
-def test_continue_in_other_app_errors_when_target_binary_missing(monkeypatch):
-    session = _info(provider="codex", path="codex://abc-123")
+def test_continue_in_provider_errors_when_target_binary_missing(monkeypatch):
+    session = _info(provider="gemini", path="/tmp/gemini-session.json")
     monkeypatch.setattr(browse.shutil, "which", lambda _binary: None)
 
     with pytest.raises(SystemExit) as exc:
-        browse._continue_in_other_app(
+        browse._continue_in_provider(
             session,
-            "codex",
-            "abc-123",
+            "gemini",
+            "claude",
             "/home/alice/proj",
             (),
+            True,
+            "",
         )
 
     assert exc.value.code == 1

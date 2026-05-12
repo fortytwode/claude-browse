@@ -26,6 +26,10 @@ _CODEX_HISTORY_CACHE: dict[str, object] = {
 }
 
 
+def has_local_state() -> bool:
+    return os.path.exists(CODEX_STATE_DB) or os.path.exists(CODEX_HISTORY_PATH)
+
+
 def load_history() -> dict[str, list[dict[str, object]]]:
     if not os.path.exists(CODEX_HISTORY_PATH):
         return {}
@@ -177,6 +181,7 @@ PROVIDER = ProviderSpec(
     list_index_records_reader=list_index_records,
     preview_messages_reader=preview_messages,
     transcript_turns_reader=transcript_turns,
+    has_local_state_reader=has_local_state,
     native_yolo_flag="--dangerously-bypass-approvals-and-sandbox",
     handoff_yolo_flag="--dangerously-bypass-approvals-and-sandbox",
     can_native_resume=True,

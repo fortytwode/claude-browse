@@ -7,14 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from claude_browse.providers import alternate_provider, get_provider, provider_ids
 from claude_browse.providers import codex as codex_provider
+from claude_browse.providers import gemini as gemini_provider
+from claude_browse.providers import get_provider, provider_ids
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def test_provider_ids_include_claude_and_codex():
-    assert provider_ids() == ("claude", "codex")
+def test_provider_ids_include_claude_codex_and_gemini():
+    assert provider_ids() == ("claude", "codex", "gemini")
 
 
 def test_get_provider_rejects_unknown_provider():
@@ -64,19 +65,39 @@ def test_codex_handoff_cmd_matches_current_shape():
     ]
 
 
-def test_alternate_provider_flips_between_current_browser_targets():
-    assert alternate_provider("claude") == "codex"
-    assert alternate_provider("codex") == "claude"
+def test_gemini_native_resume_cmd_matches_current_shape():
+    spec = get_provider("gemini")
+    assert spec.native_resume_cmd("abc-123", True) == [
+        "gemini",
+        "--resume",
+        "abc-123",
+        "--yolo",
+    ]
+
+
+def test_gemini_handoff_cmd_matches_current_shape():
+    spec = get_provider("gemini")
+    assert spec.handoff_cmd("/tmp", "continue", True) == [
+        "gemini",
+        "--yolo",
+        "--include-directories",
+        "/tmp",
+        "--prompt-interactive",
+        "continue",
+    ]
 
 
 def test_provider_capabilities_match_current_products():
     claude = get_provider("claude")
     codex = get_provider("codex")
+    gemini = get_provider("gemini")
 
     assert claude.can_native_resume is True
     assert claude.assistant_turns_available is True
     assert codex.can_native_resume is True
     assert codex.assistant_turns_available is False
+    assert gemini.can_native_resume is True
+    assert gemini.assistant_turns_available is True
 
 
 def test_claude_provider_exposes_file_backed_helpers():
@@ -153,3 +174,45 @@ def test_codex_provider_lists_index_records(monkeypatch, tmp_path):
     assert records[0]["provider"] == "codex"
     assert records[0]["session_id"] == "019e-test-aaaa-bbbb-cccccccccccc"
     assert "paywall copy" in records[0]["last_msg"]
+
+
+def test_gemini_provider_lists_index_records(monkeypatch, tmp_path):
+    monkeypatch.setenv("USER", "alice")
+    monkeypatch.setenv("HOME", "/home/alice")
+
+    tmp_dir = tmp_path / "tmp"
+    project_dir = tmp_dir / "team-operations"
+    chats_dir = project_dir / "chats"
+    chats_dir.mkdir(parents=True)
+
+    (project_dir / ".project_root").write_text("/home/alice/team-operations\n")
+    (chats_dir / "session-2026-05-12T08-00-abcdef12.json").write_text(
+        """{
+  "sessionId": "gemini-1234-uuid",
+  "projectHash": "hash",
+  "startTime": "2026-05-12T08:00:00Z",
+  "lastUpdated": "2026-05-12T08:05:00Z",
+  "messages": [
+    {"id": "1", "timestamp": "2026-05-12T08:00:00Z", "type": "user", "content": [{"text": "Please review the homepage copy"}]},
+    {"id": "2", "timestamp": "2026-05-12T08:01:00Z", "type": "gemini", "content": [{"text": "I found three issues in the headline."}]},
+    {"id": "3", "timestamp": "2026-05-12T08:05:00Z", "type": "user", "content": [{"text": "Now switch to the pricing page"}]}
+  ],
+  "kind": "main"
+}"""
+    )
+
+    monkeypatch.setattr(gemini_provider, "GEMINI_TMP_DIR", str(tmp_dir))
+    monkeypatch.setattr(
+        gemini_provider,
+        "GEMINI_PROJECTS_PATH",
+        str(tmp_path / "projects.json"),
+    )
+
+    spec = get_provider("gemini")
+    records = spec.list_index_records()
+
+    assert len(records) == 1
+    assert records[0]["provider"] == "gemini"
+    assert records[0]["session_id"] == "gemini-1234-uuid"
+    assert records[0]["cwd"] == "/home/alice/team-operations"
+    assert "pricing page" in records[0]["last_msg"]

@@ -16,6 +16,7 @@ import pytest
 from claude_browse import core
 from claude_browse.providers import claude as claude_provider
 from claude_browse.providers import codex as codex_provider
+from claude_browse.providers import gemini as gemini_provider
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -333,6 +334,49 @@ def test_list_index_records_includes_codex(monkeypatch, tmp_path):
     assert rec["cwd"] == "/home/alice/code/codex-app"
 
 
+def test_list_index_records_includes_gemini(monkeypatch, tmp_path):
+    tmp_dir = tmp_path / "tmp"
+    project_dir = tmp_dir / "team-operations"
+    chats_dir = project_dir / "chats"
+    chats_dir.mkdir(parents=True)
+
+    (project_dir / ".project_root").write_text("/Users/alice/team-operations\n")
+    (chats_dir / "session-2026-05-12T08-00-abcdef12.json").write_text(
+        """{
+  "sessionId": "gemini-1234-uuid",
+  "projectHash": "hash",
+  "startTime": "2026-05-12T08:00:00Z",
+  "lastUpdated": "2026-05-12T08:05:00Z",
+  "messages": [
+    {"id": "1", "timestamp": "2026-05-12T08:00:00Z", "type": "user", "content": [{"text": "Please review the homepage copy"}]},
+    {"id": "2", "timestamp": "2026-05-12T08:01:00Z", "type": "gemini", "content": [{"text": "I found three issues in the headline."}]},
+    {"id": "3", "timestamp": "2026-05-12T08:05:00Z", "type": "user", "content": [{"text": "Now switch to the pricing page"}]}
+  ],
+  "kind": "main"
+}"""
+    )
+
+    empty_sessions_dir = tmp_path / "claude-projects"
+    empty_sessions_dir.mkdir()
+
+    monkeypatch.setattr(core, "provider_ids", lambda: ("gemini",))
+    monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(empty_sessions_dir))
+    monkeypatch.setattr(gemini_provider, "GEMINI_TMP_DIR", str(tmp_dir))
+    monkeypatch.setattr(
+        gemini_provider,
+        "GEMINI_PROJECTS_PATH",
+        str(tmp_path / "projects.json"),
+    )
+
+    records = core.list_index_records()
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["provider"] == "gemini"
+    assert rec["session_id"] == "gemini-1234-uuid"
+    assert rec["cwd"] == "/home/alice/team-operations"
+    assert "pricing page" in rec["last_msg"]
+
+
 def test_build_import_markdown_targets_codex(monkeypatch):
     monkeypatch.setattr(
         core,
@@ -459,10 +503,50 @@ def test_build_import_markdown_targets_claude_from_codex(monkeypatch):
 
     assert "handed into a new Claude session." in text
     assert "- Source app: CodeX" in text
-    assert "Note: Codex local history only exposes user turns here." in text
+    assert "Note: CodeX local history only exposes user turns here." in text
     assert "Most recent turns are shown first." in text
     assert "### User" in text
     assert "Review the launch checklist" in text
+
+
+def test_build_import_markdown_targets_claude_from_gemini(monkeypatch):
+    monkeypatch.setattr(
+        core,
+        "get_provider",
+        lambda provider: (
+            SimpleNamespace(
+                display_name="Gemini",
+                transcript_excerpt=lambda _path, _session_id, limit=24: [
+                    ("user", "Review the retention policy"),
+                    ("assistant", "The current window is 30 days."),
+                ],
+                transcript_turns=lambda _path, _session_id: [],
+                assistant_turns_available=True,
+            )
+            if provider == "gemini"
+            else SimpleNamespace(display_name="Claude")
+        ),
+    )
+
+    text = core.build_import_markdown(
+        {
+            "provider": "gemini",
+            "session_id": "gemini-1234-uuid",
+            "cwd": "/home/alice/proj",
+            "timestamp": "2026-05-12T07:00:00Z",
+            "last_timestamp": "2026-05-12T07:30:00Z",
+            "name": "Retention review",
+            "first_msg": "Review the retention policy",
+            "last_msg": "Review the retention policy",
+            "path": "/tmp/session-gemini.json",
+        },
+        "claude",
+    )
+
+    assert "handed into a new Claude session." in text
+    assert "- Source app: Gemini" in text
+    assert "The current window is 30 days." in text
+    assert "only exposes user turns" not in text
 
 
 def test_get_preview_messages_dispatches_through_provider(monkeypatch):

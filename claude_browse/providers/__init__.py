@@ -10,10 +10,12 @@ from __future__ import annotations
 from .base import ProviderSpec
 from .claude import PROVIDER as CLAUDE_PROVIDER
 from .codex import PROVIDER as CODEX_PROVIDER
+from .gemini import PROVIDER as GEMINI_PROVIDER
 
 _PROVIDERS: dict[str, ProviderSpec] = {
     "claude": CLAUDE_PROVIDER,
     "codex": CODEX_PROVIDER,
+    "gemini": GEMINI_PROVIDER,
 }
 
 
@@ -28,16 +30,8 @@ def provider_ids() -> tuple[str, ...]:
     return tuple(_PROVIDERS)
 
 
-def alternate_provider(provider: str | None) -> str:
-    current = get_provider(provider).provider_id
-    if current == "codex":
-        return "claude"
-    return "codex"
-
-
 __all__ = [
     "ProviderSpec",
-    "alternate_provider",
     "get_provider",
     "provider_ids",
 ]
