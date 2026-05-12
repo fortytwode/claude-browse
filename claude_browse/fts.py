@@ -16,12 +16,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 
-from .core import (
-    canonicalize_path,
-    extract_fielded_corpus,
-    get_session_info,
-    list_session_files,
-)
+from .core import list_index_records
 
 DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
 # v2: added last_timestamp column so the list view can sort by most recent
@@ -33,7 +28,10 @@ DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
 #     repopulate the new columns (~10s for ~4000 sessions). Subsequent
 #     launches resume the per-file mtime fast-path. See _init_schema for
 #     the drop+recreate dance.
-SCHEMA_VERSION = 3
+# v4: sessions table now stores provider ("claude" | "codex"), and reindex()
+#     consumes a provider-agnostic record stream so the browser can show both
+#     Claude Code and CodeX threads in one list.
+SCHEMA_VERSION = 4
 
 
 def open_db(path: str = DB_PATH) -> sqlite3.Connection:
@@ -77,6 +75,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS sessions (
             sid             TEXT PRIMARY KEY,
             path            TEXT NOT NULL UNIQUE,
+            provider        TEXT NOT NULL DEFAULT 'claude',
             cwd             TEXT,
             timestamp       TEXT,
             last_timestamp  TEXT,
@@ -115,8 +114,8 @@ def reindex(conn: sqlite3.Connection) -> tuple[int, int, int]:
 
     Returns (added, updated, removed) counts for caller diagnostics.
     """
-    files = list_session_files()
-    file_mtimes: dict[str, float] = {f: os.path.getmtime(f) for f in files}
+    records = list_index_records()
+    record_map: dict[str, dict] = {r["path"]: r for r in records}
 
     existing: dict[str, tuple[str, float]] = {
         row[0]: (row[1], row[2])
@@ -126,17 +125,17 @@ def reindex(conn: sqlite3.Connection) -> tuple[int, int, int]:
     added = updated = removed = 0
     now = time.time()
 
-    for path, mtime in file_mtimes.items():
+    for path, record in record_map.items():
         prev = existing.get(path)
         if prev is None:
-            if _index_file(conn, path, mtime, now):
+            if _index_record(conn, record, now):
                 added += 1
-        elif abs(prev[1] - mtime) > 0.001:
-            if _index_file(conn, path, mtime, now):
+        elif abs(prev[1] - record["mtime"]) > 0.001:
+            if _index_record(conn, record, now):
                 updated += 1
 
     for path, (sid, _) in existing.items():
-        if path not in file_mtimes:
+        if path not in record_map:
             conn.execute("DELETE FROM sessions WHERE sid = ?", (sid,))
             conn.execute("DELETE FROM sessions_fts WHERE sid = ?", (sid,))
             removed += 1
@@ -145,29 +144,29 @@ def reindex(conn: sqlite3.Connection) -> tuple[int, int, int]:
     return (added, updated, removed)
 
 
-def _index_file(
-    conn: sqlite3.Connection, path: str, mtime: float, now: float
+def _index_record(
+    conn: sqlite3.Connection, record: dict, now: float
 ) -> bool:
-    """Parse one JSONL file and upsert it into the index.
+    """Upsert one normalized session record into the index.
 
-    Returns False if the file has no usable session data (empty, unreadable,
-    or no first user message), so reindex() can skip counting it.
+    Returns False if the record has no usable session data, so reindex() can
+    skip counting it.
     """
-    info = get_session_info(path)
-    if not info or not info.get("session_id") or not info.get("first_msg"):
+    if not record or not record.get("session_id") or not record.get("first_msg"):
         return False
 
-    sid = info["session_id"]
-    fields = extract_fielded_corpus(path)
+    sid = record["session_id"]
+    fields = record["fields"]
 
     conn.execute(
         """
         INSERT INTO sessions (
-            sid, path, cwd, timestamp, last_timestamp, title, first_msg,
-            last_msg, msg_count, mtime, indexed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            sid, path, provider, cwd, timestamp, last_timestamp, title,
+            first_msg, last_msg, msg_count, mtime, indexed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(sid) DO UPDATE SET
             path = excluded.path,
+            provider = excluded.provider,
             cwd = excluded.cwd,
             timestamp = excluded.timestamp,
             last_timestamp = excluded.last_timestamp,
@@ -180,15 +179,16 @@ def _index_file(
         """,
         (
             sid,
-            path,
-            canonicalize_path(info.get("cwd")),
-            info.get("timestamp"),
-            info.get("last_timestamp"),
-            info.get("name"),
-            info.get("first_msg"),
-            info.get("last_msg"),
-            info.get("msg_count", 0),
-            mtime,
+            record["path"],
+            record.get("provider") or "claude",
+            record.get("cwd"),
+            record.get("timestamp"),
+            record.get("last_timestamp"),
+            record.get("name"),
+            record.get("first_msg"),
+            record.get("last_msg"),
+            record.get("msg_count", 0),
+            record["mtime"],
             now,
         ),
     )
@@ -281,8 +281,8 @@ def search(
     # know what they searched for; what they want is "the newest session
     # that mentions runna," not "the session where runna scored best."
     sql = """
-        SELECT s.sid, s.path, s.cwd, s.timestamp, s.last_timestamp, s.title,
-               s.first_msg, s.last_msg, s.msg_count, s.mtime,
+        SELECT s.sid, s.path, s.provider, s.cwd, s.timestamp, s.last_timestamp,
+               s.title, s.first_msg, s.last_msg, s.msg_count, s.mtime,
                snippet(sessions_fts, -1, '\x01', '\x02', '…', 12) AS context
         FROM sessions_fts
         JOIN sessions s ON s.sid = sessions_fts.sid
@@ -353,8 +353,8 @@ def search_ranked(
 
     w = list(weights) + [1.0] * (7 - len(weights))  # tolerate short tuples
     sql = f"""
-        SELECT s.sid, s.path, s.cwd, s.timestamp, s.last_timestamp, s.title,
-               s.first_msg, s.last_msg, s.msg_count, s.mtime,
+        SELECT s.sid, s.path, s.provider, s.cwd, s.timestamp, s.last_timestamp,
+               s.title, s.first_msg, s.last_msg, s.msg_count, s.mtime,
                snippet(sessions_fts, -1, '\x01', '\x02', '…', 12) AS context,
                bm25(sessions_fts, {w[0]}, {w[1]}, {w[2]}, {w[3]}, {w[4]}, {w[5]}, {w[6]}) AS bm
         FROM sessions_fts
@@ -370,14 +370,14 @@ def search_ranked(
     now = datetime.now(timezone.utc)
     scored: list[tuple[float, tuple]] = []
     for r in rows:
-        bm = -(r[11] or 0.0)
-        age = _age_days(r[4] or r[3], now)
+        bm = -float(r[12] or 0.0)
+        age = _age_days(r[5] or r[4], now)
         recency = math.exp(-age / half_life_days) if age >= 0 else 0.0
         score = bm + recency_alpha * recency
         scored.append((score, r))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [_row_to_dict(r[:11]) for _, r in scored[:limit]]
+    return [_row_to_dict(r[:12]) for _, r in scored[:limit]]
 
 
 def _age_days(ts_str: str | None, now: datetime) -> float:
@@ -401,8 +401,8 @@ def list_recent(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
     """
     rows = conn.execute(
         """
-        SELECT sid, path, cwd, timestamp, last_timestamp, title, first_msg,
-               last_msg, msg_count, mtime, '' AS context
+        SELECT sid, path, provider, cwd, timestamp, last_timestamp, title,
+               first_msg, last_msg, msg_count, mtime, '' AS context
         FROM sessions
         ORDER BY COALESCE(last_timestamp, timestamp, '') DESC, mtime DESC
         LIMIT ?
@@ -416,8 +416,8 @@ def get_by_sid(conn: sqlite3.Connection, sid: str) -> dict | None:
     """Look up one session by its ID. Used to resolve fzf's selection."""
     row = conn.execute(
         """
-        SELECT sid, path, cwd, timestamp, last_timestamp, title, first_msg,
-               last_msg, msg_count, mtime, '' AS context
+        SELECT sid, path, provider, cwd, timestamp, last_timestamp, title,
+               first_msg, last_msg, msg_count, mtime, '' AS context
         FROM sessions
         WHERE sid = ?
         """,
@@ -430,13 +430,14 @@ def _row_to_dict(r) -> dict:
     return {
         "session_id": r[0],
         "path": r[1],
-        "cwd": r[2],
-        "timestamp": r[3],
-        "last_timestamp": r[4],
-        "name": r[5],
-        "first_msg": r[6],
-        "last_msg": r[7],
-        "msg_count": r[8] or 0,
-        "mtime": r[9],
-        "context": r[10],
+        "provider": r[2],
+        "cwd": r[3],
+        "timestamp": r[4],
+        "last_timestamp": r[5],
+        "name": r[6],
+        "first_msg": r[7],
+        "last_msg": r[8],
+        "msg_count": r[9] or 0,
+        "mtime": r[10],
+        "context": r[11],
     }

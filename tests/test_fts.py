@@ -42,14 +42,15 @@ def _seed(conn, sid: str, corpus: str, **meta) -> None:
     timestamp = meta.get("timestamp", "2026-05-01T10:00:00Z")
     conn.execute(
         """
-        INSERT INTO sessions (sid, path, cwd, timestamp, last_timestamp,
+        INSERT INTO sessions (sid, path, provider, cwd, timestamp, last_timestamp,
                               title, first_msg, last_msg, msg_count, mtime,
                               indexed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             sid,
             meta.get("path", f"/tmp/{sid}.jsonl"),
+            meta.get("provider", "claude"),
             meta.get("cwd", "/tmp"),
             timestamp,
             meta.get("last_timestamp", timestamp),
@@ -201,6 +202,39 @@ def test_search_invalid_fts_query_returns_empty(db):
     assert isinstance(results, list)
 
 
+def test_search_ranked_returns_matches_without_crashing(db):
+    _seed(db, "s1", "the pokpok rollout is ready")
+    _seed(db, "s2", "unrelated topic only")
+
+    results = fts.search_ranked(db, "pokpok")
+    assert [r["session_id"] for r in results] == ["s1"]
+
+
+def test_search_ranked_uses_last_activity_for_recency(db):
+    _seed(
+        db,
+        "old_resumed",
+        "pokpok appears here",
+        timestamp="2026-01-01T00:00:00Z",
+        last_timestamp="2026-05-05T00:00:00Z",
+        mtime=1.0,
+    )
+    _seed(
+        db,
+        "newer_dormant",
+        "pokpok appears here",
+        timestamp="2026-04-01T00:00:00Z",
+        last_timestamp="2026-04-01T00:30:00Z",
+        mtime=2.0,
+    )
+
+    results = fts.search_ranked(db, "pokpok")
+    assert [r["session_id"] for r in results][:2] == [
+        "old_resumed",
+        "newer_dormant",
+    ]
+
+
 # --- reindex ---------------------------------------------------------------
 
 
@@ -211,7 +245,31 @@ def test_reindex_picks_up_new_files(db, tmp_path, monkeypatch):
     target = sessions_dir / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
     shutil.copy(FIXTURES / "sample_session.jsonl", target)
 
-    monkeypatch.setattr(fts, "list_session_files", lambda: [str(target)])
+    monkeypatch.setattr(
+        fts,
+        "list_index_records",
+        lambda: [{
+            "path": str(target),
+            "provider": "claude",
+            "session_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "first_msg": "the login page crashes when I click continue",
+            "last_msg": "email validation should happen before the redirect",
+            "timestamp": "2026-04-01T10:00:00Z",
+            "last_timestamp": "2026-04-01T10:10:00Z",
+            "cwd": "/Users/alice/code/webapp",
+            "name": "Debug login flow",
+            "msg_count": 4,
+            "mtime": os.path.getmtime(target),
+            "fields": {
+                "cwd": "/users/alice/code/webapp",
+                "title": "debug login flow",
+                "first_msg": "the login page crashes when i click continue",
+                "user_text": "email validation should happen before the redirect",
+                "asst_text": "the login handler is short-circuiting on missing email validation",
+                "boilerplate": "",
+            },
+        }],
+    )
 
     added, updated, removed = fts.reindex(db)
     assert added == 1
@@ -229,7 +287,31 @@ def test_reindex_skips_unchanged(db, tmp_path, monkeypatch):
     target = sessions_dir / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
     shutil.copy(FIXTURES / "sample_session.jsonl", target)
 
-    monkeypatch.setattr(fts, "list_session_files", lambda: [str(target)])
+    monkeypatch.setattr(
+        fts,
+        "list_index_records",
+        lambda: [{
+            "path": str(target),
+            "provider": "claude",
+            "session_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "first_msg": "the login page crashes when I click continue",
+            "last_msg": "email validation should happen before the redirect",
+            "timestamp": "2026-04-01T10:00:00Z",
+            "last_timestamp": "2026-04-01T10:10:00Z",
+            "cwd": "/Users/alice/code/webapp",
+            "name": "Debug login flow",
+            "msg_count": 4,
+            "mtime": os.path.getmtime(target),
+            "fields": {
+                "cwd": "/users/alice/code/webapp",
+                "title": "debug login flow",
+                "first_msg": "the login page crashes when i click continue",
+                "user_text": "email validation should happen before the redirect",
+                "asst_text": "the login handler is short-circuiting on missing email validation",
+                "boilerplate": "",
+            },
+        }],
+    )
 
     fts.reindex(db)
     added2, updated2, removed2 = fts.reindex(db)
@@ -242,11 +324,35 @@ def test_reindex_removes_deleted_files(db, tmp_path, monkeypatch):
     target = sessions_dir / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
     shutil.copy(FIXTURES / "sample_session.jsonl", target)
 
-    monkeypatch.setattr(fts, "list_session_files", lambda: [str(target)])
+    monkeypatch.setattr(
+        fts,
+        "list_index_records",
+        lambda: [{
+            "path": str(target),
+            "provider": "claude",
+            "session_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "first_msg": "the login page crashes when I click continue",
+            "last_msg": "email validation should happen before the redirect",
+            "timestamp": "2026-04-01T10:00:00Z",
+            "last_timestamp": "2026-04-01T10:10:00Z",
+            "cwd": "/Users/alice/code/webapp",
+            "name": "Debug login flow",
+            "msg_count": 4,
+            "mtime": os.path.getmtime(target),
+            "fields": {
+                "cwd": "/users/alice/code/webapp",
+                "title": "debug login flow",
+                "first_msg": "the login page crashes when i click continue",
+                "user_text": "email validation should happen before the redirect",
+                "asst_text": "the login handler is short-circuiting on missing email validation",
+                "boilerplate": "",
+            },
+        }],
+    )
     fts.reindex(db)
     assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
 
-    monkeypatch.setattr(fts, "list_session_files", lambda: [])
+    monkeypatch.setattr(fts, "list_index_records", lambda: [])
     _, _, removed = fts.reindex(db)
     assert removed == 1
     assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
@@ -257,6 +363,7 @@ def test_get_by_sid_roundtrip(db):
     info = fts.get_by_sid(db, "s1")
     assert info is not None
     assert info["session_id"] == "s1"
+    assert info["provider"] == "claude"
     assert info["name"] == "My Session"
     assert info["cwd"] == "/Users/me/proj"
 

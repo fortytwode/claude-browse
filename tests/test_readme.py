@@ -1,4 +1,4 @@
-"""README regression checks for documented handoff behavior."""
+"""README regression checks for documented browser behavior."""
 
 from __future__ import annotations
 
@@ -12,10 +12,12 @@ def _readme_text() -> str:
     return README.read_text()
 
 
-def test_readme_documents_other_app_handoff():
+def test_readme_documents_target_app_browsers():
     text = _readme_text()
-    assert "Continue the selected thread in the other app" in text
-    assert "starts a fresh session in the other app" in text
+    assert "codex-browse" in text
+    assert "opens everything in Claude" in text
+    assert "opens everything in CodeX" in text
+    assert "Cross-app open is not a true native resume." in text
 
 
 def test_readme_documents_provider_aware_flag_passthrough():

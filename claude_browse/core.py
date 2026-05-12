@@ -516,6 +516,10 @@ def get_preview_messages(provider: str, path: str, session_id: str) -> list[tupl
 
 
 def _claude_transcript_excerpt(path: str, limit: int = 24) -> list[tuple[str, str]]:
+    return _claude_transcript_turns(path)[-limit:]
+
+
+def _claude_transcript_turns(path: str) -> list[tuple[str, str]]:
     excerpt: list[tuple[str, str]] = []
 
     try:
@@ -539,12 +543,16 @@ def _claude_transcript_excerpt(path: str, limit: int = 24) -> list[tuple[str, st
     except Exception:
         return []
 
-    return excerpt[-limit:]
+    return excerpt
 
 
 def _codex_transcript_excerpt(session_id: str, limit: int = 24) -> list[tuple[str, str]]:
+    return _codex_transcript_turns(session_id)[-limit:]
+
+
+def _codex_transcript_turns(session_id: str) -> list[tuple[str, str]]:
     excerpt: list[tuple[str, str]] = []
-    for entry in _load_codex_history().get(session_id, [])[-limit:]:
+    for entry in _load_codex_history().get(session_id, []):
         cleaned = _flatten_text(str(entry.get("text", "")))
         if len(cleaned) <= 3 or _is_noise_text(cleaned):
             continue
@@ -552,7 +560,42 @@ def _codex_transcript_excerpt(session_id: str, limit: int = 24) -> list[tuple[st
     return excerpt
 
 
-def build_import_markdown(session: dict, target_provider: str) -> str:
+def _latest_turn_text(excerpt: list[tuple[str, str]], role: str) -> str:
+    for turn_role, text in reversed(excerpt):
+        if turn_role == role:
+            return text
+    return ""
+
+
+def _matching_turns(
+    provider: str,
+    path: str,
+    session_id: str,
+    selection_query: str,
+    limit: int = 6,
+) -> list[tuple[str, str]]:
+    terms = [term.lower() for term in extract_query_terms(selection_query) if term.strip()]
+    if not terms:
+        return []
+
+    if provider == "codex":
+        turns = _codex_transcript_turns(session_id)
+    else:
+        turns = _claude_transcript_turns(path)
+
+    matched = [
+        (role, text)
+        for role, text in turns
+        if any(term in text.lower() for term in terms)
+    ]
+    return list(reversed(matched[-limit:]))
+
+
+def build_import_markdown(
+    session: dict,
+    target_provider: str,
+    selection_query: str | None = None,
+) -> str:
     """Create a compact Markdown brief so another app can continue a thread."""
     provider = session.get("provider") or "claude"
     session_id = session.get("session_id") or "?"
@@ -563,11 +606,20 @@ def build_import_markdown(session: dict, target_provider: str) -> str:
     first_msg = session.get("first_msg") or ""
     last_msg = session.get("last_msg") or ""
     target_name = provider_display_name(target_provider)
+    path = session.get("path") or ""
 
     if provider == "codex":
         excerpt = _codex_transcript_excerpt(session_id)
     else:
-        excerpt = _claude_transcript_excerpt(session.get("path") or "")
+        excerpt = _claude_transcript_excerpt(path)
+    recent_excerpt = list(reversed(excerpt[-10:]))
+    latest_assistant = _latest_turn_text(excerpt, "assistant")
+    matched_turns = _matching_turns(
+        provider,
+        path,
+        session_id,
+        selection_query or "",
+    )
 
     lines = [
         "# Imported Session Context",
@@ -577,6 +629,10 @@ def build_import_markdown(session: dict, target_provider: str) -> str:
             f"{target_name} session."
         ),
         "It is not a native cross-vendor resume.",
+        (
+            "Prioritize the end-of-thread state and most recent turns below "
+            "over the original opening prompt if they differ."
+        ),
         "",
         f"- Source app: {provider_display_name(provider)}",
         f"- Original session id: `{session_id}`",
@@ -584,28 +640,67 @@ def build_import_markdown(session: dict, target_provider: str) -> str:
         f"- Started: {started}",
         f"- Last activity: {last_activity}",
     ]
-    if title:
-        lines.append(f"- Title: {title}")
-    if first_msg:
-        lines.append(f"- First user prompt: {first_msg}")
-    if last_msg:
-        lines.append(f"- Latest substantive user message: {last_msg}")
+
+    if selection_query and selection_query.strip():
+        lines.extend([
+            "",
+            "## Reopen Intent",
+            "",
+            (
+                f"- This thread was reopened from a search for: "
+                f"`{selection_query.strip()}`"
+            ),
+        ])
+        if matched_turns:
+            lines.extend([
+                "- Matching turns below are likely why this thread was selected.",
+                "",
+            ])
+            for role, text in matched_turns:
+                label = "User" if role == "user" else "Assistant"
+                lines.append(f"### {label}")
+                lines.append(text)
+                lines.append("")
+        else:
+            lines.extend([
+                "- No exact matching transcript turns were recovered for that query.",
+                "",
+            ])
 
     lines.extend([
         "",
-        "## Transcript Excerpt",
+        "## End-of-Thread Priority",
         "",
     ])
 
-    if not excerpt:
-        lines.append("No transcript excerpt was available.")
+    if last_msg:
+        lines.append(f"- Latest substantive user message: {last_msg}")
+    if latest_assistant:
+        lines.append(f"- Latest assistant response: {latest_assistant}")
+    if title:
+        lines.append(f"- Original session title or topic: {title}")
+    if first_msg:
+        lines.append(f"- Original first user prompt: {first_msg}")
+
+    lines.extend([
+        "",
+        "## Most Recent Transcript Turns",
+        "",
+    ])
+
+    if not recent_excerpt:
+        lines.append("No recent transcript excerpt was available.")
         return "\n".join(lines) + "\n"
 
     if provider == "codex":
         lines.append("Note: Codex local history only exposes user turns here.")
+        lines.append("Most recent turns are shown first.")
+        lines.append("")
+    else:
+        lines.append("Most recent turns are shown first.")
         lines.append("")
 
-    for role, text in excerpt:
+    for role, text in recent_excerpt:
         label = "User" if role == "user" else "Assistant"
         lines.append(f"### {label}")
         lines.append(text)
@@ -614,7 +709,11 @@ def build_import_markdown(session: dict, target_provider: str) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def write_import_file(session: dict, target_provider: str) -> str:
+def write_import_file(
+    session: dict,
+    target_provider: str,
+    selection_query: str | None = None,
+) -> str:
     """Write a temporary Markdown import brief and return its path."""
     tmp = tempfile.NamedTemporaryFile(
         mode="w",
@@ -623,7 +722,7 @@ def write_import_file(session: dict, target_provider: str) -> str:
         delete=False,
     )
     try:
-        tmp.write(build_import_markdown(session, target_provider))
+        tmp.write(build_import_markdown(session, target_provider, selection_query))
     finally:
         tmp.close()
     return tmp.name

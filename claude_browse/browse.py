@@ -26,6 +26,8 @@ from .core import (
 )
 
 DEFAULT_LIMIT = 100
+TARGET_PROVIDERS = ("claude", "codex")
+ALTERNATE_TARGET = {"claude": "codex", "codex": "claude"}
 
 
 def _folder_prefixes() -> tuple[str, ...]:
@@ -252,13 +254,58 @@ def _check_fzf() -> None:
     sys.exit(1)
 
 
-def _print_usage() -> None:
+def _default_target_provider(argv0: str) -> str:
+    program = os.path.basename(argv0 or "claude-browse")
+    if program == "codex-browse":
+        return "codex"
+    return "claude"
+
+
+def _other_target_provider(target_provider: str) -> str:
+    return ALTERNATE_TARGET.get(target_provider, "codex")
+
+
+def _parse_target_provider(args: list[str], argv0: str) -> tuple[str, list[str]]:
+    target_provider = _default_target_provider(argv0)
+    remaining: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--target":
+            if i + 1 >= len(args):
+                print("Missing value for --target", file=sys.stderr)
+                sys.exit(2)
+            target_provider = args[i + 1].strip().lower()
+            i += 2
+            continue
+        if arg.startswith("--target="):
+            target_provider = arg.split("=", 1)[1].strip().lower()
+            i += 1
+            continue
+        remaining.append(arg)
+        i += 1
+
+    if target_provider not in TARGET_PROVIDERS:
+        print(
+            f"Unknown target provider: {target_provider}. "
+            f"Expected one of: {', '.join(TARGET_PROVIDERS)}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return target_provider, remaining
+
+
+def _print_usage(argv0: str, target_provider: str) -> None:
+    program = os.path.basename(argv0 or "claude-browse")
+    target_name = provider_display_name(target_provider)
+    other_name = provider_display_name(_other_target_provider(target_provider))
     print(
-        "Usage: claude-browse [options]\n"
+        f"Usage: {program} [options]\n"
         "\n"
         "Options:\n"
         "  --all                 Include every session, not just the most recent 100\n"
         "  --here                Only sessions started in the current directory\n"
+        "  --target PROVIDER     Override launch target (`claude` or `codex`)\n"
         "  -h, --help            Show this help\n"
         "\n"
         "Search syntax (typed inside the picker):\n"
@@ -268,9 +315,9 @@ def _print_usage() -> None:
         "  runna*                Prefix match: runna, runnathon, runna2026, ...\n"
         "\n"
         "Keys while browsing:\n"
-        "  Enter                 Native resume in the source app (yolo)\n"
-        "  Ctrl-S                Native resume in the source app (safe)\n"
-        "  Ctrl-X                Continue the selected thread in the other app\n"
+        f"  Enter                 Open in {target_name} (yolo if native resume)\n"
+        f"  Ctrl-S                Open in {target_name} (safe if native resume)\n"
+        f"  Ctrl-X                Open in {other_name} instead\n"
         "  Shift-Up / Shift-Down Scroll the preview pane\n"
         "  Esc                   Quit\n"
         "\n"
@@ -278,6 +325,13 @@ def _print_usage() -> None:
         "  CLAUDE_BROWSE_PATH_ALIASES      src=dst[:src2=dst2...] custom cwd aliases\n"
         "  CLAUDE_BROWSE_FOLDER_PREFIXES   colon-separated prefixes for short folder names"
     )
+
+
+def _require_binary(provider: str) -> None:
+    if shutil.which(provider):
+        return
+    print(f"Target app not found on PATH: {provider}", file=sys.stderr)
+    sys.exit(1)
 
 
 def _native_resume(
@@ -288,6 +342,7 @@ def _native_resume(
     prefixes: tuple[str, ...],
     yolo: bool,
 ) -> None:
+    _require_binary(provider)
     if provider == "codex":
         cmd = ["codex", "resume", session_id]
         if yolo:
@@ -304,34 +359,32 @@ def _native_resume(
     os.execvp("claude", cmd)
 
 
-def _continue_in_other_app(
+def _continue_in_provider(
     session: dict,
-    provider: str,
-    session_id: str,
+    source_provider: str,
+    target_provider: str,
     cwd: str,
     prefixes: tuple[str, ...],
+    selection_query: str = "",
 ) -> None:
-    target_provider = "claude" if provider == "codex" else "codex"
     target_name = provider_display_name(target_provider)
 
-    if not shutil.which(target_provider):
-        print(
-            f"Target app not found on PATH: {target_provider}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    _require_binary(target_provider)
 
     try:
-        import_path = write_import_file(session, target_provider)
+        import_path = write_import_file(session, target_provider, selection_query)
     except OSError as exc:
         print(f"Could not write import brief: {exc}", file=sys.stderr)
         sys.exit(1)
 
     import_dir = os.path.dirname(import_path) or cwd
     prompt = (
-        f"Continue the imported {provider_display_name(provider)} session "
+        f"Continue the imported {provider_display_name(source_provider)} session "
         f"context from {import_path}. Treat it as prior conversation state, "
-        "read that file first, then continue the work in this directory."
+        "read that file first, use the Reopen Intent section as the reason "
+        "this thread was selected, prioritize the end-of-thread state and "
+        "most recent turns over the original opening prompt, then continue "
+        "the work in this directory."
     )
     if target_provider == "claude":
         cmd = ["claude", "--add-dir", import_dir, prompt]
@@ -341,11 +394,52 @@ def _continue_in_other_app(
     os.execvp(target_provider, cmd)
 
 
+def _continue_in_other_app(
+    session: dict,
+    provider: str,
+    session_id: str,
+    cwd: str,
+    prefixes: tuple[str, ...],
+) -> None:
+    del session_id
+    _continue_in_provider(
+        session,
+        provider,
+        _other_target_provider(provider),
+        cwd,
+        prefixes,
+        "",
+    )
+
+
+def _open_in_target_provider(
+    session: dict,
+    source_provider: str,
+    target_provider: str,
+    session_id: str,
+    cwd: str,
+    prefixes: tuple[str, ...],
+    yolo: bool,
+    selection_query: str = "",
+) -> None:
+    if source_provider == target_provider:
+        _native_resume(session, source_provider, session_id, cwd, prefixes, yolo)
+        return
+    _continue_in_provider(
+        session,
+        source_provider,
+        target_provider,
+        cwd,
+        prefixes,
+        selection_query,
+    )
+
+
 def main() -> None:
-    args = sys.argv[1:]
+    target_provider, args = _parse_target_provider(sys.argv[1:], sys.argv[0])
 
     if "-h" in args or "--help" in args:
-        _print_usage()
+        _print_usage(sys.argv[0], target_provider)
         return
 
     show_all = "--all" in args
@@ -364,7 +458,7 @@ def main() -> None:
 
     if args:
         print(f"Unknown argument: {args[0]}", file=sys.stderr)
-        _print_usage()
+        _print_usage(sys.argv[0], target_provider)
         sys.exit(2)
 
     _check_fzf()
@@ -414,6 +508,9 @@ def main() -> None:
     )
 
     try:
+        target_name = provider_display_name(target_provider)
+        alternate_target = _other_target_provider(target_provider)
+        alternate_name = provider_display_name(alternate_target)
         fzf_cmd = [
             "fzf",
             "--ansi",
@@ -422,10 +519,17 @@ def main() -> None:
             "--height=90%",
             "--border=rounded",
             "--prompt=Sessions > ",
-            "--header=Enter: native resume (yolo) | Ctrl-S: native resume (safe) | Ctrl-X: continue in the other app | Esc: quit | Shift-Up/Down: scroll preview",
+            (
+                "--header="
+                f"Enter: open in {target_name} (yolo if native) | "
+                f"Ctrl-S: open in {target_name} (safe if native) | "
+                f"Ctrl-X: open in {alternate_name} | "
+                "Esc: quit | Shift-Up/Down: scroll preview"
+            ),
             "--header-first",
             "--delimiter=###",
             "--with-nth=1",
+            "--print-query",
             "--disabled",
             f"--bind=change:reload(python3 {search_script.name} {{q}})",
             f"--preview=python3 {preview_script.name} {{}} {{q}}",
@@ -450,17 +554,24 @@ def main() -> None:
             sys.exit(0)
 
         action = "native"
+        selected_target = target_provider
         yolo = True
         if output.startswith("SAFE:"):
-            action = "native"
+            action = "target"
+            selected_target = target_provider
             yolo = False
             output = output[5:]
         elif output.startswith("XAPP:"):
-            action = "handoff"
+            action = "target"
+            selected_target = alternate_target
             yolo = False
             output = output[5:]
+        else:
+            action = "target"
+            selected_target = target_provider
 
         output_lines = output.strip().split("\n")
+        selection_query = output_lines[0] if output_lines else ""
         if len(output_lines) > 1:
             if "###" in output_lines[-1]:
                 output = output_lines[-1]
@@ -488,9 +599,17 @@ def main() -> None:
             sys.exit(1)
 
         os.chdir(cwd)
-        if action == "handoff":
-            _continue_in_other_app(session, provider, session_id, cwd, prefixes)
-        _native_resume(session, provider, session_id, cwd, prefixes, yolo)
+        if action == "target":
+            _open_in_target_provider(
+                session,
+                provider,
+                selected_target,
+                session_id,
+                cwd,
+                prefixes,
+                yolo,
+                selection_query,
+            )
 
     finally:
         for path in (preview_script.name, search_script.name):

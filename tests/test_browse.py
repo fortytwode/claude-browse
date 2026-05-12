@@ -69,6 +69,80 @@ def test_format_row_keeps_sid_tail_attached():
     assert row.rstrip().endswith("abc-123###/home/alice/proj###claude")
 
 
+def test_default_target_provider_follows_entrypoint_name():
+    assert browse._default_target_provider("claude-browse") == "claude"
+    assert browse._default_target_provider("/tmp/codex-browse") == "codex"
+
+
+def test_parse_target_provider_allows_override():
+    target, remaining = browse._parse_target_provider(
+        ["--target", "codex", "--all"],
+        "claude-browse",
+    )
+    assert target == "codex"
+    assert remaining == ["--all"]
+
+
+def test_open_in_target_provider_native_resume_when_source_matches_target(
+    monkeypatch,
+):
+    session = _info()
+    captured: list[object] = []
+
+    monkeypatch.setattr(
+        browse,
+        "_native_resume",
+        lambda *args: captured.append(("native", args)),
+    )
+    monkeypatch.setattr(
+        browse,
+        "_continue_in_provider",
+        lambda *args: captured.append(("handoff", args)),
+    )
+
+    browse._open_in_target_provider(
+        session,
+        "claude",
+        "claude",
+        "abc-123",
+        "/home/alice/proj",
+        (),
+        True,
+    )
+
+    assert captured and captured[0][0] == "native"
+
+
+def test_open_in_target_provider_handoffs_when_source_differs_from_target(
+    monkeypatch,
+):
+    session = _info(provider="codex")
+    captured: list[object] = []
+
+    monkeypatch.setattr(
+        browse,
+        "_native_resume",
+        lambda *args: captured.append(("native", args)),
+    )
+    monkeypatch.setattr(
+        browse,
+        "_continue_in_provider",
+        lambda *args: captured.append(("handoff", args)),
+    )
+
+    browse._open_in_target_provider(
+        session,
+        "codex",
+        "claude",
+        "abc-123",
+        "/home/alice/proj",
+        (),
+        False,
+    )
+
+    assert captured and captured[0][0] == "handoff"
+
+
 def test_continue_in_other_app_from_claude_execs_codex_with_add_dir(
     monkeypatch,
 ):
@@ -78,7 +152,7 @@ def test_continue_in_other_app_from_claude_execs_codex_with_add_dir(
     monkeypatch.setattr(
         browse,
         "write_import_file",
-        lambda _session, target_provider: (
+        lambda _session, target_provider, selection_query="": (
             "/tmp/claude_browse_import.md"
             if target_provider == "codex"
             else "/tmp/unexpected.md"
@@ -110,8 +184,10 @@ def test_continue_in_other_app_from_claude_execs_codex_with_add_dir(
         (
             "Continue the imported Claude session context from "
             "/tmp/claude_browse_import.md. Treat it as prior conversation "
-            "state, read that file first, then continue the work in this "
-            "directory."
+            "state, read that file first, use the Reopen Intent section as "
+            "the reason this thread was selected, prioritize the "
+            "end-of-thread state and most recent turns over the original "
+            "opening prompt, then continue the work in this directory."
         ),
     ]
 
@@ -125,7 +201,7 @@ def test_continue_in_other_app_from_codex_execs_claude_with_add_dir(
     monkeypatch.setattr(
         browse,
         "write_import_file",
-        lambda _session, target_provider: (
+        lambda _session, target_provider, selection_query="": (
             "/tmp/codex_browse_import.md"
             if target_provider == "claude"
             else "/tmp/unexpected.md"
@@ -157,8 +233,10 @@ def test_continue_in_other_app_from_codex_execs_claude_with_add_dir(
         (
             "Continue the imported CodeX session context from "
             "/tmp/codex_browse_import.md. Treat it as prior conversation "
-            "state, read that file first, then continue the work in this "
-            "directory."
+            "state, read that file first, use the Reopen Intent section as "
+            "the reason this thread was selected, prioritize the "
+            "end-of-thread state and most recent turns over the original "
+            "opening prompt, then continue the work in this directory."
         ),
     ]
 

@@ -333,6 +333,7 @@ def test_build_import_markdown_targets_codex(monkeypatch):
         lambda _path, limit=24: [
             ("user", "Please fix the onboarding flow"),
             ("assistant", "I found the regression in auth."),
+            ("user", "Ship it after the auth fix."),
         ],
     )
 
@@ -353,8 +354,54 @@ def test_build_import_markdown_targets_codex(monkeypatch):
 
     assert "handed into a new CodeX session." in text
     assert "- Source app: Claude" in text
+    assert "Prioritize the end-of-thread state" in text
+    assert "## End-of-Thread Priority" in text
+    assert "- Latest substantive user message: Ship it after the auth fix." in text
+    assert "- Latest assistant response: I found the regression in auth." in text
     assert "### Assistant" in text
     assert "I found the regression in auth." in text
+
+
+def test_build_import_markdown_includes_search_match_context(monkeypatch):
+    monkeypatch.setattr(
+        core,
+        "_claude_transcript_excerpt",
+        lambda _path, limit=24: [
+            ("user", "Can you review the pokpok brief?"),
+            ("assistant", "I checked the Sherlock output for pokpok."),
+            ("user", "Now archive the backups after that."),
+        ],
+    )
+    monkeypatch.setattr(
+        core,
+        "_claude_transcript_turns",
+        lambda _path: [
+            ("user", "Can you review the pokpok brief?"),
+            ("assistant", "I checked the Sherlock output for pokpok."),
+            ("user", "Now archive the backups after that."),
+        ],
+    )
+
+    text = core.build_import_markdown(
+        {
+            "provider": "claude",
+            "session_id": "abc-123",
+            "cwd": "/home/alice/proj",
+            "timestamp": "2026-05-12T07:00:00Z",
+            "last_timestamp": "2026-05-12T07:30:00Z",
+            "name": "Mixed thread",
+            "first_msg": "Can you review the pokpok brief?",
+            "last_msg": "Now archive the backups after that.",
+            "path": "/tmp/session.jsonl",
+        },
+        "codex",
+        selection_query="pokpok",
+    )
+
+    assert "## Reopen Intent" in text
+    assert "This thread was reopened from a search for: `pokpok`" in text
+    assert "Matching turns below are likely why this thread was selected." in text
+    assert "I checked the Sherlock output for pokpok." in text
 
 
 def test_build_import_markdown_targets_claude_from_codex(monkeypatch):
@@ -382,6 +429,7 @@ def test_build_import_markdown_targets_claude_from_codex(monkeypatch):
     assert "handed into a new Claude session." in text
     assert "- Source app: CodeX" in text
     assert "Note: Codex local history only exposes user turns here." in text
+    assert "Most recent turns are shown first." in text
     assert "### User" in text
     assert "Review the launch checklist" in text
 

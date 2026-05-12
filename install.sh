@@ -14,7 +14,7 @@ BIN_DIR="$HOME/.local/bin"
 
 mkdir -p "$BIN_DIR"
 
-for tool in claude-browse claude-resume; do
+for tool in claude-browse codex-browse claude-resume; do
     chmod +x "$SCRIPT_DIR/$tool"
     ln -sf "$SCRIPT_DIR/$tool" "$BIN_DIR/$tool"
     echo "  Installed $tool -> $BIN_DIR/$tool"
@@ -74,5 +74,6 @@ esac
 
 echo ""
 echo "Done. Available commands:"
-echo "  claude-browse    Interactive session browser (type to filter, Enter to resume)"
+echo "  claude-browse    Interactive browser that opens everything in Claude by default"
+echo "  codex-browse     Interactive browser that opens everything in CodeX by default"
 echo "  claude-resume    Quick resume by keyword (claude-resume <keyword>)"

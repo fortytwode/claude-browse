@@ -2,8 +2,8 @@
 
 **Find and reopen past Claude Code and CodeX sessions from the terminal.**
 Interactive fzf browser with a preview pane, full-text search across folders
-and first messages, native resume by provider, plus one-key cross-app handoff
-for older threads.
+and first messages, provider-aware native resume, plus paired browsers that
+open everything in Claude or everything in CodeX by default.
 
 <!-- Replace with a real asciinema/terminalizer GIF before launch -->
 <p align="center">
@@ -45,7 +45,7 @@ cd claude-browse
 
 ### External dependency — fzf
 
-`claude-browse` uses [fzf](https://github.com/junegunn/fzf) for the
+`claude-browse` and `codex-browse` use [fzf](https://github.com/junegunn/fzf) for the
 interactive UI. Install it once via your system package manager:
 
 ```bash
@@ -61,33 +61,40 @@ sudo apk add fzf        # Alpine
 ### Requirements
 
 - Python 3.9+
-- fzf (for `claude-browse` only)
+- fzf (for `claude-browse` and `codex-browse`)
 - Claude Code and/or CodeX (otherwise there are no sessions to browse)
 
 ---
 
 ## Usage
 
-### claude-browse — interactive TUI
+### Interactive TUI
 
 ```bash
-claude-browse               # most recent 100 sessions
+claude-browse               # most recent 100 sessions, opens everything in Claude
+codex-browse                # most recent 100 sessions, opens everything in CodeX
 claude-browse --all         # every session you've ever run
-claude-browse --here        # only sessions started in the current directory
+codex-browse --here         # only sessions started in the current directory
 claude-browse --no-canonicalize   # show raw cwds (see "Cross-machine" below)
 ```
 
 While the TUI is up:
 
-| Key              | What it does                                   |
-| ---------------- | ---------------------------------------------- |
-| Type             | Full-text search across Claude + CodeX threads |
-| ↑ ↓              | Move between sessions                          |
-| Shift-↑ Shift-↓  | Scroll the preview pane                        |
-| Enter            | Native resume in the source app (yolo)         |
-| Ctrl-S           | Native resume in safe mode                     |
-| Ctrl-X           | Continue the selected thread in the other app  |
-| Esc              | Quit                                           |
+| Key              | What it does                                                     |
+| ---------------- | ---------------------------------------------------------------- |
+| Type             | Full-text search across Claude + CodeX threads                   |
+| ↑ ↓              | Move between sessions                                            |
+| Shift-↑ Shift-↓  | Scroll the preview pane                                          |
+| Enter            | Open in the app you launched (`claude-browse` or `codex-browse`) |
+| Ctrl-S           | Open in that same app, using safe mode when it is a native resume |
+| Ctrl-X           | Open in the other app instead                                    |
+| Esc              | Quit                                                             |
+
+Examples:
+
+- In `claude-browse`, a Claude thread resumes natively in Claude and a CodeX thread starts a fresh Claude session with imported context.
+- In `codex-browse`, a CodeX thread resumes natively in CodeX and a Claude thread starts a fresh CodeX session with imported context.
+- Cross-app open is not a true native resume. It creates a new session seeded from the old thread.
 
 ### claude-resume — keyword resume without the TUI
 
@@ -102,24 +109,27 @@ claude-resume taxes -- --model gpt-5   # example CodeX flag when the selected se
 ```
 
 Useful when you remember a keyword from the conversation and don't want to
-leave your shell. It now routes to the native app automatically: Claude
-threads open in Claude, CodeX threads open in CodeX.
+leave your shell. It routes to the native app automatically: Claude threads
+open in Claude, CodeX threads open in CodeX.
 
 ---
 
 ## Why
 
 Claude Code already has `claude --resume`, and CodeX has `codex resume`, but
-both are provider-local pickers. `claude-browse` is better at three things:
+both are provider-local pickers. `claude-browse` and `codex-browse` are better
+at three things:
 
 - **Fuzzy search across all your sessions, not just the last few.** Type any
   word from any past conversation, any folder name, any relative date —
   find it.
 - **Preview before you resume.** See where the conversation ended up (latest
   messages first) so you pick the right thread, not a stale one.
-- **Hand work from one app to the other.** `Ctrl-X` writes a compact import
-  brief and starts a fresh session in the other app in the original repo
-  instead of pretending cross-vendor native resume exists.
+- **Choose the target app up front.** Launch `claude-browse` if you want to
+  work in Claude or `codex-browse` if you want to work in CodeX. When the
+  source app differs, the browser writes a compact import brief and starts a
+  fresh session in the target app instead of pretending cross-vendor native
+  resume exists.
 
 If you live in `tmux` and start a lot of Claude Code sessions across
 different projects, this is the tool.
@@ -130,7 +140,7 @@ different projects, this is the tool.
 
 If you sync `~/.claude/projects/` between a Mac and a Linux box (Syncthing,
 rclone, etc.), session cwds recorded on one machine won't match the other
-(`/Users/<name>` vs `/home/<name>`). By default `claude-browse`
+(`/Users/<name>` vs `/home/<name>`). By default the browsers
 **canonicalizes** both to `$HOME`, so the same project shows up once, not
 twice. Pass `--no-canonicalize` to see raw paths.
 
@@ -162,7 +172,7 @@ Install fzf via your package manager (see Install section above).
 
 **`No sessions found`**
 You haven't run `claude` or `codex` yet — or your sessions are in a
-non-standard location. `claude-browse` reads `~/.claude/projects/`,
+non-standard location. The browsers read `~/.claude/projects/`,
 `~/.codex/state_5.sqlite`, and `~/.codex/history.jsonl`. If yours live
 elsewhere, file an issue.
 
@@ -182,11 +192,10 @@ proper fix is on the roadmap as part of the `claude-sync` companion tool.
 Claude Code writes each session as a JSONL file under
 `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`. CodeX stores thread metadata
 in `~/.codex/state_5.sqlite` and user-turn history in `~/.codex/history.jsonl`.
-`claude-browse` normalizes both into one local SQLite index, then hands that to
-fzf. When you pick a thread, it `cd`s back to the original cwd and launches the
-native resume command for that provider. For `Ctrl-X`, it creates a Markdown
-import brief, grants the target app access to that brief, and starts a fresh
-session in the other app with that brief as context.
+The browsers normalize both into one local SQLite index, then hand that to
+fzf. When you pick a thread, the tool `cd`s back to the original cwd and then
+either launches the native resume command for the target app or creates a
+Markdown import brief and starts a fresh cross-app handoff session.
 
 No data leaves your machine. No telemetry. No API calls. The whole thing is
 ~500 lines of stdlib Python.
