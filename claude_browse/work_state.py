@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from .git_state import inspect_repo_state
 from .providers import get_provider
 from .providers.common import is_substantive_text
+from .query import significant_query_terms
 
 _QUESTION_STARTERS = (
     "what ",
@@ -29,28 +30,6 @@ _QUESTION_STARTERS = (
     "have ",
     "has ",
 )
-
-
-def _query_terms(query: str) -> list[str]:
-    terms: list[str] = []
-    in_quote = False
-    current: list[str] = []
-    for ch in query:
-        if ch == '"':
-            if current:
-                terms.append("".join(current).strip())
-                current = []
-            in_quote = not in_quote
-        elif ch.isspace() and not in_quote:
-            if current:
-                terms.append("".join(current).strip())
-                current = []
-        else:
-            current.append(ch)
-    if current:
-        terms.append("".join(current).strip())
-    return [term for term in terms if term]
-
 
 def _word_overlap(a: str, b: str) -> int:
     left = {word for word in a.lower().split() if len(word) >= 4}
@@ -101,7 +80,11 @@ def _matching_turns(
     selection_query: str,
     limit: int,
 ) -> list[tuple[str, str]]:
-    terms = [term.lower() for term in _query_terms(selection_query) if term.strip()]
+    terms = [
+        term.lower()
+        for term in significant_query_terms(selection_query)
+        if term.strip()
+    ]
     if not terms:
         return []
     matched = [
@@ -110,6 +93,62 @@ def _matching_turns(
         if any(term in text.lower() for term in terms)
     ]
     return list(reversed(matched[-limit:]))
+
+
+def _latest_match_index(
+    turns: list[tuple[str, str]],
+    selection_query: str,
+) -> int | None:
+    terms = [
+        term.lower()
+        for term in significant_query_terms(selection_query)
+        if term.strip()
+    ]
+    if not terms:
+        return None
+
+    assistant_match: int | None = None
+    latest_match: int | None = None
+    for idx in range(len(turns) - 1, -1, -1):
+        role, text = turns[idx]
+        if any(term in text.lower() for term in terms):
+            if latest_match is None:
+                latest_match = idx
+            if role == "assistant":
+                assistant_match = idx
+                break
+    return assistant_match if assistant_match is not None else latest_match
+
+
+def _matched_exchange(
+    turns: list[tuple[str, str]],
+    match_index: int | None,
+) -> list[tuple[str, str]]:
+    if match_index is None or not turns:
+        return []
+
+    role, _text = turns[match_index]
+    if role == "user":
+        exchange = [turns[match_index]]
+        if match_index + 1 < len(turns) and turns[match_index + 1][0] == "assistant":
+            exchange.append(turns[match_index + 1])
+        return exchange
+
+    exchange: list[tuple[str, str]] = []
+    if match_index - 1 >= 0 and turns[match_index - 1][0] == "user":
+        exchange.append(turns[match_index - 1])
+    exchange.append(turns[match_index])
+    return exchange
+
+
+def _post_match_recent_turns(
+    turns: list[tuple[str, str]],
+    match_index: int | None,
+    limit: int,
+) -> list[tuple[str, str]]:
+    if match_index is None or match_index >= len(turns) - 1:
+        return []
+    return list(reversed(turns[match_index + 1 :][-limit:]))
 
 
 def _recent_turns(
@@ -181,6 +220,9 @@ def build_work_state(
     last_meaningful_user = _latest_user_turn(turns, substantive_only=True)
     latest_assistant = _latest_assistant_turn(turns)
     current_task = _current_task(title, first_msg, last_meaningful_user)
+    latest_match_index = _latest_match_index(turns, selection_query)
+    matched_exchange = _matched_exchange(turns, latest_match_index)
+    likely_open_question = _likely_open_question(turns)
 
     return {
         "provider": provider,
@@ -190,8 +232,15 @@ def build_work_state(
         "current_task": current_task,
         "last_meaningful_user": last_meaningful_user,
         "latest_assistant": latest_assistant,
-        "likely_open_question": _likely_open_question(turns),
+        "likely_open_question": likely_open_question,
         "matching_turns": _matching_turns(turns, selection_query, match_limit),
+        "matched_exchange": matched_exchange,
+        "thread_continued_after_match": bool(
+            latest_match_index is not None and latest_match_index < len(turns) - 1
+        ),
+        "post_match_recent_turns": _post_match_recent_turns(
+            turns, latest_match_index, recent_limit
+        ),
         "recent_turns": _recent_turns(turns, recent_limit),
         "assistant_turns_available": spec.assistant_turns_available,
         "repo_state": inspect_repo_state(session.get("cwd")),
@@ -201,7 +250,7 @@ def build_work_state(
         "suggested_next_prompt": _suggested_next_prompt(
             session.get("cwd"),
             current_task,
-            _likely_open_question(turns),
+            likely_open_question,
             latest_assistant,
         ),
     }
@@ -224,6 +273,18 @@ def render_restart_card_terminal(state: dict[str, object]) -> str:
     if isinstance(repo_state, dict) and repo_state.get("summary"):
         lines.append(f"Current repo state: {repo_state['summary']}")
 
+    matched_exchange = state.get("matched_exchange") or []
+    if matched_exchange:
+        lines.extend(["", "Last matching exchange:", ""])
+        for role, text in matched_exchange:
+            label = "User" if role == "user" else "Assistant"
+            lines.append(f"  {label}: {text}")
+        if state.get("thread_continued_after_match"):
+            lines.append("")
+            lines.append(
+                "Thread continued afterward on another topic. The latest turns below are newer than the matched topic."
+            )
+
     if state.get("last_meaningful_user"):
         lines.append(f"Last meaningful ask: {state['last_meaningful_user']}")
 
@@ -237,9 +298,16 @@ def render_restart_card_terminal(state: dict[str, object]) -> str:
         lines.append(f"Suggested next prompt: {state['suggested_next_prompt']}")
 
     matching_turns = state.get("matching_turns") or []
-    if matching_turns:
+    if matching_turns and not matched_exchange:
         lines.extend(["", "Why this likely matched your search:", ""])
         for role, text in matching_turns:
+            label = "User" if role == "user" else "Assistant"
+            lines.append(f"  {label}: {text}")
+
+    post_match_recent_turns = state.get("post_match_recent_turns") or []
+    if post_match_recent_turns:
+        lines.extend(["", "Later turns after the match (latest first):", ""])
+        for role, text in post_match_recent_turns:
             label = "User" if role == "user" else "Assistant"
             lines.append(f"  {label}: {text}")
 
@@ -266,6 +334,25 @@ def render_restart_card_markdown(state: dict[str, object]) -> list[str]:
     repo_state = state.get("repo_state")
     if isinstance(repo_state, dict) and repo_state.get("summary"):
         lines.append(f"- Current repo state: {repo_state['summary']}")
+
+    matched_exchange = state.get("matched_exchange") or []
+    if matched_exchange:
+        lines.extend(["", "### Last Matching Exchange", ""])
+        for role, text in matched_exchange:
+            label = "User" if role == "user" else "Assistant"
+            lines.append(f"#### {label}")
+            lines.append(text)
+            lines.append("")
+        if state.get("thread_continued_after_match"):
+            lines.append("- The thread continued afterward on another topic.")
+        post_match_recent_turns = state.get("post_match_recent_turns") or []
+        if post_match_recent_turns:
+            lines.extend(["", "### Later Turns After The Match", ""])
+            for role, text in post_match_recent_turns:
+                label = "User" if role == "user" else "Assistant"
+                lines.append(f"#### {label}")
+                lines.append(text)
+                lines.append("")
 
     if state.get("last_meaningful_user"):
         lines.append(f"- Last meaningful user ask: {state['last_meaningful_user']}")

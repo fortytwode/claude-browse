@@ -69,6 +69,17 @@ def test_format_row_keeps_sid_tail_attached():
     assert row.rstrip().endswith("abc-123###/home/alice/proj###claude")
 
 
+def test_format_row_shows_match_recency_and_thread_activity_when_query_active():
+    info = _info(
+        context="pokpok brief",
+        timestamp="2026-05-01T10:00:00Z",
+        last_timestamp="2026-05-10T10:00:00Z",
+        match_timestamp="2026-05-02T10:00:00Z",
+    )
+    row = format_row(info, query="pokpok")
+    assert "active" in row
+
+
 def test_default_target_provider_follows_entrypoint_name():
     assert browse._default_target_provider("claude-browse") == "claude"
     assert browse._default_target_provider("/tmp/codex-browse") == "codex"
@@ -269,6 +280,15 @@ def test_parse_fzf_output_handles_print_query_prompt_marker():
     assert parsed == (row, "claude", "print_prompt", "pokpok")
 
 
+def test_parse_fzf_output_handles_print_query_topic_marker():
+    row = "match ###abc-123###/home/alice/proj###claude"
+    parsed = browse._parse_fzf_output(
+        f"pokpok\nTOPIC:\n{row}\n",
+        "claude",
+    )
+    assert parsed == (row, "claude", "reenter_topic", "pokpok")
+
+
 def test_parse_fzf_output_handles_print_query_brief_marker():
     row = "match ###abc-123###/home/alice/proj###claude"
     parsed = browse._parse_fzf_output(
@@ -292,7 +312,7 @@ def test_open_in_target_provider_native_resume_when_source_matches_target(
     monkeypatch.setattr(
         browse,
         "_continue_in_provider",
-        lambda *args: captured.append(("handoff", args)),
+        lambda *args, **kwargs: captured.append(("handoff", args, kwargs)),
     )
 
     browse._open_in_target_provider(
@@ -322,7 +342,7 @@ def test_open_in_target_provider_handoffs_when_source_differs_from_target(
     monkeypatch.setattr(
         browse,
         "_continue_in_provider",
-        lambda *args: captured.append(("handoff", args)),
+        lambda *args, **kwargs: captured.append(("handoff", args, kwargs)),
     )
 
     browse._open_in_target_provider(
@@ -338,6 +358,38 @@ def test_open_in_target_provider_handoffs_when_source_differs_from_target(
     assert captured and captured[0][0] == "handoff"
 
 
+def test_open_in_target_provider_reenter_topic_uses_handoff_even_when_source_matches(
+    monkeypatch,
+):
+    session = _info()
+    captured: list[object] = []
+
+    monkeypatch.setattr(
+        browse,
+        "_native_resume",
+        lambda *args: captured.append(("native", args)),
+    )
+    monkeypatch.setattr(
+        browse,
+        "_continue_in_provider",
+        lambda *args, **kwargs: captured.append(("handoff", args, kwargs)),
+    )
+
+    browse._open_in_target_provider(
+        session,
+        "claude",
+        "claude",
+        "abc-123",
+        "/home/alice/proj",
+        (),
+        True,
+        "pokpok",
+        reenter_topic=True,
+    )
+
+    assert captured and captured[0][0] == "handoff"
+
+
 def test_continue_in_provider_from_claude_execs_gemini_with_include_directories(
     monkeypatch,
 ):
@@ -347,9 +399,9 @@ def test_continue_in_provider_from_claude_execs_gemini_with_include_directories(
     monkeypatch.setattr(
         browse,
         "write_import_file",
-        lambda _session, target_provider, selection_query="": (
+        lambda _session, target_provider, selection_query="", reenter_topic=False: (
             "/tmp/claude_browse_import.md"
-            if target_provider == "gemini"
+            if target_provider == "gemini" and not reenter_topic
             else "/tmp/unexpected.md"
         ),
     )
@@ -391,6 +443,43 @@ def test_continue_in_provider_from_claude_execs_gemini_with_include_directories(
     ]
 
 
+def test_continue_in_provider_reenter_topic_updates_prompt(monkeypatch):
+    session = _info(path="/tmp/session.jsonl")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        browse,
+        "write_import_file",
+        lambda _session, target_provider, selection_query="", reenter_topic=False: (
+            "/tmp/claude_browse_import.md"
+            if target_provider == "gemini" and reenter_topic
+            else "/tmp/unexpected.md"
+        ),
+    )
+    monkeypatch.setattr(browse.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def fake_execvp(binary: str, cmd: list[str]) -> None:
+        captured["binary"] = binary
+        captured["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(browse.os, "execvp", fake_execvp)
+
+    with pytest.raises(SystemExit):
+        browse._continue_in_provider(
+            session,
+            "claude",
+            "gemini",
+            "/home/alice/proj",
+            (),
+            True,
+            "pokpok",
+            reenter_topic=True,
+        )
+
+    assert "re-enter the earlier matched topic" in captured["cmd"][-1]
+
+
 def test_continue_in_provider_from_gemini_execs_claude_with_add_dir(
     monkeypatch,
 ):
@@ -400,9 +489,9 @@ def test_continue_in_provider_from_gemini_execs_claude_with_add_dir(
     monkeypatch.setattr(
         browse,
         "write_import_file",
-        lambda _session, target_provider, selection_query="": (
+        lambda _session, target_provider, selection_query="", reenter_topic=False: (
             "/tmp/codex_browse_import.md"
-            if target_provider == "claude"
+            if target_provider == "claude" and not reenter_topic
             else "/tmp/unexpected.md"
         ),
     )
@@ -452,7 +541,7 @@ def test_continue_in_provider_from_claude_execs_cursor_with_inline_context(
     monkeypatch.setattr(
         browse,
         "build_import_markdown",
-        lambda _session, _target_provider, _selection_query="": (
+        lambda _session, _target_provider, _selection_query="", reenter_topic=False: (
             "# Imported Session Context\n\n## Reopen Intent\n\n- pokpok\n"
         ),
     )

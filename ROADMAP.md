@@ -37,6 +37,11 @@ of that wedge.
   - likely open question
   - suggested next prompt
 - Suggested next prompts and restart cards can be printed directly from the browser.
+- Natural-language thread description is now the primary query model:
+  - descriptive `find the thread where...` inputs
+  - ranking by most recent relevant mention
+  - query-anchored preview for drifted threads
+  - explicit topic re-entry via a fresh matched-exchange handoff
 
 ---
 
@@ -52,34 +57,47 @@ These are the next product phases that can be implemented directly in this repo.
 - Include repo-state overlays in preview and handoff
 - Keep cross-provider handoff grounded in end-of-thread state, not opening prompt
 
-### Phase 2 — Task view
+### Phase 2 — Exact thread recall
+**Status:** shipped
+
+Make `describe the thread` the default interaction instead of token search.
+
+What shipped:
+- Natural-language `Find thread >` prompt and help text
+- Query parsing that drops recall filler and keeps names, phrases, brands, and folders
+- Ranking by the most recent relevant mention, not just overall thread activity
+- Query-anchored preview that surfaces the matched exchange first
+
+Why it matters:
+- The user wants the exact old thread, even when they forgot the folder and the thread later drifted
+
+### Phase 3 — Mid-thread re-entry
+**Status:** shipped
+
+Support honest re-entry into topic A when the original thread later moved on to B/C/D.
+
+What shipped:
+- `Resume thread` remains the default action
+- `Re-enter topic` starts a new session seeded from the matched exchange
+- Handoff text distinguishes re-entry from native resume or cross-app resume
+
+Why it matters:
+- Cross-provider tools cannot universally rewind an original thread in place, but they can reliably start a new session from the earlier matched exchange
+
+### Phase 4 — Semantic reranking under the hood
 **Status:** next
 
-Group related sessions into one task instead of forcing the user to think in
-provider-native thread IDs.
+Keep one visible query model while improving retrieval depth behind the scenes.
 
 What ships:
-- Heuristic task clustering by cwd, time proximity, title similarity, and key terms
-- Task list mode in addition to raw session mode
-- “This task spans Claude + CodeX + Gemini” presentation
+- Hybrid lexical + semantic reranking for descriptive thread queries
+- Better fallback when the user remembers the idea but not the exact anchor words
+- Still one visible mode: describe the thread you want
 
 Why it matters:
-- The user wants to reopen `the Pokpok brief work`, not `session abc123`
+- Natural-language recall gets stronger without making the UI more complicated
 
-### Phase 3 — Best next prompt
-**Status:** in progress
-
-Generate a deterministic continuation prompt from local state.
-
-What ships:
-- Suggested next prompt in preview
-- Copy/export flows for that prompt
-- Target-specific phrasing for Claude, CodeX, Gemini, Copilot, and Cursor
-
-Why it matters:
-- This is the first output that turns search into forward motion
-
-### Phase 4 — Work artifacts
+### Phase 5 — Work artifacts
 **Status:** later
 
 Turn session + repo state into reusable outputs.
@@ -93,7 +111,7 @@ What ships:
 Why it matters:
 - Session history becomes operationally useful outside the TUI
 
-### Phase 5 — Shared work graph
+### Phase 6 — Shared work graph
 **Status:** later
 
 Move from local task recovery to shared team context.
@@ -126,7 +144,8 @@ Current manual test gate:
 - Test `Ctrl-B` for restart-card export output.
 
 Next gated build after testing:
-- `Task View`, which groups related multi-agent sessions into one work item.
+- semantic reranking under the hood for descriptive thread recall
+- only after that, reconsider `Task View` if real usage proves thread clustering is the actual problem
 
 ---
 

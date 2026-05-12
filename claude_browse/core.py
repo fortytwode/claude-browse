@@ -17,6 +17,7 @@ from .providers import common as provider_common
 from .providers import copilot as copilot_provider
 from .providers import gemini as gemini_provider
 from .providers import get_provider, provider_ids
+from .query import significant_query_terms
 from .work_state import build_work_state, render_restart_card_markdown
 
 SESSIONS_DIR = claude_provider.SESSIONS_DIR
@@ -113,6 +114,8 @@ def build_import_markdown(
     session: dict,
     target_provider: str,
     selection_query: str | None = None,
+    *,
+    reenter_topic: bool = False,
 ) -> str:
     """Create a compact Markdown brief so another app can continue a thread."""
     provider = session.get("provider") or "claude"
@@ -129,27 +132,44 @@ def build_import_markdown(
         match_limit=6,
     )
     recent_excerpt = work_state["recent_turns"]
-    matched_turns = work_state["matching_turns"]
+    matched_turns = work_state.get("matched_exchange") or work_state["matching_turns"]
 
     lines = [
         "# Imported Session Context",
         "",
-        (
-            "This is prior conversation context being handed into a new "
-            f"{target_name} session."
-        ),
-        "It is not a native cross-vendor resume.",
-        (
-            "Prioritize the end-of-thread state and most recent turns below "
-            "over the original opening prompt if they differ."
-        ),
+    ]
+    if reenter_topic:
+        lines.extend([
+            (
+                "This is prior conversation context being handed into a new "
+                f"{target_name} session so you can re-enter an earlier topic."
+            ),
+            "It is not a native rewind of the original thread.",
+            (
+                "Prioritize the matched exchange and Reopen Intent below. "
+                "Use later turns only as context about how the thread evolved afterward."
+            ),
+        ])
+    else:
+        lines.extend([
+            (
+                "This is prior conversation context being handed into a new "
+                f"{target_name} session."
+            ),
+            "It is not a native cross-vendor resume.",
+            (
+                "Prioritize the end-of-thread state and most recent turns below "
+                "over the original opening prompt if they differ."
+            ),
+        ])
+    lines.extend([
         "",
         f"- Source app: {provider_display_name(provider)}",
         f"- Original session id: `{session_id}`",
         f"- Original folder: `{cwd}`" if cwd else "- Original folder: unknown",
         f"- Started: {started}",
         f"- Last activity: {last_activity}",
-    ]
+    ])
     lines.extend([""] + render_restart_card_markdown(work_state))
 
     if selection_query and selection_query.strip():
@@ -158,10 +178,11 @@ def build_import_markdown(
             "## Reopen Intent",
             "",
             (
-                f"- This thread was reopened from a search for: "
-                f"`{selection_query.strip()}`"
+                f"- This thread was reopened from a search for: `{selection_query.strip()}`"
             ),
         ])
+        if reenter_topic:
+            lines.append("- Use the matching exchange below as the point to re-enter.")
         if matched_turns:
             lines.extend([
                 "- Matching turns below are likely why this thread was selected.",
@@ -211,6 +232,8 @@ def write_import_file(
     session: dict,
     target_provider: str,
     selection_query: str | None = None,
+    *,
+    reenter_topic: bool = False,
 ) -> str:
     """Write a temporary Markdown import brief and return its path."""
     tmp = tempfile.NamedTemporaryFile(
@@ -220,7 +243,14 @@ def write_import_file(
         delete=False,
     )
     try:
-        tmp.write(build_import_markdown(session, target_provider, selection_query))
+        tmp.write(
+            build_import_markdown(
+                session,
+                target_provider,
+                selection_query,
+                reenter_topic=reenter_topic,
+            )
+        )
     finally:
         tmp.close()
     return tmp.name
@@ -292,29 +322,11 @@ def provider_display_name(provider: str | None) -> str:
 def extract_query_terms(query: str) -> list[str]:
     """Pull the literal search terms out of a user query.
 
-    Mirrors fts.normalize_query's parser, but returns plain strings suitable
-    for case-insensitive substring highlighting (not FTS5 syntax). Bare words
-    each become a term; double-quoted spans become phrase terms — so a query
-    of `postiz "tiktok ads"` returns ["postiz", "tiktok ads"].
+    Longer descriptive queries drop filler like "find me the thread where"
+    so highlighting and transcript matching stay anchored on the specific
+    names, phrases, and nouns the user actually cares about.
     """
-    terms: list[str] = []
-    in_quote = False
-    current: list[str] = []
-    for ch in query:
-        if ch == '"':
-            if current:
-                terms.append("".join(current).strip())
-                current = []
-            in_quote = not in_quote
-        elif ch.isspace() and not in_quote:
-            if current:
-                terms.append("".join(current).strip())
-                current = []
-        else:
-            current.append(ch)
-    if current:
-        terms.append("".join(current).strip())
-    return [t for t in terms if t]
+    return significant_query_terms(query)
 
 
 def highlight_terms(

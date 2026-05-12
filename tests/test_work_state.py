@@ -57,6 +57,15 @@ def test_build_work_state_prefers_end_of_thread_task_over_opening_topic(monkeypa
         text.startswith("signup is broken on the staging deploy")
         for _, text in state["matching_turns"]
     )
+    assert state["matched_exchange"] == [
+        ("user", "signup is broken on the staging deploy, can you investigate"),
+        ("assistant", "Looking at the signup handler."),
+    ]
+    assert state["thread_continued_after_match"] is True
+    assert any(
+        "hiring plan" in text.lower()
+        for _, text in state["post_match_recent_turns"]
+    )
 
 
 def test_build_work_state_marks_last_user_turn_as_open_question(monkeypatch):
@@ -108,6 +117,9 @@ def test_render_restart_card_terminal_surfaces_repo_state_and_matches():
             "latest_assistant": "Start with a staffing matrix.",
             "likely_open_question": "",
             "suggested_next_prompt": "Continue the work in webapp.",
+            "matched_exchange": [("user", "Can you review the pokpok brief?")],
+            "thread_continued_after_match": True,
+            "post_match_recent_turns": [("user", "Now archive the backups after that.")],
             "matching_turns": [("assistant", "I checked the Sherlock output.")],
             "recent_turns": [("user", "Draft the hiring plan")],
         }
@@ -115,7 +127,9 @@ def test_render_restart_card_terminal_surfaces_repo_state_and_matches():
 
     assert "Restart Card" in text
     assert "Current repo state: Branch `main` with 2 uncommitted files." in text
-    assert "Why this likely matched your search:" in text
+    assert "Last matching exchange:" in text
+    assert "Thread continued afterward on another topic." in text
+    assert "Later turns after the match (latest first):" in text
     assert "Recent turns (latest first):" in text
 
 

@@ -17,6 +17,8 @@ import time
 from datetime import datetime, timezone
 
 from .core import list_index_records
+from .providers import get_provider
+from .query import significant_query_terms
 
 DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
 # v2: added last_timestamp column so the list view can sort by most recent
@@ -31,7 +33,10 @@ DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
 # v4: sessions table now stores provider ("claude" | "codex"), and reindex()
 #     consumes a provider-agnostic record stream so the browser can show both
 #     Claude Code and CodeX threads in one list.
-SCHEMA_VERSION = 4
+# v5: segment-level transcript indexing powers descriptive "find the thread
+#     where..." recall, last-matching-mention ranking, and query-anchored
+#     snippets instead of pure thread-end recency.
+SCHEMA_VERSION = 5
 
 
 def open_db(path: str = DB_PATH) -> sqlite3.Connection:
@@ -64,6 +69,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         conn.executescript(
             """
             DROP TABLE IF EXISTS sessions_fts;
+            DROP TABLE IF EXISTS segments_fts;
+            DROP TABLE IF EXISTS segments;
             DROP TABLE IF EXISTS sessions;
             DELETE FROM schema_version;
             """
@@ -96,6 +103,26 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             user_text,
             asst_text,
             boilerplate,
+            tokenize='unicode61'
+        );
+        CREATE TABLE IF NOT EXISTS segments (
+            rowid           INTEGER PRIMARY KEY AUTOINCREMENT,
+            sid             TEXT NOT NULL,
+            segment_idx     INTEGER NOT NULL,
+            role            TEXT NOT NULL,
+            timestamp       TEXT,
+            text            TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_segments_sid
+            ON segments(sid, segment_idx);
+        CREATE INDEX IF NOT EXISTS idx_segments_timestamp
+            ON segments(timestamp DESC);
+        CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
+            sid UNINDEXED,
+            role UNINDEXED,
+            segment_idx UNINDEXED,
+            timestamp UNINDEXED,
+            text,
             tokenize='unicode61'
         );
         """
@@ -138,6 +165,7 @@ def reindex(conn: sqlite3.Connection) -> tuple[int, int, int]:
         if path not in record_map:
             conn.execute("DELETE FROM sessions WHERE sid = ?", (sid,))
             conn.execute("DELETE FROM sessions_fts WHERE sid = ?", (sid,))
+            _delete_segments_for_sid(conn, sid)
             removed += 1
 
     conn.commit()
@@ -207,6 +235,7 @@ def _index_record(
             fields["boilerplate"],
         ),
     )
+    _reindex_segments_for_record(conn, record)
     return True
 
 
@@ -227,37 +256,210 @@ def normalize_query(query: str) -> str:
     than triggering FTS5 boolean operators. Power users who want booleans
     can quote the operands and write them themselves.
     """
-    tokens: list[tuple[str, str]] = []  # (kind, text), kind in {"word","phrase"}
-    in_quote = False
-    current: list[str] = []
-    for ch in query:
-        if ch == '"':
-            if in_quote:
-                tokens.append(("phrase", "".join(current)))
-                current = []
-                in_quote = False
-            else:
-                if current:
-                    tokens.append(("word", "".join(current)))
-                    current = []
-                in_quote = True
-        elif ch.isspace() and not in_quote:
-            if current:
-                tokens.append(("word", "".join(current)))
-                current = []
-        else:
-            current.append(ch)
-    if current:
-        tokens.append(("phrase" if in_quote else "word", "".join(current)))
-
     parts: list[str] = []
-    for _kind, text in tokens:
+    for text in significant_query_terms(query):
         text = text.strip()
         if not text:
             continue
-        escaped = text.replace('"', '""')
-        parts.append(f'"{escaped}"')
+        if (
+            text.endswith("*")
+            and " " not in text
+            and len(text) > 1
+            and text.count("*") == 1
+        ):
+            escaped = text[:-1].replace('"', '""')
+            parts.append(f'"{escaped}"*')
+        else:
+            escaped = text.replace('"', '""')
+            parts.append(f'"{escaped}"')
     return " ".join(parts)
+
+
+def _parse_iso_timestamp(ts_str: str | None) -> datetime | None:
+    if not ts_str:
+        return None
+    try:
+        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _timestamp_sort_key(ts_str: str | None) -> float:
+    dt = _parse_iso_timestamp(ts_str)
+    if dt is None:
+        return 0.0
+    return dt.timestamp()
+
+
+def _interpolate_turn_timestamps(
+    start_ts: str | None,
+    end_ts: str | None,
+    count: int,
+) -> list[str]:
+    if count <= 0:
+        return []
+
+    start_dt = _parse_iso_timestamp(start_ts)
+    end_dt = _parse_iso_timestamp(end_ts) or start_dt
+
+    if start_dt is None and end_dt is None:
+        return [""] * count
+    if start_dt is None:
+        start_dt = end_dt
+    if end_dt is None:
+        end_dt = start_dt
+    if start_dt is None or end_dt is None:
+        return [""] * count
+
+    if count == 1 or end_dt <= start_dt:
+        stamp = end_dt.isoformat().replace("+00:00", "Z")
+        return [stamp] * count
+
+    span_seconds = (end_dt - start_dt).total_seconds()
+    timestamps: list[str] = []
+    for idx in range(count):
+        frac = idx / (count - 1)
+        dt = start_dt + (end_dt - start_dt) * frac
+        if span_seconds <= 0:
+            dt = end_dt
+        timestamps.append(dt.isoformat().replace("+00:00", "Z"))
+    return timestamps
+
+
+def _delete_segments_for_sid(conn: sqlite3.Connection, sid: str) -> None:
+    rowids = [
+        row[0]
+        for row in conn.execute(
+            "SELECT rowid FROM segments WHERE sid = ?",
+            (sid,),
+        ).fetchall()
+    ]
+    if rowids:
+        placeholders = ",".join("?" for _ in rowids)
+        conn.execute(
+            f"DELETE FROM segments_fts WHERE rowid IN ({placeholders})",
+            rowids,
+        )
+    conn.execute("DELETE FROM segments WHERE sid = ?", (sid,))
+
+
+def _reindex_segments_for_record(
+    conn: sqlite3.Connection,
+    record: dict,
+) -> None:
+    sid = str(record["session_id"])
+    _delete_segments_for_sid(conn, sid)
+
+    provider = str(record.get("provider") or "claude")
+    path = str(record.get("path") or "")
+    turns = get_provider(provider).transcript_turns(path, sid)
+    if not turns:
+        return
+
+    timestamps = _interpolate_turn_timestamps(
+        record.get("timestamp"),
+        record.get("last_timestamp") or record.get("timestamp"),
+        len(turns),
+    )
+
+    for idx, ((role, text), ts) in enumerate(zip(turns, timestamps), 1):
+        cur = conn.execute(
+            """
+            INSERT INTO segments (sid, segment_idx, role, timestamp, text)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (sid, idx, role, ts, text),
+        )
+        rowid = cur.lastrowid
+        conn.execute(
+            """
+            INSERT INTO segments_fts (rowid, sid, role, segment_idx, timestamp, text)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (rowid, sid, role, idx, ts, text),
+        )
+
+
+def _latest_segment_matches(
+    conn: sqlite3.Connection,
+    fts_query: str,
+    *,
+    sids: list[str] | None = None,
+) -> dict[str, dict[str, object]]:
+    if not fts_query:
+        return {}
+
+    where = ["segments_fts MATCH ?"]
+    params: list[object] = [fts_query]
+    if sids:
+        placeholders = ",".join("?" for _ in sids)
+        where.append(f"segments.sid IN ({placeholders})")
+        params.extend(sids)
+
+    sql = f"""
+        SELECT segments.sid,
+               segments.role,
+               segments.segment_idx,
+               segments.timestamp,
+               snippet(segments_fts, 4, '\x01', '\x02', '…', 12) AS context
+        FROM segments_fts
+        JOIN segments ON segments.rowid = segments_fts.rowid
+        WHERE {' AND '.join(where)}
+        ORDER BY (CASE WHEN segments.role = 'assistant' THEN 1 ELSE 0 END) DESC,
+                 COALESCE(segments.timestamp, '') DESC,
+                 segments.segment_idx DESC
+    """
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+
+    matches: dict[str, dict[str, object]] = {}
+    for sid, _role, segment_idx, timestamp, context in rows:
+        if sid in matches:
+            continue
+        matches[sid] = {
+            "match_segment_idx": segment_idx,
+            "match_timestamp": timestamp,
+            "match_context": context,
+        }
+    return matches
+
+
+def _decorate_match_metadata(
+    rows: list[dict],
+    match_map: dict[str, dict[str, object]],
+) -> list[dict]:
+    decorated: list[dict] = []
+    for row in rows:
+        match = match_map.get(str(row["session_id"]))
+        if match:
+            row = {
+                **row,
+                **match,
+                "context": match.get("match_context") or row.get("context", ""),
+            }
+        decorated.append(row)
+    return decorated
+
+
+def _load_sessions_by_ids(
+    conn: sqlite3.Connection,
+    sids: list[str],
+) -> list[dict]:
+    if not sids:
+        return []
+    placeholders = ",".join("?" for _ in sids)
+    rows = conn.execute(
+        f"""
+        SELECT sid, path, provider, cwd, timestamp, last_timestamp, title,
+               first_msg, last_msg, msg_count, mtime, '' AS context
+        FROM sessions
+        WHERE sid IN ({placeholders})
+        """,
+        sids,
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
 
 
 def search(
@@ -295,7 +497,29 @@ def search(
     except sqlite3.OperationalError:
         return []
 
-    return [_row_to_dict(r) for r in rows]
+    results = [_row_to_dict(r) for r in rows]
+    match_map = _latest_segment_matches(conn, fts_query)
+    existing_ids = {str(r["session_id"]) for r in results}
+    extra_ids = [sid for sid in match_map if sid not in existing_ids]
+    if extra_ids:
+        results.extend(_load_sessions_by_ids(conn, extra_ids))
+    if not results:
+        return []
+    decorated = _decorate_match_metadata(results, match_map)
+    decorated.sort(
+        key=lambda row: (
+            1 if row.get("match_timestamp") else 0,
+            _timestamp_sort_key(
+                row.get("match_timestamp")
+                or row.get("last_timestamp")
+                or row.get("timestamp")
+            ),
+            _timestamp_sort_key(row.get("last_timestamp") or row.get("timestamp")),
+            float(row.get("mtime") or 0.0),
+        ),
+        reverse=True,
+    )
+    return decorated[:limit]
 
 
 # --- ranker_v1 -----------------------------------------------------------
@@ -367,17 +591,53 @@ def search_ranked(
     except sqlite3.OperationalError:
         return []
 
-    now = datetime.now(timezone.utc)
-    scored: list[tuple[float, tuple]] = []
-    for r in rows:
-        bm = -float(r[12] or 0.0)
-        age = _age_days(r[5] or r[4], now)
-        recency = math.exp(-age / half_life_days) if age >= 0 else 0.0
-        score = bm + recency_alpha * recency
-        scored.append((score, r))
+    results = [_row_to_dict(r[:12]) | {"_bm25": -float(r[12] or 0.0)} for r in rows]
+    match_map = _latest_segment_matches(conn, fts_query)
+    existing_ids = {str(r["session_id"]) for r in results}
+    extra_ids = [sid for sid in match_map if sid not in existing_ids]
+    if extra_ids:
+        results.extend(
+            [
+                row | {"_bm25": 0.0}
+                for row in _load_sessions_by_ids(conn, extra_ids)
+            ]
+        )
+    if not results:
+        return []
+    decorated = _decorate_match_metadata(results, match_map)
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [_row_to_dict(r[:12]) for _, r in scored[:limit]]
+    now = datetime.now(timezone.utc)
+    for row in decorated:
+        relevant_ts = (
+            row.get("match_timestamp")
+            or row.get("last_timestamp")
+            or row.get("timestamp")
+        )
+        age = _age_days(relevant_ts, now)
+        recency = math.exp(-age / half_life_days) if age >= 0 else 0.0
+        row["_score"] = float(row.get("_bm25") or 0.0) + recency_alpha * recency
+
+    decorated.sort(
+        key=lambda row: (
+            1 if row.get("match_timestamp") else 0,
+            _timestamp_sort_key(
+                row.get("match_timestamp")
+                or row.get("last_timestamp")
+                or row.get("timestamp")
+            ),
+            float(row.get("_score") or 0.0),
+            _timestamp_sort_key(row.get("last_timestamp") or row.get("timestamp")),
+            float(row.get("mtime") or 0.0),
+        ),
+        reverse=True,
+    )
+    trimmed = []
+    for row in decorated[:limit]:
+        clean = dict(row)
+        clean.pop("_bm25", None)
+        clean.pop("_score", None)
+        trimmed.append(clean)
+    return trimmed
 
 
 def _age_days(ts_str: str | None, now: datetime) -> float:

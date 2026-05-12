@@ -515,6 +515,74 @@ def test_build_import_markdown_includes_search_match_context(monkeypatch):
     assert "- Opened with: Can you review the pokpok brief?" in text
 
 
+def test_build_import_markdown_reenter_topic_uses_match_as_anchor(monkeypatch):
+    monkeypatch.setattr(
+        core,
+        "build_work_state",
+        lambda session, selection_query="", recent_limit=10, match_limit=6: {
+            "current_task": "Now archive the backups after that.",
+            "topic_shifted": True,
+            "opening_topic": "Can you review the pokpok brief?",
+            "session_title": "Mixed thread",
+            "repo_state": {"summary": "Branch `main` with 2 uncommitted files."},
+            "last_meaningful_user": "Now archive the backups after that.",
+            "latest_assistant": "I checked the Sherlock output for pokpok.",
+            "likely_open_question": "",
+            "suggested_next_prompt": "Continue the work in proj.",
+            "matching_turns": [
+                ("assistant", "I checked the Sherlock output for pokpok."),
+                ("user", "Can you review the pokpok brief?"),
+            ],
+            "matched_exchange": [
+                ("user", "Can you review the pokpok brief?"),
+                ("assistant", "I checked the Sherlock output for pokpok."),
+            ],
+            "thread_continued_after_match": True,
+            "post_match_recent_turns": [("user", "Now archive the backups after that.")],
+            "recent_turns": [
+                ("user", "Now archive the backups after that."),
+                ("assistant", "I checked the Sherlock output for pokpok."),
+                ("user", "Can you review the pokpok brief?"),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "get_provider",
+        lambda provider: (
+            SimpleNamespace(
+                display_name="Claude",
+                assistant_turns_available=True,
+            )
+            if provider == "claude"
+            else SimpleNamespace(display_name="CodeX")
+        ),
+    )
+
+    text = core.build_import_markdown(
+        {
+            "provider": "claude",
+            "session_id": "abc-123",
+            "cwd": "/home/alice/proj",
+            "timestamp": "2026-05-12T07:00:00Z",
+            "last_timestamp": "2026-05-12T07:30:00Z",
+            "name": "Mixed thread",
+            "first_msg": "Can you review the pokpok brief?",
+            "last_msg": "Now archive the backups after that.",
+            "path": "/tmp/session.jsonl",
+        },
+        "codex",
+        selection_query="pokpok",
+        reenter_topic=True,
+    )
+
+    assert "re-enter an earlier topic" in text
+    assert "It is not a native rewind of the original thread." in text
+    assert "Use the matching exchange below as the point to re-enter." in text
+    assert "### Last Matching Exchange" in text
+    assert "### Later Turns After The Match" in text
+
+
 def test_build_import_markdown_targets_claude_from_codex(monkeypatch):
     monkeypatch.setattr(
         core,
@@ -712,6 +780,12 @@ def test_extract_query_terms_word_and_phrase():
 def test_extract_query_terms_empty():
     assert core.extract_query_terms("") == []
     assert core.extract_query_terms("   ") == []
+
+
+def test_extract_query_terms_descriptive_query():
+    assert core.extract_query_terms(
+        "bring me the thread where i was asking about nevena feedback"
+    ) == ["nevena", "feedback"]
 
 
 # --- highlight_terms -------------------------------------------------------

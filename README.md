@@ -14,7 +14,7 @@ or Cursor by default.
 ```text
 claude-browse
 
-Sessions >
+Find thread >
   45m ago  team-ops   22msg  finalize pre-flight smoke tests  ###abc…
   3h ago   claude-br  7msg   roadmap for shipping v1          ###def…
   Apr 19   sales      14msg  draft proposal for acme co       ###ghi…
@@ -88,10 +88,11 @@ While the TUI is up:
 
 | Key              | What it does                                                     |
 | ---------------- | ---------------------------------------------------------------- |
-| Type             | Full-text search across Claude + CodeX + Gemini + Copilot threads |
+| Type             | Describe the thread you want in plain English, or use exact names / phrases |
 | ↑ ↓              | Move between sessions                                            |
 | Shift-↑ Shift-↓  | Scroll the preview pane                                          |
-| Enter            | Open in the app you launched (`claude-browse`, `codex-browse`, `gemini-browse`, `copilot-browse`, or `cursor-browse`) in yolo mode |
+| Enter            | Resume the selected thread in the app you launched (`claude-browse`, `codex-browse`, `gemini-browse`, `copilot-browse`, or `cursor-browse`) in yolo mode |
+| Ctrl-T           | Re-enter the matched topic in a fresh session in that app        |
 | Ctrl-S           | Open in that same app in safe mode                               |
 | Ctrl-Y           | Print the suggested next prompt for the selected thread          |
 | Ctrl-B           | Print the restart card for the selected thread                   |
@@ -99,12 +100,20 @@ While the TUI is up:
 
 Examples:
 
+- Query examples:
+  - `where i was asking nevena about feedback`
+  - `pokpok brief where we questioned the opportunities`
+  - `"runna sca2"` when you know the exact phrase already
+
 - In `claude-browse`, a Claude thread resumes natively in Claude and CodeX or Gemini threads start fresh Claude sessions with imported context.
 - In `codex-browse`, a CodeX thread resumes natively in CodeX and Claude or Gemini threads start fresh CodeX sessions with imported context.
 - In `gemini-browse`, a Gemini thread resumes natively in Gemini and Claude or CodeX threads start fresh Gemini sessions with imported context.
 - In `copilot-browse`, a Copilot thread resumes natively in Copilot and Claude, CodeX, or Gemini threads start fresh Copilot sessions with imported context.
 - In `cursor-browse`, Claude, CodeX, and Gemini threads start fresh Cursor sessions with imported context.
-- The preview pane shows a restart card: current task, opening topic when the thread drifted, current repo state, last meaningful ask, latest assistant answer, likely open question, and a suggested next prompt.
+- Descriptive queries are reduced to the most specific anchors under the hood, so `find me the thread where i was asking about nevena feedback` behaves like a thread-recall query, not a hard AND over filler words.
+- Search now prioritizes the most recent relevant mention of your query, not only the thread's latest unrelated activity.
+- The preview pane leads with the last matching exchange when a query matches earlier in the thread, then shows whether the thread later drifted to another topic.
+- `Ctrl-T` is the honest cross-provider answer to thread drift: it starts a new session anchored on the matched exchange instead of pretending the tool can rewind the original thread in place.
 - `Ctrl-Y` lets you emit the suggested next prompt without launching anything. `Ctrl-B` prints the restart card itself for copy/paste or handoff.
 - Cross-provider open is not a true native resume. It creates a new session seeded from the old thread.
 - Cursor is currently a **target-only** built-in provider. It opens everything in Cursor, but this tool does not yet claim to index Cursor-origin CLI sessions.
@@ -118,12 +127,15 @@ has `gemini --resume`, and Copilot has `copilot --resume`, but all four are
 provider-local pickers. `claude-browse`, `codex-browse`, `gemini-browse`,
 `copilot-browse`, and `cursor-browse` are better at three things:
 
-- **Fuzzy search across all your sessions, not just the last few.** Type any
-  word from any past conversation, any folder name, any relative date —
-  find it.
+- **Thread recall across all your sessions, not just the last few.** Type any
+  thread description, person, folder, client, or phrase and recall the exact
+  old thread you want.
 - **Recover work state before you resume.** The preview pane reconstructs the
   current task, topic drift, repo status, last meaningful ask, latest
   assistant progress, and a suggested next prompt.
+- **Re-enter an earlier topic honestly.** When topic A is buried inside a thread
+  that later drifted to B/C/D, the browser can start a fresh session anchored
+  on the matched exchange instead of faking a mid-thread native rewind.
 - **Choose the target app up front.** Launch `claude-browse` if you want to
   work in Claude, `codex-browse` if you want to work in CodeX, or
   `gemini-browse` if you want to work in Gemini, `copilot-browse` if you want

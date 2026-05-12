@@ -50,7 +50,11 @@ def format_row(
     The suffix is FTS5's matched-context snippet when a query is active, or a
     topic-drift hint (latest user message) when the title looks stale.
     """
-    date = format_date(info.get("last_timestamp") or info.get("timestamp"))
+    query_active = bool(query.strip())
+    thread_date = format_date(info.get("last_timestamp") or info.get("timestamp"))
+    date = thread_date
+    if query_active and info.get("match_timestamp"):
+        date = format_date(info.get("match_timestamp"))
     provider = (info.get("provider") or "claude").lower()
     cwd = info.get("cwd")
     fname = folder_name(cwd, prefixes)
@@ -61,8 +65,11 @@ def format_row(
     sid = info.get("session_id") or "?"
     ffolder = display_cwd(cwd)
 
-    suffix = ""
-    if query.strip() and info.get("context"):
+    suffix_parts: list[str] = []
+    if query_active and info.get("match_timestamp") and date != thread_date:
+        suffix_parts.append(f"\033[2mactive {thread_date}\033[0m")
+
+    if query_active and info.get("context"):
         # FTS5 snippet: \x01 wraps matched terms, \x02 ends the wrap. Render
         # them as bold yellow inside dim grey text so matched terms pop.
         snippet = (
@@ -73,7 +80,7 @@ def format_row(
             .replace("\r", " ")
             .replace("\t", " ")
         )
-        suffix = f"  \033[2m→ {snippet}\033[0m"
+        suffix_parts.append(f"\033[2m→ {snippet}\033[0m")
     else:
         last = (
             (info.get("last_msg") or "")
@@ -85,7 +92,9 @@ def format_row(
         title_words = {w for w in title.lower().split() if len(w) >= 4}
         last_words = {w for w in last.lower().split() if len(w) >= 4}
         if last and last_words and len(title_words & last_words) <= 1:
-            suffix = f"  \033[2m→ {last[:70]}\033[0m"
+            suffix_parts.append(f"\033[2m→ {last[:70]}\033[0m")
+
+    suffix = f"  {' · '.join(suffix_parts)}" if suffix_parts else ""
 
     return (
         f"{date:<8} {provider:<6} {fname:<15} {msgs:<7} {title}{suffix}  "
@@ -313,14 +322,16 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         f"  --target PROVIDER     Override launch target (`{valid_targets}`)\n"
         "  -h, --help            Show this help\n"
         "\n"
-        "Search syntax (typed inside the picker):\n"
-        "  runna                 Sessions containing the token 'runna'\n"
-        "  runna sca2            Sessions containing both tokens (any order)\n"
-        '  "runna sca2"          Sessions where the two words appear adjacent\n'
+        "Describe the thread inside the picker:\n"
+        "  pokpok brief where we questioned the opportunities\n"
+        "  where i was asking nevena about feedback\n"
+        '  "runna sca2"          Exact phrase when you know the words already\n'
         "  runna*                Prefix match: runna, runnathon, runna2026, ...\n"
+        "  Longer descriptive queries are reduced to the most specific anchors.\n"
         "\n"
         "Keys while browsing:\n"
-        f"  Enter                 Open in {target_name} (yolo)\n"
+        f"  Enter                 Resume the selected thread in {target_name} (yolo)\n"
+        f"  Ctrl-T                Re-enter the matched topic in a new {target_name} session (yolo)\n"
         f"  Ctrl-S                Open in {target_name} (safe)\n"
         "  Ctrl-Y                Print the suggested next prompt for the selection\n"
         "  Ctrl-B                Print the restart card for the selection\n"
@@ -375,6 +386,8 @@ def _continue_in_provider(
     prefixes: tuple[str, ...],
     yolo: bool = True,
     selection_query: str = "",
+    *,
+    reenter_topic: bool = False,
 ) -> None:
     target_spec = get_provider(target_provider)
     target_name = target_spec.display_name
@@ -383,38 +396,67 @@ def _continue_in_provider(
 
     if target_spec.handoff_via_file:
         try:
-            import_path = write_import_file(session, target_provider, selection_query)
+            import_path = write_import_file(
+                session,
+                target_provider,
+                selection_query,
+                reenter_topic=reenter_topic,
+            )
         except OSError as exc:
             print(f"Could not write import brief: {exc}", file=sys.stderr)
             sys.exit(1)
 
         import_dir = os.path.dirname(import_path) or cwd
-        prompt = (
-            f"Continue the imported {provider_display_name(source_provider)} session "
-            f"context from {import_path}. Treat it as prior conversation state, "
-            "read that file first, use the Reopen Intent section as the reason "
-            "this thread was selected, prioritize the end-of-thread state and "
-            "most recent turns over the original opening prompt, then continue "
-            "the work in this directory."
-        )
+        if reenter_topic:
+            prompt = (
+                f"Continue the imported {provider_display_name(source_provider)} session "
+                f"context from {import_path}. Treat it as prior conversation state, "
+                "read that file first, use the Reopen Intent section as the reason "
+                "this thread was selected, re-enter the earlier matched topic "
+                "instead of resuming the full thread from the end, use later turns "
+                "only as context about what happened afterward, then continue the "
+                "work in this directory."
+            )
+        else:
+            prompt = (
+                f"Continue the imported {provider_display_name(source_provider)} session "
+                f"context from {import_path}. Treat it as prior conversation state, "
+                "read that file first, use the Reopen Intent section as the reason "
+                "this thread was selected, prioritize the end-of-thread state and "
+                "most recent turns over the original opening prompt, then continue "
+                "the work in this directory."
+            )
     else:
         import_dir = None
         import_markdown = build_import_markdown(
             session,
             target_provider,
             selection_query,
+            reenter_topic=reenter_topic,
         )
-        prompt = (
-            f"Continue the imported {provider_display_name(source_provider)} session "
-            "context below. Treat it as prior conversation state, use the "
-            "Reopen Intent section as the reason this thread was selected, "
-            "prioritize the end-of-thread state and most recent turns over "
-            "the original opening prompt, then continue the work in this "
-            f"directory.\n\n{import_markdown}"
-        )
+        if reenter_topic:
+            prompt = (
+                f"Continue the imported {provider_display_name(source_provider)} session "
+                "context below. Treat it as prior conversation state, use the "
+                "Reopen Intent section as the reason this thread was selected, "
+                "re-enter the earlier matched topic instead of resuming the "
+                "full thread from the end, use later turns only as context "
+                "about what happened afterward, then continue the work in "
+                f"this directory.\n\n{import_markdown}"
+            )
+        else:
+            prompt = (
+                f"Continue the imported {provider_display_name(source_provider)} session "
+                "context below. Treat it as prior conversation state, use the "
+                "Reopen Intent section as the reason this thread was selected, "
+                "prioritize the end-of-thread state and most recent turns over "
+                "the original opening prompt, then continue the work in this "
+                f"directory.\n\n{import_markdown}"
+            )
     cmd = target_spec.handoff_cmd(import_dir, prompt, yolo)
     mode = " (yolo)" if yolo else ""
-    print(f"Continuing{mode} in {target_name} from {folder_name(cwd, prefixes)}...")
+    action = "Re-entering topic" if reenter_topic else "Continuing"
+    print(f"{action}{mode} in {target_name} from {folder_name(cwd, prefixes)}...")
     os.execvp(target_spec.binary, cmd)
 
 
@@ -427,8 +469,10 @@ def _open_in_target_provider(
     prefixes: tuple[str, ...],
     yolo: bool,
     selection_query: str = "",
+    *,
+    reenter_topic: bool = False,
 ) -> None:
-    if source_provider == target_provider:
+    if source_provider == target_provider and not reenter_topic:
         _native_resume(session, source_provider, session_id, cwd, prefixes, yolo)
         return
     _continue_in_provider(
@@ -439,6 +483,7 @@ def _open_in_target_provider(
         prefixes,
         yolo,
         selection_query,
+        reenter_topic=reenter_topic,
     )
 
 
@@ -462,6 +507,8 @@ def _parse_fzf_output(
 
     if row_lines and row_lines[0] == "SAFE:":
         marker = row_lines.pop(0)
+    elif row_lines and row_lines[0] == "TOPIC:":
+        marker = row_lines.pop(0)
     elif row_lines and row_lines[0] == "PROMPT:":
         marker = row_lines.pop(0)
     elif row_lines and row_lines[0] == "BRIEF:":
@@ -476,6 +523,8 @@ def _parse_fzf_output(
     action = "open_yolo"
     if marker == "SAFE:":
         action = "open_safe"
+    elif marker == "TOPIC:":
+        action = "reenter_topic"
     elif marker == "PROMPT:":
         action = "print_prompt"
     elif marker == "BRIEF:":
@@ -632,10 +681,12 @@ def main() -> None:
             "--reverse",
             "--height=90%",
             "--border=rounded",
-            "--prompt=Sessions > ",
+            "--prompt=Find thread > ",
             (
                 "--header="
-                f"Enter: open in {target_name} (yolo) | "
+                'Describe the thread, person, client, or folder you want. '
+                f"Enter: resume in {target_name} (yolo) | "
+                f"Ctrl-T: re-enter matched topic in {target_name} | "
                 f"Ctrl-S: open in {target_name} (safe) | "
                 "Ctrl-Y: next prompt | Ctrl-B: restart card | "
                 "Esc: quit | Shift-Up/Down: scroll preview"
@@ -650,6 +701,7 @@ def main() -> None:
             "--preview-window=right:45%:wrap",
             "--bind=shift-up:preview-up,shift-down:preview-down",
             "--bind=ctrl-s:print(SAFE:)+accept",
+            "--bind=ctrl-t:print(TOPIC:)+accept",
             "--bind=ctrl-y:print(PROMPT:)+accept",
             "--bind=ctrl-b:print(BRIEF:)+accept",
         ]
@@ -679,23 +731,37 @@ def main() -> None:
             print(f"Session not found: {session_id}", file=sys.stderr)
             sys.exit(1)
 
+        state = None
+        if action in {"print_prompt", "print_brief", "reenter_topic"}:
+            state = build_work_state(session, selection_query)
+
         if action == "print_prompt":
-            print(build_work_state(session, selection_query)["suggested_next_prompt"])
+            print(state["suggested_next_prompt"])
             return
 
         if action == "print_brief":
-            print(render_restart_card_terminal(build_work_state(session, selection_query)))
+            print(render_restart_card_terminal(state))
             return
+
+        if action == "reenter_topic":
+            if not selection_query.strip():
+                print(
+                    "Topic re-entry needs a descriptive query. Search for the earlier topic first, then use Ctrl-T.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if not state or not state.get("matched_exchange"):
+                print(
+                    "No matching exchange found for this query in the selected thread. Refine the query or resume the thread normally.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
         cwd = session.get("cwd")
         if not cwd or not os.path.isdir(cwd):
             print(f"Original folder no longer exists: {cwd}", file=sys.stderr)
-            if provider == "codex":
-                print(f"Try: codex resume {session_id}", file=sys.stderr)
-            elif provider == "gemini":
-                print(f"Try: gemini --resume {session_id}", file=sys.stderr)
-            else:
-                print(f"Try: claude --resume {session_id}", file=sys.stderr)
+            suggestion = get_provider(provider).native_resume_cmd(session_id, False)
+            print(f"Try: {' '.join(suggestion)}", file=sys.stderr)
             sys.exit(1)
 
         os.chdir(cwd)
@@ -708,6 +774,7 @@ def main() -> None:
             prefixes,
             action == "open_yolo",
             selection_query,
+            reenter_topic=(action == "reenter_topic"),
         )
 
     finally:

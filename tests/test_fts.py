@@ -76,6 +76,30 @@ def _seed(conn, sid: str, corpus: str, **meta) -> None:
             meta.get("fts_boiler", ""),
         ),
     )
+    segments = meta.get("segments")
+    if segments is None:
+        segments = [
+            (
+                "user",
+                corpus,
+                meta.get("last_timestamp", timestamp),
+            )
+        ]
+    for idx, (role, text, segment_ts) in enumerate(segments, 1):
+        cur = conn.execute(
+            """
+            INSERT INTO segments (sid, segment_idx, role, timestamp, text)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (sid, idx, role, segment_ts, text),
+        )
+        conn.execute(
+            """
+            INSERT INTO segments_fts (rowid, sid, role, segment_idx, timestamp, text)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (cur.lastrowid, sid, role, idx, segment_ts, text),
+        )
     conn.commit()
 
 
@@ -117,6 +141,13 @@ def test_normalize_empty():
 def test_normalize_internal_quote_escaped():
     """Embedded double-quote becomes "" inside an FTS5 phrase."""
     assert fts.normalize_query('say "hi"') == '"say" "hi"'
+
+
+def test_normalize_descriptive_query_drops_filler_words():
+    assert (
+        fts.normalize_query("bring me the thread where i was asking about nevena feedback")
+        == '"nevena" "feedback"'
+    )
 
 
 # --- search semantics ------------------------------------------------------
@@ -233,6 +264,58 @@ def test_search_ranked_uses_last_activity_for_recency(db):
         "old_resumed",
         "newer_dormant",
     ]
+
+
+def test_search_ranked_uses_latest_matching_mention_not_later_unrelated_activity(db):
+    _seed(
+        db,
+        "drifted_thread",
+        "pokpok brief discussion plus later unrelated work",
+        timestamp="2026-05-01T00:00:00Z",
+        last_timestamp="2026-05-10T00:00:00Z",
+        segments=[
+            ("user", "Can you review the pokpok brief?", "2026-05-01T00:00:00Z"),
+            ("assistant", "I checked the pokpok opportunities.", "2026-05-01T00:10:00Z"),
+            ("user", "Now switch to backup cleanup.", "2026-05-10T00:00:00Z"),
+        ],
+    )
+    _seed(
+        db,
+        "recent_match",
+        "pokpok brief discussion only",
+        timestamp="2026-05-08T00:00:00Z",
+        last_timestamp="2026-05-08T01:00:00Z",
+        segments=[
+            ("user", "Can you review the pokpok brief?", "2026-05-08T00:00:00Z"),
+            ("assistant", "Yes, the pokpok opportunities feel forced.", "2026-05-08T01:00:00Z"),
+        ],
+    )
+
+    results = fts.search_ranked(db, "pokpok")
+    assert [r["session_id"] for r in results][:2] == [
+        "recent_match",
+        "drifted_thread",
+    ]
+    assert results[0]["match_timestamp"] == "2026-05-08T01:00:00Z"
+
+
+def test_search_uses_latest_matching_segment_as_context(db):
+    _seed(
+        db,
+        "s1",
+        "nevena thread with multiple topics",
+        segments=[
+            ("user", "Old unrelated opener", "2026-05-01T00:00:00Z"),
+            ("assistant", "More unrelated context", "2026-05-01T00:05:00Z"),
+            ("user", "Can you send Nevena the feedback summary?", "2026-05-09T00:00:00Z"),
+            ("assistant", "Yes, I'll draft the Nevena feedback summary.", "2026-05-09T00:05:00Z"),
+        ],
+    )
+
+    results = fts.search(db, "where i was asking nevena about feedback")
+    assert [r["session_id"] for r in results] == ["s1"]
+    assert "Nevena" in results[0]["context"] or "feedback" in results[0]["context"]
+    assert results[0]["match_timestamp"] == "2026-05-09T00:05:00Z"
 
 
 # --- reindex ---------------------------------------------------------------
