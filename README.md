@@ -56,8 +56,6 @@ sudo pacman -S fzf      # Arch
 sudo apk add fzf        # Alpine
 ```
 
-`claude-resume` is a plain terminal prompt — it works without fzf.
-
 ### Requirements
 
 - Python 3.9+
@@ -96,22 +94,6 @@ Examples:
 - In `codex-browse`, a CodeX thread resumes natively in CodeX and a Claude thread starts a fresh CodeX session with imported context.
 - Cross-app open is not a true native resume. It creates a new session seeded from the old thread.
 
-### claude-resume — keyword resume without the TUI
-
-```bash
-claude-resume <session-id>             # resume by exact UUID
-claude-resume <keyword>                # search sessions, pick, resume
-claude-resume --last [N]               # pick from N most recent (default 10)
-claude-resume --yolo <keyword>         # resume with skip-permissions
-claude-resume --here <keyword>         # only sessions from current dir
-claude-resume aditi -- --model sonnet  # example Claude flag when the selected session is a Claude thread
-claude-resume taxes -- --model gpt-5   # example CodeX flag when the selected session is a CodeX thread
-```
-
-Useful when you remember a keyword from the conversation and don't want to
-leave your shell. It routes to the native app automatically: Claude threads
-open in Claude, CodeX threads open in CodeX.
-
 ---
 
 ## Why
@@ -141,7 +123,7 @@ different projects, this is the tool.
 If you sync `~/.claude/projects/` between a Mac and a Linux box (Syncthing,
 rclone, etc.), session cwds recorded on one machine won't match the other
 (`/Users/<name>` vs `/home/<name>`). By default the browsers
-**canonicalizes** both to `$HOME`, so the same project shows up once, not
+**canonicalize** both to `$HOME`, so the same project shows up once, not
 twice. Pass `--no-canonicalize` to see raw paths.
 
 For custom path aliases (corporate devcontainers, Windows drives, etc.),

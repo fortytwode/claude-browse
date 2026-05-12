@@ -30,7 +30,7 @@ they use fixture JSONL files in `tests/fixtures/`.
 - Python 3.9+ compatible
 - Standard library only for the core CLI (no runtime deps beyond `fzf` which
   is an external binary)
-- Keep the two scripts (`claude-browse`, `claude-resume`) runnable as plain
+- Keep the browser scripts (`claude-browse`, `codex-browse`) runnable as plain
   shebang scripts — don't require a package install to use them
 - Prefer clarity over cleverness. This is a tool people will read to trust.
 

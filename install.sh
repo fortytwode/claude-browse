@@ -14,11 +14,19 @@ BIN_DIR="$HOME/.local/bin"
 
 mkdir -p "$BIN_DIR"
 
-for tool in claude-browse codex-browse claude-resume; do
+for tool in claude-browse codex-browse; do
     chmod +x "$SCRIPT_DIR/$tool"
     ln -sf "$SCRIPT_DIR/$tool" "$BIN_DIR/$tool"
     echo "  Installed $tool -> $BIN_DIR/$tool"
 done
+
+if [ -L "$BIN_DIR/claude-resume" ]; then
+    rm "$BIN_DIR/claude-resume"
+    echo "  Removed deprecated claude-resume symlink"
+elif [ -f "$BIN_DIR/claude-resume" ]; then
+    echo "  Note: $BIN_DIR/claude-resume exists and isn't managed by this repo"
+    echo "        Remove manually if you want it gone: rm $BIN_DIR/claude-resume"
+fi
 
 # Remove deprecated claude-search symlink (pre-v0.1 naming)
 if [ -L "$BIN_DIR/claude-search" ]; then
@@ -76,4 +84,3 @@ echo ""
 echo "Done. Available commands:"
 echo "  claude-browse    Interactive browser that opens everything in Claude by default"
 echo "  codex-browse     Interactive browser that opens everything in CodeX by default"
-echo "  claude-resume    Quick resume by keyword (claude-resume <keyword>)"

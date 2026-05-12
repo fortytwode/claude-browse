@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+- `claude-resume` is no longer a supported command surface. The paired browser
+  entrypoints (`claude-browse` and `codex-browse`) are now the only reopen
+  flows the product documents, installs, and tests.
+
 ### Changed
 - Search now ranks by relevance, not just recency. Previous behavior was
   "filter by FTS5 token match, then sort by last activity," which meant

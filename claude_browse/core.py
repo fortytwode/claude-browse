@@ -1,7 +1,7 @@
 """Shared session parsing and formatting utilities.
 
-Both claude-browse and claude-resume use these. No I/O side effects beyond
-reading local session data from disk. No network calls ever — by design.
+Used by the browser entrypoints. No I/O side effects beyond reading local
+session data from disk. No network calls ever — by design.
 """
 
 from __future__ import annotations

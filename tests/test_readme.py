@@ -20,16 +20,6 @@ def test_readme_documents_target_app_browsers():
     assert "Cross-app open is not a true native resume." in text
 
 
-def test_readme_documents_provider_aware_flag_passthrough():
+def test_readme_no_longer_documents_claude_resume():
     text = _readme_text()
-    assert (
-        "claude-resume aditi -- --model sonnet  "
-        "# example Claude flag when the selected session is a Claude thread"
-    ) in text
-    assert (
-        "claude-resume taxes -- --model gpt-5   "
-        "# example CodeX flag when the selected session is a CodeX thread"
-    ) in text
-    assert "example Claude flag when the selected session is a Claude thread" in text
-    assert "example CodeX flag when the selected session is a CodeX thread" in text
-    assert "extra flags passed through to claude" not in text.lower()
+    assert "claude-resume" not in text

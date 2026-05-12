@@ -18,12 +18,12 @@ open-core pattern: Tailscale, Raycast, Warp, Supabase all use it.
 
 ## Current state (April 2026)
 
-- `claude-browse` — fzf TUI over `~/.claude/projects/`. Fuzzy search, preview
-  pane, resume in original cwd. Default mode is `--dangerously-skip-permissions`
-  (yolo); Ctrl-S opts into safe mode.
-- `claude-resume` — keyword-based quick resume without the full TUI.
-- `install.sh` — symlinks the scripts into `~/.local/bin/`.
-- 4 commits, ~400 LoC of Python, no tests, no CI, no packaging.
+- `claude-browse` / `codex-browse` — paired fzf TUIs over local Claude Code +
+  CodeX history. Search, preview, native resume by provider, cross-app handoff,
+  and browser-level target selection.
+- `install.sh` — symlinks the browser scripts into `~/.local/bin/`.
+- Mature test suite, packaging, and docs now exist; remaining work is product
+  polish and future-provider architecture, not basic legitimacy.
 - Distribution: `git clone` + `./install.sh`. Mac-first (install.sh recommends
   `brew install fzf` only).
 
@@ -76,7 +76,8 @@ tagged v1.0.0.
 - Config file (`~/.config/claude-browse/config.toml`) for defaults
 - Shell completions (bash, zsh, fish)
 - Color theming
-- Plugin hook so community can add custom columns/filters
+- Internal provider registry so future first-party adapters (Gemini, Cursor,
+  Copilot, etc.) stop living inside `browse.py`
 
 ---
 
