@@ -20,4 +20,6 @@ def test_readme_documents_other_app_handoff():
 
 def test_readme_documents_provider_aware_flag_passthrough():
     text = _readme_text()
-    assert "extra flags passed through to the source app" in text
+    assert "example Claude flag when the selected session is a Claude thread" in text
+    assert "example CodeX flag when the selected session is a CodeX thread" in text
+    assert "extra flags passed through to claude" not in text.lower()
