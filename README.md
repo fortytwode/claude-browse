@@ -1,8 +1,9 @@
 # claude-browse
 
-**Find and resume past Claude Code sessions from the terminal.** Interactive
-fzf browser with a preview pane, fuzzy search across folders and first
-messages, one-key resume.
+**Find and reopen past Claude Code and CodeX sessions from the terminal.**
+Interactive fzf browser with a preview pane, full-text search across folders
+and first messages, native resume by provider, plus one-key cross-app handoff
+for older threads.
 
 <!-- Replace with a real asciinema/terminalizer GIF before launch -->
 <p align="center">
@@ -20,8 +21,9 @@ Sessions >
   ...
 ```
 
-No network. No accounts. No API calls. It reads `~/.claude/projects/` and
-gives you a fast way to find and resume conversations. That's it.
+No network. No accounts. No API calls. It reads local session history from
+`~/.claude/projects/` and `~/.codex/`, then gives you a fast way to find and
+reopen conversations. That's it.
 
 ---
 
@@ -60,7 +62,7 @@ sudo apk add fzf        # Alpine
 
 - Python 3.9+
 - fzf (for `claude-browse` only)
-- Claude Code (obviously — otherwise there are no sessions to browse)
+- Claude Code and/or CodeX (otherwise there are no sessions to browse)
 
 ---
 
@@ -79,11 +81,12 @@ While the TUI is up:
 
 | Key              | What it does                                   |
 | ---------------- | ---------------------------------------------- |
-| Type             | Fuzzy-filter on date, folder, first message    |
+| Type             | Full-text search across Claude + CodeX threads |
 | ↑ ↓              | Move between sessions                          |
 | Shift-↑ Shift-↓  | Scroll the preview pane                        |
-| Enter            | Resume (yolo — `--dangerously-skip-permissions`) |
-| Ctrl-S           | Resume in safe mode                            |
+| Enter            | Native resume in the source app (yolo)         |
+| Ctrl-S           | Native resume in safe mode                     |
+| Ctrl-X           | Continue the selected thread in the other app  |
 | Esc              | Quit                                           |
 
 ### claude-resume — keyword resume without the TUI
@@ -98,20 +101,24 @@ claude-resume <kw> -- --model sonnet   # extra flags passed through to claude
 ```
 
 Useful when you remember a keyword from the conversation and don't want to
-leave your shell.
+leave your shell. It now routes to the native app automatically: Claude
+threads open in Claude, CodeX threads open in CodeX.
 
 ---
 
 ## Why
 
-Claude Code already has `claude --resume`, which pops up a picker listing your
-recent sessions. `claude-browse` is better at two things:
+Claude Code already has `claude --resume`, and CodeX has `codex resume`, but
+both are provider-local pickers. `claude-browse` is better at three things:
 
 - **Fuzzy search across all your sessions, not just the last few.** Type any
   word from any past conversation, any folder name, any relative date —
   find it.
 - **Preview before you resume.** See where the conversation ended up (latest
   messages first) so you pick the right thread, not a stale one.
+- **Hand work from one app to the other.** `Ctrl-X` writes a compact import
+  brief and starts a fresh session in the other app in the original repo
+  instead of pretending cross-vendor native resume exists.
 
 If you live in `tmux` and start a lot of Claude Code sessions across
 different projects, this is the tool.
@@ -153,9 +160,10 @@ export CLAUDE_BROWSE_FOLDER_PREFIXES="monorepo/apps/:monorepo/lib/"
 Install fzf via your package manager (see Install section above).
 
 **`No sessions found`**
-You haven't run `claude` yet — or your sessions are in a non-standard
-location. `claude-browse` reads `~/.claude/projects/`. If yours is elsewhere,
-file an issue.
+You haven't run `claude` or `codex` yet — or your sessions are in a
+non-standard location. `claude-browse` reads `~/.claude/projects/`,
+`~/.codex/state_5.sqlite`, and `~/.codex/history.jsonl`. If yours live
+elsewhere, file an issue.
 
 **`Original folder no longer exists`**
 The directory you ran that session from has been deleted or moved. You can
@@ -171,10 +179,13 @@ proper fix is on the roadmap as part of the `claude-sync` companion tool.
 ## How it works
 
 Claude Code writes each session as a JSONL file under
-`~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`. `claude-browse` walks that
-directory, extracts metadata (date, folder, first user message, message
-count), and hands it to fzf. When you pick one, it `cd`s back to the
-session's original cwd and runs `claude --resume <uuid>`.
+`~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`. CodeX stores thread metadata
+in `~/.codex/state_5.sqlite` and user-turn history in `~/.codex/history.jsonl`.
+`claude-browse` normalizes both into one local SQLite index, then hands that to
+fzf. When you pick a thread, it `cd`s back to the original cwd and launches the
+native resume command for that provider. For `Ctrl-X`, it creates a Markdown
+import brief, grants the target app access to that brief, and starts a fresh
+session in the other app with that brief as context.
 
 No data leaves your machine. No telemetry. No API calls. The whole thing is
 ~500 lines of stdlib Python.
