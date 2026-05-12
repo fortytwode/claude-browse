@@ -54,7 +54,6 @@ jobs:
 
       - name: Run shims directly
         run: |
-          chmod +x ./claude-browse ./codex-browse ./gemini-browse
           ./claude-browse --help
           ./codex-browse --help
           ./gemini-browse --help

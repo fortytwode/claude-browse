@@ -1,9 +1,9 @@
 # claude-browse
 
-**Find and reopen past Claude Code and CodeX sessions from the terminal.**
+**Find and reopen past Claude Code, CodeX, and Gemini sessions from the terminal.**
 Interactive fzf browser with a preview pane, full-text search across folders
-and first messages, provider-aware native resume, plus paired browsers that
-open everything in Claude or everything in CodeX by default.
+and first messages, provider-aware native resume, plus target-app browsers
+that open everything in Claude, CodeX, or Gemini by default.
 
 <!-- Replace with a real asciinema/terminalizer GIF before launch -->
 <p align="center">
@@ -22,8 +22,8 @@ Sessions >
 ```
 
 No network. No accounts. No API calls. It reads local session history from
-`~/.claude/projects/` and `~/.codex/`, then gives you a fast way to find and
-reopen conversations. That's it.
+`~/.claude/projects/`, `~/.codex/`, and `~/.gemini/tmp/`, then gives you a
+fast way to find and reopen conversations. That's it.
 
 ---
 
@@ -45,8 +45,9 @@ cd claude-browse
 
 ### External dependency — fzf
 
-`claude-browse` and `codex-browse` use [fzf](https://github.com/junegunn/fzf) for the
-interactive UI. Install it once via your system package manager:
+`claude-browse`, `codex-browse`, and `gemini-browse` use
+[fzf](https://github.com/junegunn/fzf) for the interactive UI. Install it once
+via your system package manager:
 
 ```bash
 brew install fzf        # macOS
@@ -59,8 +60,8 @@ sudo apk add fzf        # Alpine
 ### Requirements
 
 - Python 3.9+
-- fzf (for `claude-browse` and `codex-browse`)
-- Claude Code and/or CodeX (otherwise there are no sessions to browse)
+- fzf (for `claude-browse`, `codex-browse`, and `gemini-browse`)
+- Claude Code, CodeX, and/or Gemini (otherwise there are no sessions to browse)
 
 ---
 
@@ -71,36 +72,37 @@ sudo apk add fzf        # Alpine
 ```bash
 claude-browse               # most recent 100 sessions, opens everything in Claude
 codex-browse                # most recent 100 sessions, opens everything in CodeX
+gemini-browse               # most recent 100 sessions, opens everything in Gemini
 claude-browse --all         # every session you've ever run
 codex-browse --here         # only sessions started in the current directory
-claude-browse --no-canonicalize   # show raw cwds (see "Cross-machine" below)
+claude-browse --no-canonicalize   # accepted for compatibility; canonicalization still happens at index time
 ```
 
 While the TUI is up:
 
 | Key              | What it does                                                     |
 | ---------------- | ---------------------------------------------------------------- |
-| Type             | Full-text search across Claude + CodeX threads                   |
+| Type             | Full-text search across Claude + CodeX + Gemini threads          |
 | ↑ ↓              | Move between sessions                                            |
 | Shift-↑ Shift-↓  | Scroll the preview pane                                          |
-| Enter            | Open in the app you launched (`claude-browse` or `codex-browse`) in yolo mode |
-| Ctrl-S           | Open in that same app in safe mode                                |
-| Ctrl-X           | Open in the other app instead, also in yolo mode                  |
+| Enter            | Open in the app you launched (`claude-browse`, `codex-browse`, or `gemini-browse`) in yolo mode |
+| Ctrl-S           | Open in that same app in safe mode                               |
 | Esc              | Quit                                                             |
 
 Examples:
 
-- In `claude-browse`, a Claude thread resumes natively in Claude and a CodeX thread starts a fresh Claude session with imported context.
-- In `codex-browse`, a CodeX thread resumes natively in CodeX and a Claude thread starts a fresh CodeX session with imported context.
-- Cross-app open is not a true native resume. It creates a new session seeded from the old thread.
+- In `claude-browse`, a Claude thread resumes natively in Claude and CodeX or Gemini threads start fresh Claude sessions with imported context.
+- In `codex-browse`, a CodeX thread resumes natively in CodeX and Claude or Gemini threads start fresh CodeX sessions with imported context.
+- In `gemini-browse`, a Gemini thread resumes natively in Gemini and Claude or CodeX threads start fresh Gemini sessions with imported context.
+- Cross-provider open is not a true native resume. It creates a new session seeded from the old thread.
 
 ---
 
 ## Why
 
-Claude Code already has `claude --resume`, and CodeX has `codex resume`, but
-both are provider-local pickers. `claude-browse` and `codex-browse` are better
-at three things:
+Claude Code already has `claude --resume`, CodeX has `codex resume`, and
+Gemini has `gemini --resume`, but all three are provider-local pickers.
+`claude-browse`, `codex-browse`, and `gemini-browse` are better at three things:
 
 - **Fuzzy search across all your sessions, not just the last few.** Type any
   word from any past conversation, any folder name, any relative date —
@@ -108,10 +110,10 @@ at three things:
 - **Preview before you resume.** See where the conversation ended up (latest
   messages first) so you pick the right thread, not a stale one.
 - **Choose the target app up front.** Launch `claude-browse` if you want to
-  work in Claude or `codex-browse` if you want to work in CodeX. When the
-  source app differs, the browser writes a compact import brief and starts a
-  fresh session in the target app instead of pretending cross-vendor native
-  resume exists.
+  work in Claude, `codex-browse` if you want to work in CodeX, or
+  `gemini-browse` if you want to work in Gemini. When the source app differs,
+  the browser writes a compact import brief and starts a fresh session in the
+  target app instead of pretending cross-vendor native resume exists.
 
 If you live in `tmux` and start a lot of Claude Code sessions across
 different projects, this is the tool.
@@ -124,7 +126,9 @@ If you sync `~/.claude/projects/` between a Mac and a Linux box (Syncthing,
 rclone, etc.), session cwds recorded on one machine won't match the other
 (`/Users/<name>` vs `/home/<name>`). By default the browsers
 **canonicalize** both to `$HOME`, so the same project shows up once, not
-twice. Pass `--no-canonicalize` to see raw paths.
+twice. `--no-canonicalize` is still accepted for compatibility, but it no
+longer changes display behavior because canonicalization now happens at index
+time.
 
 For custom path aliases (corporate devcontainers, Windows drives, etc.),
 set an environment variable:
@@ -153,14 +157,16 @@ export CLAUDE_BROWSE_FOLDER_PREFIXES="monorepo/apps/:monorepo/lib/"
 Install fzf via your package manager (see Install section above).
 
 **`No sessions found`**
-You haven't run `claude` or `codex` yet — or your sessions are in a
+You haven't run `claude`, `codex`, or `gemini` yet — or your sessions are in a
 non-standard location. The browsers read `~/.claude/projects/`,
-`~/.codex/state_5.sqlite`, and `~/.codex/history.jsonl`. If yours live
-elsewhere, file an issue.
+`~/.codex/state_5.sqlite`, `~/.codex/history.jsonl`, and `~/.gemini/tmp/`.
+If yours live elsewhere, file an issue.
 
 **`Original folder no longer exists`**
 The directory you ran that session from has been deleted or moved. You can
-still resume with `claude --resume <session-id>` manually from any cwd.
+still resume with the native command (`claude --resume <session-id>`,
+`codex resume <session-id>`, or `gemini --resume <session-id>`) manually from
+any cwd.
 
 **Resume opens but the session looks empty**
 The session file may be in a different encoded-directory than Claude Code
@@ -174,10 +180,13 @@ proper fix is on the roadmap as part of the `claude-sync` companion tool.
 Claude Code writes each session as a JSONL file under
 `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`. CodeX stores thread metadata
 in `~/.codex/state_5.sqlite` and user-turn history in `~/.codex/history.jsonl`.
-The browsers normalize both into one local SQLite index, then hand that to
-fzf. When you pick a thread, the tool `cd`s back to the original cwd and then
-either launches the native resume command for the target app or creates a
-Markdown import brief and starts a fresh cross-app handoff session.
+Gemini stores project-scoped chat JSON under
+`~/.gemini/tmp/<project>/chats/session-*.json` plus aliases in
+`~/.gemini/projects.json`. The browsers normalize all three into one local
+SQLite index, then hand that to fzf. When you pick a thread, the tool `cd`s
+back to the original cwd and then either launches the native resume command
+for the target app or creates a Markdown import brief and starts a fresh
+cross-provider handoff session.
 
 No data leaves your machine. No telemetry. No API calls. The whole thing is
 ~500 lines of stdlib Python.

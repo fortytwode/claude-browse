@@ -12,7 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   entrypoints (`claude-browse` and `codex-browse`) are now the only reopen
   flows the product documents, installs, and tests.
 
+### Added
+- Gemini is now a built-in provider. `gemini-browse` opens everything in
+  Gemini by default, `--target gemini` routes the shared browser entrypoint
+  there, and the adapter registry now indexes Gemini sessions from
+  `~/.gemini/tmp/` alongside Claude and CodeX.
+
 ### Changed
+- The browser UX now scales by target app, not by a two-provider toggle.
+  `Enter` opens in the launched browser's app in yolo mode, `Ctrl-S` opens in
+  safe mode, and cross-provider picks become seeded handoffs into that target
+  app. The old `Ctrl-X` "open in the other app" shortcut is gone because
+  "other" stops being well-defined once Gemini is added.
 - Search now ranks by relevance, not just recency. Previous behavior was
   "filter by FTS5 token match, then sort by last activity," which meant
   any session that mentioned a term once (a Toggl rollup, a passing
