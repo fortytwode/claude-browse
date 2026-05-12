@@ -6,112 +6,45 @@ session data from disk. No network calls ever — by design.
 
 from __future__ import annotations
 
-import getpass
 import glob
 import json
 import os
-import re
 import sqlite3
 import tempfile
 from collections.abc import Iterable
 from datetime import datetime, timezone
 
 from .providers import get_provider
-
-SESSIONS_DIR = os.path.expanduser("~/.claude/projects")
-CODEX_STATE_DB = os.path.expanduser("~/.codex/state_5.sqlite")
-CODEX_HISTORY_PATH = os.path.expanduser("~/.codex/history.jsonl")
-
-# Toggl-style rollup lines ('- musopia: 1.0h', '* maxrewards: 0.5h') are
-# templated noise: they mention every client equally and dominate FTS hits
-# for client names. Routed to a separate low-weight index column rather than
-# stripped, so a deliberate query like '0.5h' still retrieves them.
-_BOILERPLATE_RE = re.compile(
-    r"^\s*[-*]\s*[\w][\w\s.&'-]*?:\s*\d+(?:\.\d+)?\s*h\s*$"
+from .providers.claude import SESSIONS_DIR
+from .providers.codex import (
+    _CODEX_HISTORY_CACHE,
+    CODEX_HISTORY_PATH,
+    CODEX_STATE_DB,
 )
-
-
-def _is_boilerplate_line(line: str) -> bool:
-    return bool(_BOILERPLATE_RE.match(line))
-
-
-_NOISE_PREFIXES = (
-    "<local-command",
-    "<command",
-    "<task-notification",
-    "<system-reminder",
-    "Caveat:",
-    "[Request interrupted",
-    # Auto-compaction inserts a synthetic user message that begins with
-    # this preamble. It's machinery, not the user's voice.
-    "This session is being continued from a previous conversation",
+from .providers.common import (
+    canonicalize_path,
 )
-
-# Pure confirmations: recognized so they don't get picked as the "latest
-# substantive user message" for the list-view topic-drift suffix.
-_CONFIRMATION_WORDS = frozenset({
-    "yes", "yep", "yeah", "ok", "okay", "k", "sure",
-    "go ahead", "go ahead please", "yes please",
-    "yes go ahead", "yes go ahead please",
-    "please go ahead", "please do", "please",
-    "sounds good", "looks good", "great", "perfect",
-    "nice", "thanks", "thank you", "done", "cool",
-    "yes thanks", "ok thanks", "yep thanks",
-    "all good", "got it", "noted",
-})
-
-_CODEX_HISTORY_CACHE: dict[str, object] = {
-    "mtime": None,
-    "entries": {},
-}
-
-
-def _extract_text(content) -> str:
-    """Pull plain text from a message's content field, regardless of shape.
-
-    Claude Code emits content as either a string or a list of typed parts
-    ({"type": "text", "text": "..."}). Returns "" if no text is present.
-    """
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for c in content:
-            if isinstance(c, dict) and c.get("text"):
-                # Tool-use entries lack a top-level text key, so this naturally
-                # skips them. Only "text" parts contribute to the corpus.
-                if c.get("type") in (None, "text"):
-                    parts.append(c["text"])
-        return " ".join(parts)
-    return ""
-
-
-def _flatten_text(text: str) -> str:
-    return text.replace("\n", " ").strip()
-
-
-def _is_noise_text(cleaned: str) -> bool:
-    return any(cleaned.startswith(p) for p in _NOISE_PREFIXES)
-
-
-def _is_substantive_text(cleaned: str) -> bool:
-    stripped = cleaned.lower().strip(".,!?;: ")
-    return (
-        stripped not in _CONFIRMATION_WORDS
-        and len(cleaned) >= 25
-        and not _is_noise_text(cleaned)
-    )
-
-
-def _split_boilerplate(text: str) -> tuple[str, list[str]]:
-    keep_lines: list[str] = []
-    boilerplate: list[str] = []
-    for line in text.split("\n"):
-        if _is_boilerplate_line(line):
-            boilerplate.append(line.strip())
-        else:
-            keep_lines.append(line)
-    return ("\n".join(keep_lines).strip(), boilerplate)
+from .providers.common import (
+    epoch_ms_to_iso as _epoch_ms_to_iso,
+)
+from .providers.common import (
+    epoch_s_to_iso as _epoch_s_to_iso,
+)
+from .providers.common import (
+    extract_text as _extract_text,
+)
+from .providers.common import (
+    flatten_text as _flatten_text,
+)
+from .providers.common import (
+    is_noise_text as _is_noise_text,
+)
+from .providers.common import (
+    is_substantive_text as _is_substantive_text,
+)
+from .providers.common import (
+    split_boilerplate as _split_boilerplate,
+)
 
 
 def get_session_info(jsonl_path: str) -> dict | None:
@@ -305,28 +238,6 @@ def list_session_files() -> list[str]:
     """All Claude session files on disk, excluding subagent-spawned ones."""
     pattern = os.path.join(SESSIONS_DIR, "*", "*.jsonl")
     return [f for f in glob.glob(pattern) if "/subagents/" not in f]
-
-
-def _epoch_ms_to_iso(value: int | None) -> str | None:
-    if value is None:
-        return None
-    try:
-        return datetime.fromtimestamp(
-            value / 1000.0, tz=timezone.utc
-        ).isoformat().replace("+00:00", "Z")
-    except Exception:
-        return None
-
-
-def _epoch_s_to_iso(value: int | None) -> str | None:
-    if value is None:
-        return None
-    try:
-        return datetime.fromtimestamp(
-            float(value), tz=timezone.utc
-        ).isoformat().replace("+00:00", "Z")
-    except Exception:
-        return None
 
 
 def _load_codex_history() -> dict[str, list[dict[str, object]]]:
@@ -759,63 +670,6 @@ def format_date(ts: str | None) -> str:
             return dt.strftime("%b %Y")
     except Exception:
         return ts[:10]
-
-
-def canonicalize_path(path: str | None) -> str | None:
-    """Normalize a cwd across machines so the same project looks the same
-    whether the session was recorded on Mac (/Users/<name>) or Linux
-    (/home/<name>).
-
-    Rules (applied in order):
-      1. If path starts with /Users/<CURRENT_USER> or /home/<CURRENT_USER>,
-         replace that prefix with the current $HOME.
-      2. If path matches /Users/<any> or /home/<any> case-insensitively for
-         the current user, same replacement.
-      3. Otherwise return unchanged.
-
-    This is the cross-machine sync feature: a Mac-recorded session cwd
-    /Users/Shamanth/foo and a Linux-recorded /home/shamanth/foo both
-    canonicalize to $HOME/foo, so claude-browse treats them as the same
-    project.
-
-    Honors $CLAUDE_BROWSE_PATH_ALIASES for custom mappings, formatted as:
-        src1=dst1:src2=dst2
-    Each alias rewrites any path starting with src1 to start with dst1.
-    """
-    if not path:
-        return path
-
-    home = os.path.expanduser("~")
-    user = os.environ.get("USER") or getpass.getuser()
-
-    # 1/2. Normalize Mac vs Linux home layouts to current $HOME
-    for prefix in (f"/Users/{user}", f"/home/{user}"):
-        if path == prefix:
-            return home
-        if path.startswith(prefix + "/"):
-            return home + path[len(prefix):]
-    # Case-insensitive match for Mac users (HFS+ often case-insensitive)
-    lower = path.lower()
-    for prefix in (f"/users/{user.lower()}", f"/home/{user.lower()}"):
-        if lower == prefix:
-            return home
-        if lower.startswith(prefix + "/"):
-            return home + path[len(prefix):]
-
-    # 3. Custom aliases from env
-    aliases = os.environ.get("CLAUDE_BROWSE_PATH_ALIASES", "")
-    if aliases:
-        for pair in aliases.split(":"):
-            if "=" not in pair:
-                continue
-            src, dst = pair.split("=", 1)
-            src, dst = src.strip(), dst.strip()
-            if path == src:
-                return dst
-            if path.startswith(src + "/"):
-                return dst + path[len(src):]
-
-    return path
 
 
 def folder_name(cwd: str | None, known_prefixes: Iterable[str] = ()) -> str:
