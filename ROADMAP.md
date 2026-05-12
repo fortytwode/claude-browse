@@ -109,6 +109,27 @@ Why it matters:
 
 ---
 
+## Execution cadence
+
+This project should move phase-by-phase, not as one long uninterrupted build.
+
+Rules:
+- Ship one coherent phase at a time.
+- Push after each phase so the product can be tested in the real terminal flow.
+- Do not start the next high-risk phase until the current one has been manually tested.
+- Prefer small reversible slices over large architectural jumps.
+
+Current manual test gate:
+- Test the restart card quality in the picker preview.
+- Test cross-provider handoff quality using the imported restart brief.
+- Test `Ctrl-Y` for suggested next prompt output.
+- Test `Ctrl-B` for restart-card export output.
+
+Next gated build after testing:
+- `Task View`, which groups related multi-agent sessions into one work item.
+
+---
+
 ## Product principles
 
 - Optimize for restart quality before provider count.
