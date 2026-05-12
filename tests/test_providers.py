@@ -7,16 +7,26 @@ from pathlib import Path
 
 import pytest
 
-from claude_browse.providers import codex as codex_provider
-from claude_browse.providers import gemini as gemini_provider
-from claude_browse.providers import get_provider, provider_ids
+from claude_browse.providers import (
+    codex as codex_provider,
+)
+from claude_browse.providers import (
+    copilot as copilot_provider,
+)
+from claude_browse.providers import (
+    gemini as gemini_provider,
+)
+from claude_browse.providers import (
+    get_provider,
+    provider_ids,
+)
 from claude_browse.providers.base import ProviderSpec
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def test_provider_ids_include_claude_codex_gemini_and_cursor():
-    assert provider_ids() == ("claude", "codex", "gemini", "cursor")
+def test_provider_ids_include_claude_codex_gemini_copilot_and_cursor():
+    assert provider_ids() == ("claude", "codex", "gemini", "copilot", "cursor")
 
 
 def test_provider_ids_filter_external_target_only_provider(monkeypatch, tmp_path):
@@ -42,12 +52,25 @@ PROVIDER = ProviderSpec(
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setenv("CLAUDE_BROWSE_PROVIDER_MODULES", "mystery_provider")
 
-    assert provider_ids() == ("claude", "codex", "gemini", "cursor", "mystery")
-    assert provider_ids(source_capable=True) == ("claude", "codex", "gemini")
+    assert provider_ids() == (
+        "claude",
+        "codex",
+        "gemini",
+        "copilot",
+        "cursor",
+        "mystery",
+    )
+    assert provider_ids(source_capable=True) == (
+        "claude",
+        "codex",
+        "gemini",
+        "copilot",
+    )
     assert provider_ids(target_capable=True) == (
         "claude",
         "codex",
         "gemini",
+        "copilot",
         "cursor",
         "mystery",
     )
@@ -74,7 +97,7 @@ PROVIDER = ProviderSpec(
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setenv("CLAUDE_BROWSE_PROVIDER_MODULES", "duplicate_provider")
 
-    assert provider_ids() == ("claude", "codex", "gemini", "cursor")
+    assert provider_ids() == ("claude", "codex", "gemini", "copilot", "cursor")
     assert get_provider("claude").binary == "claude"
     assert "duplicates an existing provider" in capsys.readouterr().err
 
@@ -167,10 +190,32 @@ def test_cursor_handoff_cmd_matches_current_shape():
     ]
 
 
+def test_copilot_native_resume_cmd_matches_current_shape():
+    spec = get_provider("copilot")
+    assert spec.native_resume_cmd("abc-123", True) == [
+        "copilot",
+        "--resume",
+        "abc-123",
+        "--yolo",
+    ]
+
+
+def test_copilot_handoff_cmd_matches_current_shape():
+    spec = get_provider("copilot")
+    assert spec.handoff_cmd("/tmp", "continue", True) == [
+        "copilot",
+        "--yolo",
+        "--add-dir",
+        "/tmp",
+        "continue",
+    ]
+
+
 def test_provider_capabilities_match_current_products():
     claude = get_provider("claude")
     codex = get_provider("codex")
     gemini = get_provider("gemini")
+    copilot = get_provider("copilot")
     cursor = get_provider("cursor")
 
     assert claude.can_native_resume is True
@@ -179,6 +224,9 @@ def test_provider_capabilities_match_current_products():
     assert codex.assistant_turns_available is False
     assert gemini.can_native_resume is True
     assert gemini.assistant_turns_available is True
+    assert copilot.source_capable is True
+    assert copilot.target_capable is True
+    assert copilot.assistant_turns_available is True
     assert cursor.source_capable is False
     assert cursor.target_capable is True
     assert cursor.handoff_via_file is False
@@ -322,3 +370,52 @@ def test_gemini_provider_lists_index_records(monkeypatch, tmp_path):
     assert records[0]["session_id"] == "gemini-1234-uuid"
     assert records[0]["cwd"] == "/home/alice/team-operations"
     assert "pricing page" in records[0]["last_msg"]
+
+
+def test_copilot_provider_lists_index_records(monkeypatch, tmp_path):
+    monkeypatch.setenv("USER", "alice")
+    monkeypatch.setenv("HOME", "/home/alice")
+
+    session_dir = tmp_path / "session-state" / "copilot-session-1234"
+    session_dir.mkdir(parents=True)
+
+    (session_dir / "workspace.yaml").write_text(
+        "\n".join([
+            "name: Pricing rewrite",
+            "context:",
+            "  cwd: /Users/alice/team-operations",
+        ]) + "\n"
+    )
+    (session_dir / "events.jsonl").write_text(
+        "\n".join([
+            (
+                '{"id":"1","timestamp":"2026-05-12T09:00:00Z","parentId":null,'
+                '"type":"session.context_changed","data":{"cwd":"/Users/alice/team-operations"}}'
+            ),
+            (
+                '{"id":"2","timestamp":"2026-05-12T09:01:00Z","parentId":"1",'
+                '"type":"user.message","data":{"content":"Please review the pricing page copy"}}'
+            ),
+            (
+                '{"id":"3","timestamp":"2026-05-12T09:02:00Z","parentId":"2",'
+                '"type":"assistant.message","data":{"messageId":"m1","content":"I found three issues in the hero section."}}'
+            ),
+            (
+                '{"id":"4","timestamp":"2026-05-12T09:03:00Z","parentId":"3",'
+                '"type":"user.message","data":{"content":"Now switch to the FAQ section"}}'
+            ),
+        ]) + "\n"
+    )
+
+    monkeypatch.setattr(copilot_provider, "SESSION_STATE_DIR", str(tmp_path / "session-state"))
+
+    spec = get_provider("copilot")
+    records = spec.list_index_records()
+
+    assert len(records) == 1
+    assert records[0]["provider"] == "copilot"
+    assert records[0]["session_id"] == "copilot-session-1234"
+    assert records[0]["name"] == "Pricing rewrite"
+    assert records[0]["cwd"] == "/home/alice/team-operations"
+    assert "faq section" in records[0]["last_msg"].lower()
+    assert "hero section" in records[0]["fields"]["asst_text"]

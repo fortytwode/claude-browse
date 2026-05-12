@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from .providers import claude as claude_provider
 from .providers import codex as codex_provider
 from .providers import common as provider_common
+from .providers import copilot as copilot_provider
 from .providers import gemini as gemini_provider
 from .providers import get_provider, provider_ids
 
@@ -22,6 +23,7 @@ CODEX_STATE_DB = codex_provider.CODEX_STATE_DB
 CODEX_HISTORY_PATH = codex_provider.CODEX_HISTORY_PATH
 _CODEX_HISTORY_CACHE = codex_provider._CODEX_HISTORY_CACHE
 GEMINI_TMP_DIR = gemini_provider.GEMINI_TMP_DIR
+COPILOT_HOME = copilot_provider.COPILOT_HOME
 canonicalize_path = provider_common.canonicalize_path
 
 
@@ -70,7 +72,7 @@ def _list_codex_index_records() -> list[dict]:
 
 
 def list_index_records() -> list[dict]:
-    """Return every Claude, CodeX, and Gemini session in one normalized record shape."""
+    """Return every source-capable provider session in one normalized record shape."""
     records: list[dict] = []
     for provider in provider_ids(source_capable=True):
         records.extend(get_provider(provider).list_index_records())

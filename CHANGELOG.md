@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Cursor is now a built-in **target-only** provider. `cursor-browse` opens any
   indexed thread in Cursor, but the product does not yet claim to index
   Cursor-origin CLI sessions.
+- Copilot is now a built-in source+target provider. `copilot-browse` opens
+  everything in Copilot by default and indexes local session state from
+  `~/.copilot/session-state/`.
 
 ### Removed
 - `claude-resume` is no longer a supported command surface. The paired browser
@@ -37,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Cross-provider handoff no longer assumes every target can read a temp file
   via an add-dir flag. Providers like Cursor can now receive the import brief
   inline in the launch prompt instead.
+- The browser empty-state copy now derives its source-provider list dynamically
+  instead of hard-coding Claude, CodeX, and Gemini.
 - Search now ranks by relevance, not just recency. Previous behavior was
   "filter by FTS5 token match, then sort by last activity," which meant
   any session that mentioned a term once (a Toggl rollup, a passing

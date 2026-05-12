@@ -40,6 +40,7 @@ jobs:
           claude-browse --help
           codex-browse --help
           gemini-browse --help
+          copilot-browse --help
           cursor-browse --help
 
   shim-smoke:
@@ -58,6 +59,7 @@ jobs:
           ./claude-browse --help
           ./codex-browse --help
           ./gemini-browse --help
+          ./copilot-browse --help
           ./cursor-browse --help
 
       - name: install.sh dry-run check

@@ -323,6 +323,16 @@ def _print_usage(argv0: str, target_provider: str) -> None:
     )
 
 
+def _join_with_or(values: list[str]) -> str:
+    if not values:
+        return ""
+    if len(values) == 1:
+        return values[0]
+    if len(values) == 2:
+        return f"{values[0]} or {values[1]}"
+    return f"{', '.join(values[:-1])}, or {values[-1]}"
+
+
 def _require_binary(provider: str) -> None:
     binary = get_provider(provider).binary
     if shutil.which(binary):
@@ -471,6 +481,18 @@ def _providers_with_local_state() -> list[str]:
     ]
 
 
+def _source_provider_descriptions() -> tuple[str, str]:
+    provider_names = [
+        get_provider(provider).display_name
+        for provider in provider_ids(source_capable=True)
+    ]
+    provider_binaries = [
+        f"`{get_provider(provider).binary}`"
+        for provider in provider_ids(source_capable=True)
+    ]
+    return _join_with_or(provider_names), _join_with_or(provider_binaries)
+
+
 def main() -> None:
     target_provider, args = _parse_target_provider(sys.argv[1:], sys.argv[0])
 
@@ -501,8 +523,11 @@ def main() -> None:
 
     available_providers = _providers_with_local_state()
     if not available_providers:
-        print("No local Claude Code, CodeX, or Gemini sessions found.")
-        print("Run `claude`, `codex`, or `gemini` at least once to create session history.")
+        provider_names, provider_binaries = _source_provider_descriptions()
+        print(f"No local {provider_names} sessions found.")
+        print(
+            f"Run {provider_binaries} at least once to create session history."
+        )
         sys.exit(1)
 
     conn = fts.open_db()

@@ -73,6 +73,7 @@ def test_default_target_provider_follows_entrypoint_name():
     assert browse._default_target_provider("claude-browse") == "claude"
     assert browse._default_target_provider("/tmp/codex-browse") == "codex"
     assert browse._default_target_provider("/tmp/gemini-browse") == "gemini"
+    assert browse._default_target_provider("/tmp/copilot-browse") == "copilot"
     assert browse._default_target_provider("/tmp/cursor-browse") == "cursor"
 
 
@@ -139,6 +140,38 @@ def test_providers_with_local_state_use_source_capability_filter(monkeypatch):
 
     assert browse._providers_with_local_state() == ["claude"]
     assert calls[0] == (True, None)
+
+
+def test_main_empty_state_message_is_dynamic(monkeypatch, capsys):
+    specs = {
+        "claude": type(
+            "Spec",
+            (),
+            {"has_local_state": lambda self: False, "display_name": "Claude", "binary": "claude"},
+        )(),
+        "copilot": type(
+            "Spec",
+            (),
+            {"has_local_state": lambda self: False, "display_name": "Copilot", "binary": "copilot"},
+        )(),
+    }
+
+    monkeypatch.setattr(browse, "_check_fzf", lambda: None)
+    monkeypatch.setattr(
+        browse,
+        "provider_ids",
+        lambda **kwargs: ("claude", "copilot"),
+    )
+    monkeypatch.setattr(browse, "get_provider", lambda provider: specs[provider])
+    monkeypatch.setattr(browse.sys, "argv", ["claude-browse"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        browse.main()
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 1
+    assert "No local Claude or Copilot sessions found." in captured.out
+    assert "Run `claude` or `copilot` at least once" in captured.out
 
 
 def test_parse_fzf_output_handles_print_query_safe_marker():
