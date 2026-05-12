@@ -73,6 +73,7 @@ def test_default_target_provider_follows_entrypoint_name():
     assert browse._default_target_provider("claude-browse") == "claude"
     assert browse._default_target_provider("/tmp/codex-browse") == "codex"
     assert browse._default_target_provider("/tmp/gemini-browse") == "gemini"
+    assert browse._default_target_provider("/tmp/cursor-browse") == "cursor"
 
 
 def test_default_target_provider_supports_dynamic_plugin_shims(monkeypatch):
@@ -321,6 +322,52 @@ def test_continue_in_provider_from_gemini_execs_claude_with_add_dir(
             "opening prompt, then continue the work in this directory."
         ),
     ]
+
+
+def test_continue_in_provider_from_claude_execs_cursor_with_inline_context(
+    monkeypatch,
+):
+    session = _info(path="/tmp/session.jsonl")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        browse,
+        "build_import_markdown",
+        lambda _session, _target_provider, _selection_query="": (
+            "# Imported Session Context\n\n## Reopen Intent\n\n- pokpok\n"
+        ),
+    )
+    monkeypatch.setattr(
+        browse,
+        "write_import_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("should not write temp file")
+        ),
+    )
+    monkeypatch.setattr(browse.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def fake_execvp(binary: str, cmd: list[str]) -> None:
+        captured["binary"] = binary
+        captured["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(browse.os, "execvp", fake_execvp)
+
+    with pytest.raises(SystemExit):
+        browse._continue_in_provider(
+            session,
+            "claude",
+            "cursor",
+            "/home/alice/proj",
+            (),
+            True,
+            "pokpok",
+        )
+
+    assert captured["binary"] == "cursor-agent"
+    assert captured["cmd"][0:2] == ["cursor-agent", "--force"]
+    assert "# Imported Session Context" in captured["cmd"][2]
+    assert "Continue the imported Claude session context below." in captured["cmd"][2]
 
 
 def test_continue_in_provider_errors_when_target_binary_missing(monkeypatch):

@@ -14,9 +14,11 @@ def test_readme_documents_target_app_browsers():
     text = _readme_text()
     assert "codex-browse" in text
     assert "gemini-browse" in text
+    assert "cursor-browse" in text
     assert "opens everything in Claude" in text
     assert "opens everything in CodeX" in text
     assert "opens everything in Gemini" in text
+    assert "opens everything in Cursor" in text
     assert "Cross-provider open is not a true native resume." in text
 
 

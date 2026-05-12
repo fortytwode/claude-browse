@@ -34,8 +34,9 @@ class ProviderSpec:
     auth_status_reader: Callable[[], str | None] | None = None
     native_yolo_flag: str | None = None
     handoff_yolo_flag: str | None = None
-    add_dir_flag: str = "--add-dir"
+    add_dir_flag: str | None = "--add-dir"
     handoff_prompt_flag: str | None = None
+    handoff_via_file: bool = True
     can_native_resume: bool = True
     assistant_turns_available: bool = True
     source_capable: bool = True
@@ -50,11 +51,17 @@ class ProviderSpec:
             cmd.append(self.native_yolo_flag)
         return cmd
 
-    def handoff_cmd(self, import_dir: str, prompt: str, yolo: bool) -> list[str]:
+    def handoff_cmd(
+        self,
+        import_dir: str | None,
+        prompt: str,
+        yolo: bool,
+    ) -> list[str]:
         cmd = [self.binary]
         if yolo and self.handoff_yolo_flag:
             cmd.append(self.handoff_yolo_flag)
-        cmd.extend([self.add_dir_flag, import_dir])
+        if self.add_dir_flag and import_dir:
+            cmd.extend([self.add_dir_flag, import_dir])
         if self.handoff_prompt_flag:
             cmd.extend([self.handoff_prompt_flag, prompt])
         else:

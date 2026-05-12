@@ -15,8 +15,8 @@ from claude_browse.providers.base import ProviderSpec
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def test_provider_ids_include_claude_codex_and_gemini():
-    assert provider_ids() == ("claude", "codex", "gemini")
+def test_provider_ids_include_claude_codex_gemini_and_cursor():
+    assert provider_ids() == ("claude", "codex", "gemini", "cursor")
 
 
 def test_provider_ids_filter_external_target_only_provider(monkeypatch, tmp_path):
@@ -42,12 +42,13 @@ PROVIDER = ProviderSpec(
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setenv("CLAUDE_BROWSE_PROVIDER_MODULES", "mystery_provider")
 
-    assert provider_ids() == ("claude", "codex", "gemini", "mystery")
+    assert provider_ids() == ("claude", "codex", "gemini", "cursor", "mystery")
     assert provider_ids(source_capable=True) == ("claude", "codex", "gemini")
     assert provider_ids(target_capable=True) == (
         "claude",
         "codex",
         "gemini",
+        "cursor",
         "mystery",
     )
     assert get_provider("mystery").experimental is True
@@ -73,7 +74,7 @@ PROVIDER = ProviderSpec(
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setenv("CLAUDE_BROWSE_PROVIDER_MODULES", "duplicate_provider")
 
-    assert provider_ids() == ("claude", "codex", "gemini")
+    assert provider_ids() == ("claude", "codex", "gemini", "cursor")
     assert get_provider("claude").binary == "claude"
     assert "duplicates an existing provider" in capsys.readouterr().err
 
@@ -147,10 +148,30 @@ def test_gemini_handoff_cmd_matches_current_shape():
     ]
 
 
+def test_cursor_native_resume_cmd_matches_current_shape():
+    spec = get_provider("cursor")
+    assert spec.native_resume_cmd("abc-123", True) == [
+        "cursor-agent",
+        "--resume",
+        "abc-123",
+        "--force",
+    ]
+
+
+def test_cursor_handoff_cmd_matches_current_shape():
+    spec = get_provider("cursor")
+    assert spec.handoff_cmd(None, "continue", True) == [
+        "cursor-agent",
+        "--force",
+        "continue",
+    ]
+
+
 def test_provider_capabilities_match_current_products():
     claude = get_provider("claude")
     codex = get_provider("codex")
     gemini = get_provider("gemini")
+    cursor = get_provider("cursor")
 
     assert claude.can_native_resume is True
     assert claude.assistant_turns_available is True
@@ -158,6 +179,9 @@ def test_provider_capabilities_match_current_products():
     assert codex.assistant_turns_available is False
     assert gemini.can_native_resume is True
     assert gemini.assistant_turns_available is True
+    assert cursor.source_capable is False
+    assert cursor.target_capable is True
+    assert cursor.handoff_via_file is False
 
 
 def test_provider_spec_availability_and_auth_helpers():

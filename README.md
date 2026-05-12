@@ -1,9 +1,9 @@
 # claude-browse
 
-**Find and reopen past Claude Code, CodeX, and Gemini sessions from the terminal.**
+**Find and reopen past Claude Code, CodeX, and Gemini sessions from the terminal, and hand them off into Cursor when you want to switch tools.**
 Interactive fzf browser with a preview pane, full-text search across folders
 and first messages, provider-aware native resume, plus target-app browsers
-that open everything in Claude, CodeX, or Gemini by default.
+that open everything in Claude, CodeX, Gemini, or Cursor by default.
 
 <!-- Replace with a real asciinema/terminalizer GIF before launch -->
 <p align="center">
@@ -23,7 +23,8 @@ Sessions >
 
 No network. No accounts. No API calls. It reads local session history from
 `~/.claude/projects/`, `~/.codex/`, and `~/.gemini/tmp/`, then gives you a
-fast way to find and reopen conversations. That's it.
+fast way to find and reopen conversations. Cursor is currently a launch target,
+not a local session source.
 
 ---
 
@@ -45,7 +46,7 @@ cd claude-browse
 
 ### External dependency — fzf
 
-`claude-browse`, `codex-browse`, and `gemini-browse` use
+`claude-browse`, `codex-browse`, `gemini-browse`, and `cursor-browse` use
 [fzf](https://github.com/junegunn/fzf) for the interactive UI. Install it once
 via your system package manager:
 
@@ -60,8 +61,8 @@ sudo apk add fzf        # Alpine
 ### Requirements
 
 - Python 3.9+
-- fzf (for `claude-browse`, `codex-browse`, and `gemini-browse`)
-- Claude Code, CodeX, and/or Gemini (otherwise there are no sessions to browse)
+- fzf (for `claude-browse`, `codex-browse`, `gemini-browse`, and `cursor-browse`)
+- Claude Code, CodeX, Gemini, and/or Cursor Agent CLI
 - Optional experimental providers can be loaded from local Python modules
 
 ---
@@ -74,6 +75,7 @@ sudo apk add fzf        # Alpine
 claude-browse               # most recent 100 sessions, opens everything in Claude
 codex-browse                # most recent 100 sessions, opens everything in CodeX
 gemini-browse               # most recent 100 sessions, opens everything in Gemini
+cursor-browse               # most recent 100 sessions, opens everything in Cursor
 claude-browse --all         # every session you've ever run
 codex-browse --here         # only sessions started in the current directory
 claude-browse --no-canonicalize   # accepted for compatibility; canonicalization still happens at index time
@@ -86,7 +88,7 @@ While the TUI is up:
 | Type             | Full-text search across Claude + CodeX + Gemini threads          |
 | ↑ ↓              | Move between sessions                                            |
 | Shift-↑ Shift-↓  | Scroll the preview pane                                          |
-| Enter            | Open in the app you launched (`claude-browse`, `codex-browse`, or `gemini-browse`) in yolo mode |
+| Enter            | Open in the app you launched (`claude-browse`, `codex-browse`, `gemini-browse`, or `cursor-browse`) in yolo mode |
 | Ctrl-S           | Open in that same app in safe mode                               |
 | Esc              | Quit                                                             |
 
@@ -95,7 +97,9 @@ Examples:
 - In `claude-browse`, a Claude thread resumes natively in Claude and CodeX or Gemini threads start fresh Claude sessions with imported context.
 - In `codex-browse`, a CodeX thread resumes natively in CodeX and Claude or Gemini threads start fresh CodeX sessions with imported context.
 - In `gemini-browse`, a Gemini thread resumes natively in Gemini and Claude or CodeX threads start fresh Gemini sessions with imported context.
+- In `cursor-browse`, Claude, CodeX, and Gemini threads start fresh Cursor sessions with imported context.
 - Cross-provider open is not a true native resume. It creates a new session seeded from the old thread.
+- Cursor is currently a **target-only** built-in provider. It opens everything in Cursor, but this tool does not yet claim to index Cursor-origin CLI sessions.
 
 ---
 
@@ -103,7 +107,7 @@ Examples:
 
 Claude Code already has `claude --resume`, CodeX has `codex resume`, and
 Gemini has `gemini --resume`, but all three are provider-local pickers.
-`claude-browse`, `codex-browse`, and `gemini-browse` are better at three things:
+`claude-browse`, `codex-browse`, `gemini-browse`, and `cursor-browse` are better at three things:
 
 - **Fuzzy search across all your sessions, not just the last few.** Type any
   word from any past conversation, any folder name, any relative date —
@@ -112,7 +116,8 @@ Gemini has `gemini --resume`, but all three are provider-local pickers.
   messages first) so you pick the right thread, not a stale one.
 - **Choose the target app up front.** Launch `claude-browse` if you want to
   work in Claude, `codex-browse` if you want to work in CodeX, or
-  `gemini-browse` if you want to work in Gemini. When the source app differs,
+  `gemini-browse` if you want to work in Gemini, or `cursor-browse` if you
+  want to work in Cursor. When the source app differs,
   the browser writes a compact import brief and starts a fresh session in the
   target app instead of pretending cross-vendor native resume exists.
 

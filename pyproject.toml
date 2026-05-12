@@ -50,6 +50,7 @@ Roadmap = "https://github.com/fortytwode/claude-browse/blob/main/ROADMAP.md"
 claude-browse = "claude_browse.browse:main"
 codex-browse = "claude_browse.browse:main"
 gemini-browse = "claude_browse.browse:main"
+cursor-browse = "claude_browse.browse:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["claude_browse"]

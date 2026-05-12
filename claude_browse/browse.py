@@ -16,6 +16,7 @@ import tempfile
 
 from . import fts
 from .core import (
+    build_import_markdown,
     display_cwd,
     folder_name,
     format_date,
@@ -360,21 +361,37 @@ def _continue_in_provider(
 
     _require_binary(target_provider)
 
-    try:
-        import_path = write_import_file(session, target_provider, selection_query)
-    except OSError as exc:
-        print(f"Could not write import brief: {exc}", file=sys.stderr)
-        sys.exit(1)
+    if target_spec.handoff_via_file:
+        try:
+            import_path = write_import_file(session, target_provider, selection_query)
+        except OSError as exc:
+            print(f"Could not write import brief: {exc}", file=sys.stderr)
+            sys.exit(1)
 
-    import_dir = os.path.dirname(import_path) or cwd
-    prompt = (
-        f"Continue the imported {provider_display_name(source_provider)} session "
-        f"context from {import_path}. Treat it as prior conversation state, "
-        "read that file first, use the Reopen Intent section as the reason "
-        "this thread was selected, prioritize the end-of-thread state and "
-        "most recent turns over the original opening prompt, then continue "
-        "the work in this directory."
-    )
+        import_dir = os.path.dirname(import_path) or cwd
+        prompt = (
+            f"Continue the imported {provider_display_name(source_provider)} session "
+            f"context from {import_path}. Treat it as prior conversation state, "
+            "read that file first, use the Reopen Intent section as the reason "
+            "this thread was selected, prioritize the end-of-thread state and "
+            "most recent turns over the original opening prompt, then continue "
+            "the work in this directory."
+        )
+    else:
+        import_dir = None
+        import_markdown = build_import_markdown(
+            session,
+            target_provider,
+            selection_query,
+        )
+        prompt = (
+            f"Continue the imported {provider_display_name(source_provider)} session "
+            "context below. Treat it as prior conversation state, use the "
+            "Reopen Intent section as the reason this thread was selected, "
+            "prioritize the end-of-thread state and most recent turns over "
+            "the original opening prompt, then continue the work in this "
+            f"directory.\n\n{import_markdown}"
+        )
     cmd = target_spec.handoff_cmd(import_dir, prompt, yolo)
     mode = " (yolo)" if yolo else ""
     print(f"Continuing{mode} in {target_name} from {folder_name(cwd, prefixes)}...")

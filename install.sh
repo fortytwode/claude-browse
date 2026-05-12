@@ -14,7 +14,7 @@ BIN_DIR="$HOME/.local/bin"
 
 mkdir -p "$BIN_DIR"
 
-for tool in claude-browse codex-browse gemini-browse; do
+for tool in claude-browse codex-browse gemini-browse cursor-browse; do
     chmod +x "$SCRIPT_DIR/$tool"
     ln -sf "$SCRIPT_DIR/$tool" "$BIN_DIR/$tool"
     echo "  Installed $tool -> $BIN_DIR/$tool"
@@ -85,3 +85,4 @@ echo "Done. Available commands:"
 echo "  claude-browse    Interactive browser that opens everything in Claude by default"
 echo "  codex-browse     Interactive browser that opens everything in CodeX by default"
 echo "  gemini-browse    Interactive browser that opens everything in Gemini by default"
+echo "  cursor-browse    Interactive browser that opens everything in Cursor by default"

@@ -15,12 +15,14 @@ from functools import cache
 from .base import ProviderSpec
 from .claude import PROVIDER as CLAUDE_PROVIDER
 from .codex import PROVIDER as CODEX_PROVIDER
+from .cursor import PROVIDER as CURSOR_PROVIDER
 from .gemini import PROVIDER as GEMINI_PROVIDER
 
 _BUILTIN_PROVIDERS: dict[str, ProviderSpec] = {
     "claude": CLAUDE_PROVIDER,
     "codex": CODEX_PROVIDER,
     "gemini": GEMINI_PROVIDER,
+    "cursor": CURSOR_PROVIDER,
 }
 
 

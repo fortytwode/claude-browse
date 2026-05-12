@@ -12,15 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   load **experimental** external provider modules from
   `CLAUDE_BROWSE_PROVIDER_MODULES`. This is the first public-ish extension seam
   for providers, but it is intentionally not a stable marketplace API yet.
+- Gemini is now a built-in provider. `gemini-browse` opens everything in
+  Gemini by default, `--target gemini` routes the shared browser entrypoint
+  there, and the adapter registry now indexes Gemini sessions from
+  `~/.gemini/tmp/` alongside Claude and CodeX.
+- Cursor is now a built-in **target-only** provider. `cursor-browse` opens any
+  indexed thread in Cursor, but the product does not yet claim to index
+  Cursor-origin CLI sessions.
 
 ### Removed
 - `claude-resume` is no longer a supported command surface. The paired browser
   entrypoints (`claude-browse` and `codex-browse`) are now the only reopen
   flows the product documents, installs, and tests.
-- Gemini is now a built-in provider. `gemini-browse` opens everything in
-  Gemini by default, `--target gemini` routes the shared browser entrypoint
-  there, and the adapter registry now indexes Gemini sessions from
-  `~/.gemini/tmp/` alongside Claude and CodeX.
 
 ### Changed
 - The browser UX now scales by target app, not by a two-provider toggle.
@@ -31,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Target-provider defaults now generalize to any target-capable provider whose
   shim name ends in `-browse`. Source-provider indexing remains capability-
   filtered so target-only providers do not get queried for local session data.
+- Cross-provider handoff no longer assumes every target can read a temp file
+  via an add-dir flag. Providers like Cursor can now receive the import brief
+  inline in the launch prompt instead.
 - Search now ranks by relevance, not just recency. Previous behavior was
   "filter by FTS5 token match, then sort by last activity," which meant
   any session that mentioned a term once (a Toggl rollup, a passing
