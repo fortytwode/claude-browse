@@ -62,6 +62,7 @@ sudo apk add fzf        # Alpine
 - Python 3.9+
 - fzf (for `claude-browse`, `codex-browse`, and `gemini-browse`)
 - Claude Code, CodeX, and/or Gemini (otherwise there are no sessions to browse)
+- Optional experimental providers can be loaded from local Python modules
 
 ---
 
@@ -148,6 +149,39 @@ column:
 ```bash
 export CLAUDE_BROWSE_FOLDER_PREFIXES="monorepo/apps/:monorepo/lib/"
 ```
+
+### Experimental external providers
+
+Built-in providers are still the supported path, but the registry can now load
+additional providers from local Python modules via:
+
+```bash
+export CLAUDE_BROWSE_PROVIDER_MODULES="my_pkg.my_provider"
+```
+
+Each module must expose:
+
+```python
+from claude_browse.providers.base import ProviderSpec
+
+PROVIDER = ProviderSpec(...)
+```
+
+The contract is intentionally **experimental**:
+
+- It may change between releases
+- There is no compatibility promise or marketplace yet
+- External providers can be source-capable (index local sessions), target-capable
+  (launch target only), or both
+
+For target-capable external providers, you can use either:
+
+```bash
+claude-browse --target my-provider
+```
+
+or a thin shim/symlink named `my-provider-browse` that points at
+`claude-browse`.
 
 ---
 

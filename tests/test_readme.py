@@ -28,3 +28,9 @@ def test_readme_no_longer_documents_removed_browser_shortcuts():
 def test_readme_no_longer_documents_claude_resume():
     text = _readme_text()
     assert "claude-resume" not in text
+
+
+def test_readme_documents_experimental_external_providers():
+    text = _readme_text()
+    assert "CLAUDE_BROWSE_PROVIDER_MODULES" in text
+    assert "experimental" in text.lower()

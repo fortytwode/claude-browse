@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -29,12 +30,19 @@ class ProviderSpec:
     session_info_reader: Callable[[str], dict | None] | None = None
     fielded_corpus_reader: Callable[[str], dict[str, str]] | None = None
     session_files_reader: Callable[[], list[str]] | None = None
+    availability_reader: Callable[[], bool] | None = None
+    auth_status_reader: Callable[[], str | None] | None = None
     native_yolo_flag: str | None = None
     handoff_yolo_flag: str | None = None
     add_dir_flag: str = "--add-dir"
     handoff_prompt_flag: str | None = None
     can_native_resume: bool = True
     assistant_turns_available: bool = True
+    source_capable: bool = True
+    target_capable: bool = True
+    experimental: bool = False
+    install_hint: str | None = None
+    login_hint: str | None = None
 
     def native_resume_cmd(self, session_id: str, yolo: bool) -> list[str]:
         cmd = list(self.native_resume_prefix) + [session_id]
@@ -60,6 +68,16 @@ class ProviderSpec:
         if self.has_local_state_reader is None:
             return False
         return self.has_local_state_reader()
+
+    def is_available(self) -> bool:
+        if self.availability_reader is not None:
+            return self.availability_reader()
+        return shutil.which(self.binary) is not None
+
+    def auth_status(self) -> str | None:
+        if self.auth_status_reader is None:
+            return None
+        return self.auth_status_reader()
 
     def preview_messages(
         self, path: str, session_id: str

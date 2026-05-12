@@ -7,12 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- The provider registry now understands source-vs-target capability and can
+  load **experimental** external provider modules from
+  `CLAUDE_BROWSE_PROVIDER_MODULES`. This is the first public-ish extension seam
+  for providers, but it is intentionally not a stable marketplace API yet.
+
 ### Removed
 - `claude-resume` is no longer a supported command surface. The paired browser
   entrypoints (`claude-browse` and `codex-browse`) are now the only reopen
   flows the product documents, installs, and tests.
-
-### Added
 - Gemini is now a built-in provider. `gemini-browse` opens everything in
   Gemini by default, `--target gemini` routes the shared browser entrypoint
   there, and the adapter registry now indexes Gemini sessions from
@@ -24,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   safe mode, and cross-provider picks become seeded handoffs into that target
   app. The old `Ctrl-X` "open in the other app" shortcut is gone because
   "other" stops being well-defined once Gemini is added.
+- Target-provider defaults now generalize to any target-capable provider whose
+  shim name ends in `-browse`. Source-provider indexing remains capability-
+  filtered so target-only providers do not get queried for local session data.
 - Search now ranks by relevance, not just recency. Previous behavior was
   "filter by FTS5 token match, then sort by last activity," which meant
   any session that mentioned a term once (a Toggl rollup, a passing

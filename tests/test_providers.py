@@ -10,12 +10,72 @@ import pytest
 from claude_browse.providers import codex as codex_provider
 from claude_browse.providers import gemini as gemini_provider
 from claude_browse.providers import get_provider, provider_ids
+from claude_browse.providers.base import ProviderSpec
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def test_provider_ids_include_claude_codex_and_gemini():
     assert provider_ids() == ("claude", "codex", "gemini")
+
+
+def test_provider_ids_filter_external_target_only_provider(monkeypatch, tmp_path):
+    module_path = tmp_path / "mystery_provider.py"
+    module_path.write_text(
+        """
+from claude_browse.providers.base import ProviderSpec
+
+PROVIDER = ProviderSpec(
+    provider_id="mystery",
+    display_name="Mystery",
+    binary="mystery",
+    native_resume_prefix=("mystery", "resume"),
+    list_index_records_reader=lambda: [],
+    preview_messages_reader=lambda path, session_id: [],
+    transcript_turns_reader=lambda path, session_id: [],
+    source_capable=False,
+    target_capable=True,
+    experimental=True,
+)
+"""
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("CLAUDE_BROWSE_PROVIDER_MODULES", "mystery_provider")
+
+    assert provider_ids() == ("claude", "codex", "gemini", "mystery")
+    assert provider_ids(source_capable=True) == ("claude", "codex", "gemini")
+    assert provider_ids(target_capable=True) == (
+        "claude",
+        "codex",
+        "gemini",
+        "mystery",
+    )
+    assert get_provider("mystery").experimental is True
+
+
+def test_duplicate_external_provider_is_skipped(monkeypatch, tmp_path, capsys):
+    module_path = tmp_path / "duplicate_provider.py"
+    module_path.write_text(
+        """
+from claude_browse.providers.base import ProviderSpec
+
+PROVIDER = ProviderSpec(
+    provider_id="claude",
+    display_name="Shadow Claude",
+    binary="shadow-claude",
+    native_resume_prefix=("shadow-claude", "resume"),
+    list_index_records_reader=lambda: [],
+    preview_messages_reader=lambda path, session_id: [],
+    transcript_turns_reader=lambda path, session_id: [],
+)
+"""
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("CLAUDE_BROWSE_PROVIDER_MODULES", "duplicate_provider")
+
+    assert provider_ids() == ("claude", "codex", "gemini")
+    assert get_provider("claude").binary == "claude"
+    assert "duplicates an existing provider" in capsys.readouterr().err
 
 
 def test_get_provider_rejects_unknown_provider():
@@ -98,6 +158,28 @@ def test_provider_capabilities_match_current_products():
     assert codex.assistant_turns_available is False
     assert gemini.can_native_resume is True
     assert gemini.assistant_turns_available is True
+
+
+def test_provider_spec_availability_and_auth_helpers():
+    spec = ProviderSpec(
+        provider_id="demo",
+        display_name="Demo",
+        binary="demo",
+        native_resume_prefix=("demo", "resume"),
+        list_index_records_reader=lambda: [],
+        preview_messages_reader=lambda path, session_id: [],
+        transcript_turns_reader=lambda path, session_id: [],
+        availability_reader=lambda: True,
+        auth_status_reader=lambda: "signed-in",
+        source_capable=False,
+        target_capable=True,
+        experimental=True,
+    )
+
+    assert spec.is_available() is True
+    assert spec.auth_status() == "signed-in"
+    assert spec.source_capable is False
+    assert spec.target_capable is True
 
 
 def test_claude_provider_exposes_file_backed_helpers():

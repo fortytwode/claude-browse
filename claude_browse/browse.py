@@ -253,16 +253,16 @@ def _check_fzf() -> None:
 
 def _default_target_provider(argv0: str) -> str:
     program = os.path.basename(argv0 or "claude-browse")
-    if program == "codex-browse":
-        return "codex"
-    if program == "gemini-browse":
-        return "gemini"
+    if program.endswith("-browse"):
+        provider = program[:-len("-browse")].lower()
+        if provider in provider_ids(target_capable=True):
+            return provider
     return "claude"
 
 
 def _parse_target_provider(args: list[str], argv0: str) -> tuple[str, list[str]]:
     target_provider = _default_target_provider(argv0)
-    valid_targets = provider_ids()
+    valid_targets = provider_ids(target_capable=True)
     remaining: list[str] = []
     i = 0
     while i < len(args):
@@ -294,7 +294,7 @@ def _parse_target_provider(args: list[str], argv0: str) -> tuple[str, list[str]]
 def _print_usage(argv0: str, target_provider: str) -> None:
     program = os.path.basename(argv0 or "claude-browse")
     target_name = provider_display_name(target_provider)
-    valid_targets = "`, `".join(provider_ids())
+    valid_targets = "`, `".join(provider_ids(target_capable=True))
     print(
         f"Usage: {program} [options]\n"
         "\n"
@@ -447,7 +447,11 @@ def _parse_fzf_output(
 
 
 def _providers_with_local_state() -> list[str]:
-    return [provider for provider in provider_ids() if get_provider(provider).has_local_state()]
+    return [
+        provider
+        for provider in provider_ids(source_capable=True)
+        if get_provider(provider).has_local_state()
+    ]
 
 
 def main() -> None:

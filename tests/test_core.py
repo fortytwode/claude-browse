@@ -317,7 +317,7 @@ def test_list_index_records_includes_codex(monkeypatch, tmp_path):
     empty_sessions_dir = tmp_path / "claude-projects"
     empty_sessions_dir.mkdir()
 
-    monkeypatch.setattr(core, "provider_ids", lambda: ("codex",))
+    monkeypatch.setattr(core, "provider_ids", lambda **kwargs: ("codex",))
     monkeypatch.setattr(codex_provider, "CODEX_STATE_DB", str(state_path))
     monkeypatch.setattr(codex_provider, "CODEX_HISTORY_PATH", str(history_path))
     monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(empty_sessions_dir))
@@ -359,7 +359,7 @@ def test_list_index_records_includes_gemini(monkeypatch, tmp_path):
     empty_sessions_dir = tmp_path / "claude-projects"
     empty_sessions_dir.mkdir()
 
-    monkeypatch.setattr(core, "provider_ids", lambda: ("gemini",))
+    monkeypatch.setattr(core, "provider_ids", lambda **kwargs: ("gemini",))
     monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(empty_sessions_dir))
     monkeypatch.setattr(gemini_provider, "GEMINI_TMP_DIR", str(tmp_dir))
     monkeypatch.setattr(
@@ -375,6 +375,19 @@ def test_list_index_records_includes_gemini(monkeypatch, tmp_path):
     assert rec["session_id"] == "gemini-1234-uuid"
     assert rec["cwd"] == "/home/alice/team-operations"
     assert "pricing page" in rec["last_msg"]
+
+
+def test_list_index_records_requests_source_capable_providers(monkeypatch):
+    captured: list[tuple[bool | None, bool | None]] = []
+
+    def fake_provider_ids(*, source_capable=None, target_capable=None):
+        captured.append((source_capable, target_capable))
+        return ()
+
+    monkeypatch.setattr(core, "provider_ids", fake_provider_ids)
+
+    assert core.list_index_records() == []
+    assert captured == [(True, None)]
 
 
 def test_build_import_markdown_targets_codex(monkeypatch):

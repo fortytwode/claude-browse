@@ -75,6 +75,15 @@ def test_default_target_provider_follows_entrypoint_name():
     assert browse._default_target_provider("/tmp/gemini-browse") == "gemini"
 
 
+def test_default_target_provider_supports_dynamic_plugin_shims(monkeypatch):
+    monkeypatch.setattr(
+        browse,
+        "provider_ids",
+        lambda **kwargs: ("claude", "codex", "mystery"),
+    )
+    assert browse._default_target_provider("/tmp/mystery-browse") == "mystery"
+
+
 def test_parse_target_provider_allows_override():
     target, remaining = browse._parse_target_provider(
         ["--target", "codex", "--all"],
@@ -91,6 +100,44 @@ def test_parse_target_provider_allows_gemini_override():
     )
     assert target == "gemini"
     assert remaining == ["--here"]
+
+
+def test_parse_target_provider_uses_target_capable_provider_list(monkeypatch):
+    calls: list[tuple[bool | None, bool | None]] = []
+
+    def fake_provider_ids(*, source_capable=None, target_capable=None):
+        calls.append((source_capable, target_capable))
+        return ("claude", "cursor")
+
+    monkeypatch.setattr(browse, "provider_ids", fake_provider_ids)
+
+    target, remaining = browse._parse_target_provider(
+        ["--target", "cursor"],
+        "claude-browse",
+    )
+
+    assert target == "cursor"
+    assert remaining == []
+    assert calls[0] == (None, True)
+
+
+def test_providers_with_local_state_use_source_capability_filter(monkeypatch):
+    calls: list[tuple[bool | None, bool | None]] = []
+
+    def fake_provider_ids(*, source_capable=None, target_capable=None):
+        calls.append((source_capable, target_capable))
+        return ("claude", "gemini")
+
+    specs = {
+        "claude": type("Spec", (), {"has_local_state": lambda self: True})(),
+        "gemini": type("Spec", (), {"has_local_state": lambda self: False})(),
+    }
+
+    monkeypatch.setattr(browse, "provider_ids", fake_provider_ids)
+    monkeypatch.setattr(browse, "get_provider", lambda provider: specs[provider])
+
+    assert browse._providers_with_local_state() == ["claude"]
+    assert calls[0] == (True, None)
 
 
 def test_parse_fzf_output_handles_print_query_safe_marker():

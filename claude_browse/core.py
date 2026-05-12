@@ -72,7 +72,7 @@ def _list_codex_index_records() -> list[dict]:
 def list_index_records() -> list[dict]:
     """Return every Claude, CodeX, and Gemini session in one normalized record shape."""
     records: list[dict] = []
-    for provider in provider_ids():
+    for provider in provider_ids(source_capable=True):
         records.extend(get_provider(provider).list_index_records())
     return records
 
