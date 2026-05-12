@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
 
 from .core import list_index_records
 from .providers import get_provider
-from .query import significant_query_terms
+from .query import is_descriptive_query, significant_query_terms
 
 DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
 # v2: added last_timestamp column so the list view can sort by most recent
@@ -275,6 +276,30 @@ def normalize_query(query: str) -> str:
     return " ".join(parts)
 
 
+def _terms_to_fts_query(
+    terms: list[str],
+    *,
+    joiner: str = " ",
+) -> str:
+    parts: list[str] = []
+    for text in terms:
+        text = text.strip()
+        if not text:
+            continue
+        if (
+            text.endswith("*")
+            and " " not in text
+            and len(text) > 1
+            and text.count("*") == 1
+        ):
+            escaped = text[:-1].replace('"', '""')
+            parts.append(f'"{escaped}"*')
+        else:
+            escaped = text.replace('"', '""')
+            parts.append(f'"{escaped}"')
+    return joiner.join(parts)
+
+
 def _parse_iso_timestamp(ts_str: str | None) -> datetime | None:
     if not ts_str:
         return None
@@ -382,32 +407,44 @@ def _reindex_segments_for_record(
 
 def _latest_segment_matches(
     conn: sqlite3.Connection,
-    fts_query: str,
+    query: str,
     *,
     sids: list[str] | None = None,
 ) -> dict[str, dict[str, object]]:
-    if not fts_query:
+    terms = significant_query_terms(query)
+    if not terms:
         return {}
+    fts_query = _terms_to_fts_query(terms, joiner=" OR ")
+    descriptive = is_descriptive_query(query)
 
     where = ["segments_fts MATCH ?"]
     params: list[object] = [fts_query]
     if sids:
         placeholders = ",".join("?" for _ in sids)
-        where.append(f"segments.sid IN ({placeholders})")
+        where.append(f"cur.sid IN ({placeholders})")
         params.extend(sids)
 
     sql = f"""
-        SELECT segments.sid,
-               segments.role,
-               segments.segment_idx,
-               segments.timestamp,
-               snippet(segments_fts, 4, '\x01', '\x02', '…', 12) AS context
+        SELECT cur.sid,
+               cur.role,
+               cur.segment_idx,
+               cur.timestamp,
+               cur.text,
+               snippet(segments_fts, 4, '\x01', '\x02', '…', 12) AS context,
+               bm25(segments_fts) AS bm,
+               prev.role,
+               prev.text,
+               prev.timestamp,
+               nxt.role,
+               nxt.text,
+               nxt.timestamp
         FROM segments_fts
-        JOIN segments ON segments.rowid = segments_fts.rowid
+        JOIN segments AS cur ON cur.rowid = segments_fts.rowid
+        LEFT JOIN segments AS prev
+            ON prev.sid = cur.sid AND prev.segment_idx = cur.segment_idx - 1
+        LEFT JOIN segments AS nxt
+            ON nxt.sid = cur.sid AND nxt.segment_idx = cur.segment_idx + 1
         WHERE {' AND '.join(where)}
-        ORDER BY (CASE WHEN segments.role = 'assistant' THEN 1 ELSE 0 END) DESC,
-                 COALESCE(segments.timestamp, '') DESC,
-                 segments.segment_idx DESC
     """
     try:
         rows = conn.execute(sql, params).fetchall()
@@ -415,14 +452,155 @@ def _latest_segment_matches(
         return {}
 
     matches: dict[str, dict[str, object]] = {}
-    for sid, _role, segment_idx, timestamp, context in rows:
+    lowered_terms = [term.lower() for term in terms]
+    if len(terms) <= 2:
+        required_term_count = len(terms)
+    elif descriptive:
+        required_term_count = 2
+    else:
+        required_term_count = len(terms)
+
+    def _match_stats(text: str) -> tuple[int, float, float]:
+        lowered = text.lower()
+        positions: list[tuple[int, int]] = []
+        for term in lowered_terms:
+            pos = lowered.find(term)
+            if pos >= 0:
+                positions.append((pos, pos + len(term)))
+        term_count = len(positions)
+        if not positions:
+            return (0, 0.0, 0.0)
+        span = max(end for _start, end in positions) - min(
+            start for start, _end in positions
+        )
+        word_count = max(len(text.split()), 1)
+        density = term_count / word_count
+        compactness = term_count / max(span, 1)
+        return (term_count, density, compactness)
+
+    def _conversation_score(text: str) -> float:
+        lowered = text.lower()
+        structured_markers = (
+            lowered.count("http")
+            + lowered.count("](")
+            + lowered.count("```")
+            + lowered.count("##")
+            + lowered.count("|")
+            + lowered.count("`")
+        )
+        return 1.0 / (1.0 + structured_markers)
+
+    def _context_from_exchange(text: str) -> str:
+        clean = " ".join(text.split())
+        lowered = clean.lower()
+        positions = [
+            (lowered.find(term), lowered.find(term) + len(term))
+            for term in lowered_terms
+            if lowered.find(term) >= 0
+        ]
+        if not positions:
+            excerpt = clean[:180]
+        else:
+            start = max(0, min(pos for pos, _end in positions) - 32)
+            end = min(len(clean), max(pos for _start, pos in positions) + 80)
+            excerpt = clean[start:end]
+            if start > 0:
+                excerpt = "…" + excerpt
+            if end < len(clean):
+                excerpt = excerpt + "…"
+        for term in sorted(terms, key=len, reverse=True):
+            excerpt = re.sub(
+                re.escape(term),
+                lambda match: f"\x01{match.group(0)}\x02",
+                excerpt,
+                flags=re.IGNORECASE,
+            )
+        return excerpt
+
+    ranked = []
+    for (
+        sid,
+        role,
+        segment_idx,
+        timestamp,
+        text,
+        context,
+        bm,
+        prev_role,
+        prev_text,
+        _prev_timestamp,
+        next_role,
+        next_text,
+        next_timestamp,
+    ) in rows:
+        exchange_parts: list[str] = []
+        assistant_bonus = 0
+        match_timestamp = timestamp
+        match_segment_idx = segment_idx
+        if role == "assistant" and prev_role == "user":
+            exchange_parts = [str(prev_text or ""), str(text or "")]
+            assistant_bonus = 1
+        elif role == "user" and next_role == "assistant":
+            exchange_parts = [str(text or ""), str(next_text or "")]
+            assistant_bonus = 1
+            match_timestamp = next_timestamp or timestamp
+            match_segment_idx = segment_idx + 1
+        else:
+            exchange_parts = [str(text or "")]
+            assistant_bonus = 1 if role == "assistant" else 0
+
+        combined = " ".join(part for part in exchange_parts if part).strip()
+        term_count, density, compactness = _match_stats(combined)
+        if term_count < required_term_count:
+            continue
+        ranked.append(
+            (
+                sid,
+                {
+                    "match_segment_idx": match_segment_idx,
+                    "match_timestamp": match_timestamp,
+                    "match_context": _context_from_exchange(combined) or context,
+                    "match_term_count": term_count,
+                    "match_density": density,
+                    "match_compactness": compactness,
+                    "match_conversation_score": _conversation_score(combined),
+                    "_match_bm25": -float(bm or 0.0),
+                    "_assistant_bonus": assistant_bonus,
+                },
+            )
+        )
+
+    if len(terms) == 1:
+        ranked.sort(
+            key=lambda item: (
+                item[1]["match_term_count"],
+                item[1]["_assistant_bonus"],
+                _timestamp_sort_key(item[1]["match_timestamp"]),
+                item[1]["match_density"],
+                item[1]["match_compactness"],
+                item[1]["_match_bm25"],
+                item[1]["match_segment_idx"],
+            ),
+            reverse=True,
+        )
+    else:
+        ranked.sort(
+            key=lambda item: (
+                item[1]["match_term_count"],
+                item[1]["match_conversation_score"],
+                item[1]["match_density"],
+                item[1]["match_compactness"],
+                item[1]["_assistant_bonus"],
+                _timestamp_sort_key(item[1]["match_timestamp"]),
+                item[1]["_match_bm25"],
+                item[1]["match_segment_idx"],
+            ),
+            reverse=True,
+        )
+    for sid, data in ranked:
         if sid in matches:
             continue
-        matches[sid] = {
-            "match_segment_idx": segment_idx,
-            "match_timestamp": timestamp,
-            "match_context": context,
-        }
+        matches[sid] = data
     return matches
 
 
@@ -478,6 +656,7 @@ def search(
     fts_query = normalize_query(query)
     if not fts_query:
         return list_recent(conn, limit)
+    descriptive = is_descriptive_query(query)
 
     # Filter by FTS5 match, but order by recency, not BM25. Users already
     # know what they searched for; what they want is "the newest session
@@ -498,28 +677,39 @@ def search(
         return []
 
     results = [_row_to_dict(r) for r in rows]
-    match_map = _latest_segment_matches(conn, fts_query)
-    existing_ids = {str(r["session_id"]) for r in results}
-    extra_ids = [sid for sid in match_map if sid not in existing_ids]
-    if extra_ids:
-        results.extend(_load_sessions_by_ids(conn, extra_ids))
+    existing_ids = [str(r["session_id"]) for r in results]
+    match_map = _latest_segment_matches(conn, query, sids=existing_ids or None)
+    if not results and descriptive:
+        match_map = _latest_segment_matches(conn, query)
+        results = _load_sessions_by_ids(conn, list(match_map)[:limit])
     if not results:
         return []
     decorated = _decorate_match_metadata(results, match_map)
     decorated.sort(
         key=lambda row: (
+            int(row.get("match_term_count") or 0),
             1 if row.get("match_timestamp") else 0,
             _timestamp_sort_key(
                 row.get("match_timestamp")
                 or row.get("last_timestamp")
                 or row.get("timestamp")
             ),
+            float(row.get("match_conversation_score") or 0.0),
+            float(row.get("match_density") or 0.0),
+            float(row.get("match_compactness") or 0.0),
+            float(row.get("_match_bm25") or 0.0),
             _timestamp_sort_key(row.get("last_timestamp") or row.get("timestamp")),
             float(row.get("mtime") or 0.0),
         ),
         reverse=True,
     )
-    return decorated[:limit]
+    trimmed = []
+    for row in decorated[:limit]:
+        clean = dict(row)
+        clean.pop("_match_bm25", None)
+        clean.pop("_assistant_bonus", None)
+        trimmed.append(clean)
+    return trimmed
 
 
 # --- ranker_v1 -----------------------------------------------------------
@@ -566,6 +756,8 @@ def search_ranked(
     fts_query = normalize_query(query)
     if not fts_query:
         return list_recent(conn, limit)
+    descriptive = is_descriptive_query(query)
+    terms = significant_query_terms(query)
 
     # Pull more candidates than we'll return so reranking has room to
     # surface non-recent strong matches that pure-recency would have buried.
@@ -592,14 +784,18 @@ def search_ranked(
         return []
 
     results = [_row_to_dict(r[:12]) | {"_bm25": -float(r[12] or 0.0)} for r in rows]
-    match_map = _latest_segment_matches(conn, fts_query)
     existing_ids = {str(r["session_id"]) for r in results}
-    extra_ids = [sid for sid in match_map if sid not in existing_ids]
+    match_map = _latest_segment_matches(
+        conn,
+        query,
+        sids=None if descriptive else list(existing_ids),
+    )
+    extra_ids = [sid for sid in match_map if sid not in existing_ids] if descriptive else []
     if extra_ids:
         results.extend(
             [
                 row | {"_bm25": 0.0}
-                for row in _load_sessions_by_ids(conn, extra_ids)
+                for row in _load_sessions_by_ids(conn, extra_ids[:candidate_pool])
             ]
         )
     if not results:
@@ -617,25 +813,53 @@ def search_ranked(
         recency = math.exp(-age / half_life_days) if age >= 0 else 0.0
         row["_score"] = float(row.get("_bm25") or 0.0) + recency_alpha * recency
 
-    decorated.sort(
-        key=lambda row: (
-            1 if row.get("match_timestamp") else 0,
-            _timestamp_sort_key(
-                row.get("match_timestamp")
-                or row.get("last_timestamp")
-                or row.get("timestamp")
+    if len(terms) == 1:
+        decorated.sort(
+            key=lambda row: (
+                int(row.get("match_term_count") or 0),
+                1 if row.get("_assistant_bonus") else 0,
+                _timestamp_sort_key(
+                    row.get("match_timestamp")
+                    or row.get("last_timestamp")
+                    or row.get("timestamp")
+                ),
+                float(row.get("_score") or 0.0),
+                float(row.get("match_conversation_score") or 0.0),
+                float(row.get("match_density") or 0.0),
+                float(row.get("match_compactness") or 0.0),
+                float(row.get("_match_bm25") or 0.0),
+                _timestamp_sort_key(row.get("last_timestamp") or row.get("timestamp")),
+                float(row.get("mtime") or 0.0),
             ),
-            float(row.get("_score") or 0.0),
-            _timestamp_sort_key(row.get("last_timestamp") or row.get("timestamp")),
-            float(row.get("mtime") or 0.0),
-        ),
-        reverse=True,
-    )
+            reverse=True,
+        )
+    else:
+        decorated.sort(
+            key=lambda row: (
+                int(row.get("match_term_count") or 0),
+                float(row.get("match_conversation_score") or 0.0),
+                _timestamp_sort_key(
+                    row.get("match_timestamp")
+                    or row.get("last_timestamp")
+                    or row.get("timestamp")
+                ),
+                float(row.get("match_density") or 0.0),
+                float(row.get("match_compactness") or 0.0),
+                1 if row.get("_assistant_bonus") else 0,
+                float(row.get("_score") or 0.0),
+                float(row.get("_match_bm25") or 0.0),
+                _timestamp_sort_key(row.get("last_timestamp") or row.get("timestamp")),
+                float(row.get("mtime") or 0.0),
+            ),
+            reverse=True,
+        )
     trimmed = []
     for row in decorated[:limit]:
         clean = dict(row)
         clean.pop("_bm25", None)
         clean.pop("_score", None)
+        clean.pop("_match_bm25", None)
+        clean.pop("_assistant_bonus", None)
         trimmed.append(clean)
     return trimmed
 

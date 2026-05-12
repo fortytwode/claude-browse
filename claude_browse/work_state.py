@@ -95,6 +95,33 @@ def _matching_turns(
     return list(reversed(matched[-limit:]))
 
 
+def _exchange_for_index(
+    turns: list[tuple[str, str]],
+    idx: int,
+) -> list[tuple[str, str]]:
+    role, _text = turns[idx]
+    if role == "user":
+        exchange = [turns[idx]]
+        if idx + 1 < len(turns) and turns[idx + 1][0] == "assistant":
+            exchange.append(turns[idx + 1])
+        return exchange
+
+    exchange: list[tuple[str, str]] = []
+    if idx - 1 >= 0 and turns[idx - 1][0] == "user":
+        exchange.append(turns[idx - 1])
+    exchange.append(turns[idx])
+    return exchange
+
+
+def _exchange_match_score(
+    exchange: list[tuple[str, str]],
+    lowered_terms: list[str],
+) -> tuple[int, int]:
+    combined = " ".join(text.lower() for _role, text in exchange)
+    term_count = sum(1 for term in lowered_terms if term in combined)
+    return term_count, -len(combined)
+
+
 def _latest_match_index(
     turns: list[tuple[str, str]],
     selection_query: str,
@@ -107,17 +134,17 @@ def _latest_match_index(
     if not terms:
         return None
 
-    assistant_match: int | None = None
-    latest_match: int | None = None
+    ranked: list[tuple[int, int, int, int]] = []
     for idx in range(len(turns) - 1, -1, -1):
         role, text = turns[idx]
         if any(term in text.lower() for term in terms):
-            if latest_match is None:
-                latest_match = idx
-            if role == "assistant":
-                assistant_match = idx
-                break
-    return assistant_match if assistant_match is not None else latest_match
+            exchange = _exchange_for_index(turns, idx)
+            term_count, brevity = _exchange_match_score(exchange, terms)
+            ranked.append((term_count, brevity, 1 if role == "assistant" else 0, idx))
+    if not ranked:
+        return None
+    ranked.sort(reverse=True)
+    return ranked[0][3]
 
 
 def _matched_exchange(
@@ -126,19 +153,7 @@ def _matched_exchange(
 ) -> list[tuple[str, str]]:
     if match_index is None or not turns:
         return []
-
-    role, _text = turns[match_index]
-    if role == "user":
-        exchange = [turns[match_index]]
-        if match_index + 1 < len(turns) and turns[match_index + 1][0] == "assistant":
-            exchange.append(turns[match_index + 1])
-        return exchange
-
-    exchange: list[tuple[str, str]] = []
-    if match_index - 1 >= 0 and turns[match_index - 1][0] == "user":
-        exchange.append(turns[match_index - 1])
-    exchange.append(turns[match_index])
-    return exchange
+    return _exchange_for_index(turns, match_index)
 
 
 def _post_match_recent_turns(
@@ -259,9 +274,21 @@ def build_work_state(
 def render_restart_card_terminal(state: dict[str, object]) -> str:
     lines: list[str] = ["Restart Card", ""]
 
+    matched_exchange = state.get("matched_exchange") or []
+    if matched_exchange:
+        lines.extend(["Last matching exchange:", ""])
+        for role, text in matched_exchange:
+            label = "User" if role == "user" else "Assistant"
+            lines.append(f"  {label}: {text}")
+        if state.get("thread_continued_after_match"):
+            lines.append("")
+            lines.append(
+                "Thread continued afterward on another topic. The latest turns below are newer than the matched topic."
+            )
+
     current_task = str(state.get("current_task") or "")
     if current_task:
-        lines.append(f"Current task: {current_task}")
+        lines.extend(["", f"Current task: {current_task}"])
 
     if state.get("topic_shifted") and state.get("opening_topic"):
         lines.append(f"Opened with: {state['opening_topic']}")
@@ -272,18 +299,6 @@ def render_restart_card_terminal(state: dict[str, object]) -> str:
     repo_state = state.get("repo_state")
     if isinstance(repo_state, dict) and repo_state.get("summary"):
         lines.append(f"Current repo state: {repo_state['summary']}")
-
-    matched_exchange = state.get("matched_exchange") or []
-    if matched_exchange:
-        lines.extend(["", "Last matching exchange:", ""])
-        for role, text in matched_exchange:
-            label = "User" if role == "user" else "Assistant"
-            lines.append(f"  {label}: {text}")
-        if state.get("thread_continued_after_match"):
-            lines.append("")
-            lines.append(
-                "Thread continued afterward on another topic. The latest turns below are newer than the matched topic."
-            )
 
     if state.get("last_meaningful_user"):
         lines.append(f"Last meaningful ask: {state['last_meaningful_user']}")
@@ -324,17 +339,6 @@ def render_restart_card_terminal(state: dict[str, object]) -> str:
 def render_restart_card_markdown(state: dict[str, object]) -> list[str]:
     lines = ["## Restart Card", ""]
 
-    if state.get("current_task"):
-        lines.append(f"- Current task: {state['current_task']}")
-    if state.get("topic_shifted") and state.get("opening_topic"):
-        lines.append(f"- Opened with: {state['opening_topic']}")
-    if state.get("session_title"):
-        lines.append(f"- Session title: {state['session_title']}")
-
-    repo_state = state.get("repo_state")
-    if isinstance(repo_state, dict) and repo_state.get("summary"):
-        lines.append(f"- Current repo state: {repo_state['summary']}")
-
     matched_exchange = state.get("matched_exchange") or []
     if matched_exchange:
         lines.extend(["", "### Last Matching Exchange", ""])
@@ -353,6 +357,17 @@ def render_restart_card_markdown(state: dict[str, object]) -> list[str]:
                 lines.append(f"#### {label}")
                 lines.append(text)
                 lines.append("")
+
+    if state.get("current_task"):
+        lines.append(f"- Current task: {state['current_task']}")
+    if state.get("topic_shifted") and state.get("opening_topic"):
+        lines.append(f"- Opened with: {state['opening_topic']}")
+    if state.get("session_title"):
+        lines.append(f"- Session title: {state['session_title']}")
+
+    repo_state = state.get("repo_state")
+    if isinstance(repo_state, dict) and repo_state.get("summary"):
+        lines.append(f"- Current repo state: {repo_state['summary']}")
 
     if state.get("last_meaningful_user"):
         lines.append(f"- Last meaningful user ask: {state['last_meaningful_user']}")

@@ -318,6 +318,28 @@ def test_search_uses_latest_matching_segment_as_context(db):
     assert results[0]["match_timestamp"] == "2026-05-09T00:05:00Z"
 
 
+def test_search_ranked_context_uses_combined_exchange_window(db):
+    _seed(
+        db,
+        "s1",
+        "team management discussion",
+        segments=[
+            ("user", "Can we talk about Neil?", "2026-05-09T00:00:00Z"),
+            (
+                "assistant",
+                "Yes. Nevena thinks his performance needs more support this quarter.",
+                "2026-05-09T00:05:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, "Neil performance with Nevena")
+    assert [r["session_id"] for r in results] == ["s1"]
+    assert "Neil" in results[0]["context"]
+    assert "Nevena" in results[0]["context"]
+    assert "performance" in results[0]["context"]
+
+
 # --- reindex ---------------------------------------------------------------
 
 

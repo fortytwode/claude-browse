@@ -120,3 +120,18 @@ def significant_query_terms(query: str, max_terms: int = 5) -> list[str]:
         words = [term for term in words if term in keep]
 
     return [term for term in raw_terms if term in phrases or term in words]
+
+
+def is_descriptive_query(query: str) -> bool:
+    """Whether the user is describing a thread instead of typing anchor tokens.
+
+    Sentence-like queries such as "where I was asking Nevena about feedback"
+    should keep the natural-language UX, but the backend needs to know these
+    are descriptive lookups so it can relax strict AND-only retrieval and lean
+    harder on matched exchanges. Short token searches like "pokpok" or
+    "runna sca2" should stay exact and mechanical.
+    """
+    raw_terms = parse_query_terms(query)
+    if len(raw_terms) <= 2:
+        return False
+    return significant_query_terms(query) != raw_terms

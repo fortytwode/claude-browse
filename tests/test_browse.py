@@ -80,6 +80,15 @@ def test_format_row_shows_match_recency_and_thread_activity_when_query_active():
     assert "active" in row
 
 
+def test_format_row_prioritizes_match_context_when_query_active():
+    info = _info(
+        name="Weekly Creator Briefs for MaxRewards",
+        context="Nevena feedback summary for Neil's performance",
+    )
+    row = format_row(info, query="nevena feedback")
+    assert row.index("Nevena feedback summary") < row.index("Weekly Creator Briefs")
+
+
 def test_default_target_provider_follows_entrypoint_name():
     assert browse._default_target_provider("claude-browse") == "claude"
     assert browse._default_target_provider("/tmp/codex-browse") == "codex"

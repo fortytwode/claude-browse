@@ -128,6 +128,7 @@ def test_render_restart_card_terminal_surfaces_repo_state_and_matches():
     assert "Restart Card" in text
     assert "Current repo state: Branch `main` with 2 uncommitted files." in text
     assert "Last matching exchange:" in text
+    assert text.index("Last matching exchange:") < text.index("Current task:")
     assert "Thread continued afterward on another topic." in text
     assert "Later turns after the match (latest first):" in text
     assert "Recent turns (latest first):" in text

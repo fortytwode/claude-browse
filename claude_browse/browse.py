@@ -58,7 +58,6 @@ def format_row(
     provider = (info.get("provider") or "claude").lower()
     cwd = info.get("cwd")
     fname = folder_name(cwd, prefixes)
-    msgs = f"{info.get('msg_count', 0)}msg"
     title = ((info.get("name") or info.get("first_msg") or "")[:60]).replace(
         "\n", " "
     )
@@ -80,8 +79,23 @@ def format_row(
             .replace("\r", " ")
             .replace("\t", " ")
         )
-        suffix_parts.append(f"\033[2m→ {snippet}\033[0m")
+        body = f"\033[2m→ {snippet}\033[0m"
+        meta_parts: list[str] = []
+        if title:
+            meta_parts.append(title[:30])
+        if query_active and info.get("match_timestamp") and date != thread_date:
+            meta_parts.append(f"active {thread_date}")
+        meta = (
+            f"  \033[2m[{ ' · '.join(meta_parts) }]\033[0m"
+            if meta_parts
+            else ""
+        )
+        return (
+            f"{date:<8} {provider:<6} {fname:<15} {body}{meta}  "
+            f"###{sid}###{ffolder}###{provider}"
+        )
     else:
+        msgs = f"{info.get('msg_count', 0)}msg"
         last = (
             (info.get("last_msg") or "")
             .strip()
