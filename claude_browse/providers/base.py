@@ -16,6 +16,8 @@ else:
     PreviewMessage = tuple
     TranscriptTurn = tuple
 
+PROVIDER_API_VERSION = 1
+
 
 @dataclass(frozen=True)
 class ProviderSpec:

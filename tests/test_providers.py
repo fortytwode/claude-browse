@@ -7,20 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from claude_browse.providers import (
-    codex as codex_provider,
-)
-from claude_browse.providers import (
-    copilot as copilot_provider,
-)
-from claude_browse.providers import (
-    gemini as gemini_provider,
-)
-from claude_browse.providers import (
-    get_provider,
-    provider_ids,
-)
-from claude_browse.providers.base import ProviderSpec
+from claude_browse.providers import codex as codex_provider
+from claude_browse.providers import copilot as copilot_provider
+from claude_browse.providers import gemini as gemini_provider
+from claude_browse.providers import get_provider, provider_entries, provider_ids
+from claude_browse.providers.base import PROVIDER_API_VERSION, ProviderSpec
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -75,6 +66,77 @@ PROVIDER = ProviderSpec(
         "mystery",
     )
     assert get_provider("mystery").experimental is True
+
+
+def test_provider_dirs_load_external_provider(monkeypatch, tmp_path):
+    provider_file = tmp_path / "mystery_provider.py"
+    provider_file.write_text(
+        f"""
+from claude_browse.providers.base import ProviderSpec
+
+PROVIDER_API_VERSION = {PROVIDER_API_VERSION}
+
+PROVIDER = ProviderSpec(
+    provider_id="mystery",
+    display_name="Mystery",
+    binary="mystery",
+    native_resume_prefix=("mystery", "resume"),
+    list_index_records_reader=lambda: [],
+    preview_messages_reader=lambda path, session_id: [],
+    transcript_turns_reader=lambda path, session_id: [],
+    source_capable=False,
+    target_capable=True,
+    experimental=True,
+)
+"""
+    )
+    monkeypatch.setenv("CLAUDE_BROWSE_PROVIDER_DIRS", str(tmp_path))
+
+    assert provider_ids() == (
+        "claude",
+        "codex",
+        "gemini",
+        "copilot",
+        "cursor",
+        "mystery",
+    )
+    mystery_entry = next(
+        entry for entry in provider_entries()
+        if entry.spec.provider_id == "mystery"
+    )
+
+    assert get_provider("mystery").binary == "mystery"
+    assert mystery_entry.source_type == "file"
+    assert mystery_entry.origin == f"file:{provider_file}"
+
+
+def test_external_provider_api_version_mismatch_is_skipped(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    provider_file = tmp_path / "future_provider.py"
+    provider_file.write_text(
+        """
+from claude_browse.providers.base import ProviderSpec
+
+PROVIDER_API_VERSION = 999
+
+PROVIDER = ProviderSpec(
+    provider_id="future",
+    display_name="Future",
+    binary="future",
+    native_resume_prefix=("future", "resume"),
+    list_index_records_reader=lambda: [],
+    preview_messages_reader=lambda path, session_id: [],
+    transcript_turns_reader=lambda path, session_id: [],
+)
+"""
+    )
+    monkeypatch.setenv("CLAUDE_BROWSE_PROVIDER_DIRS", str(tmp_path))
+
+    assert provider_ids() == ("claude", "codex", "gemini", "copilot", "cursor")
+    assert "PROVIDER_API_VERSION" in capsys.readouterr().err
 
 
 def test_duplicate_external_provider_is_skipped(monkeypatch, tmp_path, capsys):
@@ -252,6 +314,17 @@ def test_provider_spec_availability_and_auth_helpers():
     assert spec.auth_status() == "signed-in"
     assert spec.source_capable is False
     assert spec.target_capable is True
+
+
+def test_provider_entries_expose_origin_metadata():
+    entries = provider_entries()
+    builtin_ids = {
+        entry.spec.provider_id
+        for entry in entries
+        if entry.source_type == "builtin"
+    }
+
+    assert {"claude", "codex", "gemini", "copilot", "cursor"} <= builtin_ids
 
 
 def test_claude_provider_exposes_file_backed_helpers():

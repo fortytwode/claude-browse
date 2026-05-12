@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   load **experimental** external provider modules from
   `CLAUDE_BROWSE_PROVIDER_MODULES`. This is the first public-ish extension seam
   for providers, but it is intentionally not a stable marketplace API yet.
+- Experimental external providers can now also be discovered from local
+  directories via `CLAUDE_BROWSE_PROVIDER_DIRS`, and can optionally declare a
+  `PROVIDER_API_VERSION` for loader compatibility checks.
 - Gemini is now a built-in provider. `gemini-browse` opens everything in
   Gemini by default, `--target gemini` routes the shared browser entrypoint
   there, and the adapter registry now indexes Gemini sessions from
@@ -42,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   inline in the launch prompt instead.
 - The browser empty-state copy now derives its source-provider list dynamically
   instead of hard-coding Claude, CodeX, and Gemini.
+- `claude-browse --list-providers` now prints built-in and external provider
+  metadata without requiring `fzf`, making the experimental extension seam
+  inspectable from the CLI.
 - Search now ranks by relevance, not just recency. Previous behavior was
   "filter by FTS5 token match, then sort by last activity," which meant
   any session that mentioned a term once (a Toggl rollup, a passing

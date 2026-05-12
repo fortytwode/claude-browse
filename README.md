@@ -168,11 +168,21 @@ additional providers from local Python modules via:
 export CLAUDE_BROWSE_PROVIDER_MODULES="my_pkg.my_provider"
 ```
 
-Each module must expose:
+or from plugin-style directories of `.py` files via:
+
+```bash
+export CLAUDE_BROWSE_PROVIDER_DIRS="$HOME/.config/claude-browse/providers"
+```
+
+Each external provider module or file must expose:
 
 ```python
-from claude_browse.providers.base import ProviderSpec
+from claude_browse.providers.base import (
+    PROVIDER_API_VERSION as API_V1,
+    ProviderSpec,
+)
 
+PROVIDER_API_VERSION = API_V1  # optional today, but recommended
 PROVIDER = ProviderSpec(...)
 ```
 
@@ -182,6 +192,7 @@ The contract is intentionally **experimental**:
 - There is no compatibility promise or marketplace yet
 - External providers can be source-capable (index local sessions), target-capable
   (launch target only), or both
+- Directory-loaded providers are regular local Python files, not sandboxed plugins
 
 For target-capable external providers, you can use either:
 
@@ -191,6 +202,15 @@ claude-browse --target my-provider
 
 or a thin shim/symlink named `my-provider-browse` that points at
 `claude-browse`.
+
+To inspect what loaded successfully without opening fzf:
+
+```bash
+claude-browse --list-providers
+```
+
+That prints built-in vs external providers, source/target capability, binary
+availability, experimental status, and auth state when a provider reports one.
 
 ---
 

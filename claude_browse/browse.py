@@ -23,7 +23,7 @@ from .core import (
     provider_display_name,
     write_import_file,
 )
-from .providers import get_provider, provider_ids
+from .providers import get_provider, provider_entries, provider_ids
 
 DEFAULT_LIMIT = 100
 
@@ -302,6 +302,7 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         "Options:\n"
         "  --all                 Include every session, not just the most recent 100\n"
         "  --here                Only sessions started in the current directory\n"
+        "  --list-providers      Show built-in and external provider availability\n"
         f"  --target PROVIDER     Override launch target (`{valid_targets}`)\n"
         "  -h, --help            Show this help\n"
         "\n"
@@ -493,6 +494,26 @@ def _source_provider_descriptions() -> tuple[str, str]:
     return _join_with_or(provider_names), _join_with_or(provider_binaries)
 
 
+def _print_provider_list() -> None:
+    print(
+        f"{'provider':<10} {'type':<8} {'src':<3} {'dst':<3} "
+        f"{'avail':<5} {'exp':<3} {'binary':<16} auth"
+    )
+    for entry in provider_entries():
+        spec = entry.spec
+        auth = spec.auth_status() or "-"
+        print(
+            f"{spec.provider_id:<10} {entry.source_type:<8} "
+            f"{'yes' if spec.source_capable else 'no':<3} "
+            f"{'yes' if spec.target_capable else 'no':<3} "
+            f"{'yes' if spec.is_available() else 'no':<5} "
+            f"{'yes' if spec.experimental else 'no':<3} "
+            f"{spec.binary:<16} {auth}"
+        )
+        if entry.source_type != "builtin":
+            print(f"  origin: {entry.origin}")
+
+
 def main() -> None:
     target_provider, args = _parse_target_provider(sys.argv[1:], sys.argv[0])
 
@@ -503,6 +524,10 @@ def main() -> None:
     show_all = "--all" in args
     if show_all:
         args.remove("--all")
+
+    list_providers = "--list-providers" in args
+    if list_providers:
+        args.remove("--list-providers")
 
     cwd_filter: str | None = None
     if "--here" in args:
@@ -518,6 +543,10 @@ def main() -> None:
         print(f"Unknown argument: {args[0]}", file=sys.stderr)
         _print_usage(sys.argv[0], target_provider)
         sys.exit(2)
+
+    if list_providers:
+        _print_provider_list()
+        return
 
     _check_fzf()
 

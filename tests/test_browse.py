@@ -174,6 +174,74 @@ def test_main_empty_state_message_is_dynamic(monkeypatch, capsys):
     assert "Run `claude` or `copilot` at least once" in captured.out
 
 
+def test_main_list_providers_prints_without_fzf(monkeypatch, capsys):
+    entries = (
+        type(
+            "Entry",
+            (),
+            {
+                "source_type": "builtin",
+                "origin": "builtin",
+                "spec": type(
+                    "Spec",
+                    (),
+                    {
+                        "provider_id": "claude",
+                        "source_capable": True,
+                        "target_capable": True,
+                        "experimental": False,
+                        "binary": "claude",
+                        "is_available": lambda self: True,
+                        "auth_status": lambda self: None,
+                    },
+                )(),
+            },
+        )(),
+        type(
+            "Entry",
+            (),
+            {
+                "source_type": "file",
+                "origin": "file:/tmp/mystery_provider.py",
+                "spec": type(
+                    "Spec",
+                    (),
+                    {
+                        "provider_id": "mystery",
+                        "source_capable": False,
+                        "target_capable": True,
+                        "experimental": True,
+                        "binary": "mystery",
+                        "is_available": lambda self: False,
+                        "auth_status": lambda self: "signed-out",
+                    },
+                )(),
+            },
+        )(),
+    )
+
+    monkeypatch.setattr(
+        browse,
+        "provider_ids",
+        lambda **kwargs: ("claude", "codex", "gemini", "copilot", "cursor"),
+    )
+    monkeypatch.setattr(browse, "provider_entries", lambda **kwargs: entries)
+    monkeypatch.setattr(
+        browse,
+        "_check_fzf",
+        lambda: (_ for _ in ()).throw(AssertionError("fzf should not be required")),
+    )
+    monkeypatch.setattr(browse.sys, "argv", ["claude-browse", "--list-providers"])
+
+    browse.main()
+
+    captured = capsys.readouterr()
+    assert "provider" in captured.out
+    assert "claude" in captured.out
+    assert "mystery" in captured.out
+    assert "origin: file:/tmp/mystery_provider.py" in captured.out
+
+
 def test_parse_fzf_output_handles_print_query_safe_marker():
     row = "match ###abc-123###/home/alice/proj###claude"
     parsed = browse._parse_fzf_output(

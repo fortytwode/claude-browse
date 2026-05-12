@@ -37,4 +37,7 @@ def test_readme_no_longer_documents_claude_resume():
 def test_readme_documents_experimental_external_providers():
     text = _readme_text()
     assert "CLAUDE_BROWSE_PROVIDER_MODULES" in text
+    assert "CLAUDE_BROWSE_PROVIDER_DIRS" in text
+    assert "--list-providers" in text
+    assert "PROVIDER_API_VERSION" in text
     assert "experimental" in text.lower()
