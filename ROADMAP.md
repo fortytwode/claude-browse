@@ -1,202 +1,134 @@
 # Roadmap
 
-This document captures where claude-browse is today, what v1.0 requires before a
-public launch, and the direction for paid companion products. It's the source
-of truth for scope decisions — if something isn't listed here, it isn't
-planned.
+This document captures what `claude-browse` is now, what is already shipped,
+and the next product phases that move it from “browse old chats” to “resume
+software work.”
 
 ## Product strategy in one paragraph
 
-**claude-browse is the free wedge for a paid session-sync product.** The CLI
-itself stays free, open-source, and local-only forever — that's what earns
-adoption and trust. The revenue comes from a hosted backend (working title:
-claude-sync + claude-browse-web) that adds encrypted cross-device sync,
-mobile-friendly web browsing, and AI-powered search across sessions. Standard
-open-core pattern: Tailscale, Raycast, Warp, Supabase all use it.
+**`claude-browse` is a local-first resume-work tool, not a generic chat
+history browser.** The CLI should help you recover the state of a task across
+Claude, CodeX, Gemini, Copilot, and Cursor: what you were doing, where the
+thread drifted, what the current repo looks like, and what the best next prompt
+is. The open-source CLI stays local and trusted. If there is a paid business
+later, it should sell shared work-state, sync, and team handoff layers on top
+of that wedge.
 
 ---
 
-## Current state (April 2026)
+## Current state (May 2026)
 
-- `claude-browse` / `codex-browse` — paired fzf TUIs over local Claude Code +
-  CodeX history. Search, preview, native resume by provider, cross-app handoff,
-  and browser-level target selection.
-- `install.sh` — symlinks the browser scripts into `~/.local/bin/`.
-- Mature test suite, packaging, and docs now exist; remaining work is product
-  polish and future-provider architecture, not basic legitimacy.
-- Distribution: `git clone` + `./install.sh`. Mac-first (install.sh recommends
-  `brew install fzf` only).
-
-## v1.0 polish checklist
-
-The bar for a credible public launch. Everything below is landing in one release
-tagged v1.0.0.
-
-### Packaging & install
-- [ ] `pyproject.toml` with entry points so `pip install claude-browse` works
-- [ ] Cross-platform `install.sh` (detect Linux, suggest apt/dnf/pacman for fzf)
-- [ ] Publish to PyPI under `claude-browse` (reserve the name early)
-- [ ] Homebrew tap: `fortytwode/tap/claude-browse` (post-launch; nice-to-have)
-
-### Docs
-- [ ] README rewrite: clearer value prop, demo GIF, one-line install,
-      troubleshooting, FAQ, link to ROADMAP
-- [ ] **Demo GIF** (single highest-leverage artifact — terminal tools without one
-      die in submission queues). 10–15 seconds: open claude-browse, fuzzy-filter,
-      preview, resume. Record with asciinema or terminalizer.
-- [ ] CHANGELOG.md (Keep-a-Changelog format)
-- [ ] CONTRIBUTING.md (how to run tests, code style, issue/PR guidelines)
-- [ ] LICENSE (MIT)
-
-### Code quality
-- [ ] Path canonicalization: treat `/Users/<name>` and `/home/<name>` as
-      equivalent so synced sessions don't show duplicates. Opt-in config.
-- [ ] Tests: session parsing, date formatting, folder-name extraction, path
-      canonicalization. Pytest, no network, runs in <1s.
-- [ ] GitHub Actions CI: Mac + Linux, Python 3.9–3.13, import check + pytest
-- [ ] Edge cases: empty sessions dir, malformed JSONL, sessions with no user
-      messages, missing cwd, future schema drift
-- [ ] Graceful fallback when `fzf` isn't installed (print install instructions
-      instead of a stack trace)
-
-### Launch assets
-- [ ] Landing page (GitHub Pages): hero GIF, install, link to paid-product
-      waitlist
-- [ ] Launch post drafts: HN, ProductHunt, /r/commandline
-- [ ] Waitlist form for claude-browse-cloud (lead-capture before any paid-product
-      code exists — gate decision to build on waitlist signal)
+- Target-app browsers are shipped:
+  - `claude-browse`
+  - `codex-browse`
+  - `gemini-browse`
+  - `copilot-browse`
+  - `cursor-browse`
+- Built-in providers are shipped for Claude, CodeX, Gemini, Copilot, and Cursor
+  (Cursor is target-only today).
+- Provider adapters and an experimental external-provider seam are shipped.
+- Cross-provider handoff is shipped and query-aware.
+- Restart cards are shipped in the preview pane and handoff brief:
+  - current task
+  - opening topic when the thread drifted
+  - current repo state
+  - last meaningful ask
+  - latest assistant answer
+  - likely open question
+  - suggested next prompt
 
 ---
 
-## v1.1 and beyond (nice-to-have, not blocking launch)
+## Immediate roadmap
 
-- `--stats` mode: time spent across sessions, top folders, message volume
-- Export session to markdown / JSON
-- Delete old sessions interactively (with confirmation)
-- Config file (`~/.config/claude-browse/config.toml`) for defaults
-- Shell completions (bash, zsh, fish)
-- Color theming
-- Internal provider registry so future first-party adapters (Gemini, Cursor,
-  Copilot, etc.) stop living inside `browse.py`
+These are the next product phases that can be implemented directly in this repo.
 
----
+### Phase 1 — Restart quality
+**Status:** shipped
 
-## Paid product direction (separate repos, later)
+- Reframe the product around `Resume Work`
+- Replace raw preview with restart cards
+- Include repo-state overlays in preview and handoff
+- Keep cross-provider handoff grounded in end-of-thread state, not opening prompt
 
-### claude-sync (Phase 2, post-v1.0 of claude-browse)
-**Scope**: a file-level sync tool for `~/.claude/projects/`. Pluggable backends.
-Published as a separate OSS tool so adoption isn't gated on the paid product.
+### Phase 2 — Task view
+**Status:** next
 
-**Backends**:
-1. Syncthing (default, P2P, free, encrypted)
-2. rclone (any cloud — GCS/S3/Dropbox/Drive)
-3. Git (private repo)
-4. **claude-browse-cloud** (the paid backend — end-to-end encrypted, managed)
+Group related sessions into one task instead of forcing the user to think in
+provider-native thread IDs.
 
-Users pick their backend; `claude-sync` wraps the setup so they don't have to
-configure each tool by hand.
+What ships:
+- Heuristic task clustering by cwd, time proximity, title similarity, and key terms
+- Task list mode in addition to raw session mode
+- “This task spans Claude + CodeX + Gemini” presentation
 
-**Known hard problems to solve**:
-- **Concurrent edits**: resuming the same session on two machines at once
-  corrupts the JSONL. Options: (a) warn in docs, (b) file-lock during active
-  claude session, (c) merge tool for conflict files. Probably (a) + (b).
-- **Secret scrubbing**: transcripts contain API keys, pasted credentials. Offer
-  opt-in redaction pass before sync, or at least document the risk clearly.
-- **Cross-machine path encoding** (handled at the claude-browse layer, see
-  above).
+Why it matters:
+- The user wants to reopen `the Pokpok brief work`, not `session abc123`
 
-### claude-browse-cloud (Phase 3, the monetization layer)
-**Scope**: hosted backend for claude-sync + web UI for mobile browsing.
+### Phase 3 — Best next prompt
+**Status:** next
 
-**Architecture sketch**:
-- Sync client: daemon watches `~/.claude/projects/`, encrypts client-side,
-  uploads deltas to blob storage
-- Backend: S3/R2 for blobs + Postgres for metadata + a small API
-- Web UI: mobile-first, read + resume-pointer (can't actually launch claude in
-  a browser, but can deep-link to `claude --resume <id>` on the user's
-  machine via claude-sync daemon)
-- Auth: magic-link email to start, SSO for teams later
-- Billing: Stripe
-- Search: embeddings pipeline (Anthropic/OpenAI), pgvector
+Generate a deterministic continuation prompt from local state.
 
-**Pricing tiers** (see notes below for rationale):
+What ships:
+- Suggested next prompt in preview
+- Copy/export flows for that prompt
+- Target-specific phrasing for Claude, CodeX, Gemini, Copilot, and Cursor
 
-| Tier           | Price          | Features |
-| -------------- | -------------- | -------- |
-| Free (OSS)     | $0             | claude-browse + claude-sync with self-hosted backends |
-| Personal Pro   | ~$8/mo         | Managed sync, web UI, semantic search, unlimited retention |
-| Team           | ~$15/seat/mo   | Shared session library, team search, role-based access |
-| Enterprise     | Custom         | SSO, audit logs, on-prem option, compliance (SOC 2, etc.) |
+Why it matters:
+- This is the first output that turns search into forward motion
 
-**What makes Personal Pro worth $8**: not the sync (people will self-host) but
-the AI-enhanced search ("find where I debugged Redis"), auto-summaries ("what
-did I learn this week?"), and auto-tagging. That's where value compounds
-beyond plain file storage.
+### Phase 4 — Work artifacts
+**Status:** later
 
----
+Turn session + repo state into reusable outputs.
 
-## Risks
+What ships:
+- Restart brief
+- Human-to-agent handoff brief
+- Agent-to-human summary
+- Standup / “what changed and why” export
 
-### Platform risk: Anthropic ships native cross-device session sync
-The single biggest risk. Anthropic already has CLI + desktop + web Claude Code.
-Unifying session state is a natural next step. If they ship it before
-claude-browse-cloud hits meaningful scale, the moat evaporates.
+Why it matters:
+- Session history becomes operationally useful outside the TUI
 
-**Mitigations**:
-- Move fast, own the terminal-power-user niche early, build brand recognition
-- Build features Anthropic won't:
-  - **Cross-vendor**: support Aider, Cursor, Codex CLI, Gemini CLI, not just
-    Claude Code. The moment the product spans tools, it's outside Anthropic's
-    roadmap.
-  - **Team features**: shared libraries, role-based access
-  - **Compliance**: audit logs, retention policies, SOC 2
-- Don't over-invest upfront. Ship MVP, get to 100 paid users, then decide.
+### Phase 5 — Shared work graph
+**Status:** later
 
-### Privacy risk: leaked transcripts
-Sessions contain real secrets. Any sync setup can leak them if misconfigured.
+Move from local task recovery to shared team context.
 
-**Mitigations**:
-- claude-sync offers opt-in secret-scrubbing before upload
-- End-to-end encryption for claude-browse-cloud (server never sees plaintext)
-- Clear README warnings about what's in session files
+What ships:
+- Cross-device sync
+- Shared task timelines
+- Team handoff state
+- Shared restart briefs and work artifacts
 
-### Adoption risk: small addressable market
-Claude Code CLI users who'd pay for cross-device sync is a niche. Probably
-thousands to tens of thousands globally. A nice indie-SaaS scale business
-(<$100K MRR), not a unicorn.
-
-**Mitigations**:
-- Accept the scale. Indie-SaaS is a valid outcome.
-- Expand addressable market by going cross-vendor (see above)
+Why it matters:
+- This is the first genuinely monetizable layer
 
 ---
 
-## Decision gates
+## Product principles
 
-Gate decisions so we don't build the backend before validating demand:
-
-1. **Ship claude-browse v1.0** → publish on HN/PH/Reddit, count stars/downloads
-2. **Collect emails** on claude-browse-cloud waitlist for 4 weeks after launch
-3. **Gate**: ≥500 waitlist emails → build claude-sync OSS tool next
-4. **Gate**: ≥100 active claude-sync users → build claude-browse-cloud backend
-5. **Gate**: ≥50 people on "I'd pay for this" list → launch paid tier
-
-If any gate fails, stop or pivot. Don't sunk-cost through.
+- Optimize for restart quality before provider count.
+- Prefer deterministic local heuristics before adding AI summarization.
+- Treat “resume work” as a task-state problem, not a transcript problem.
+- Keep native resume and cross-provider handoff explicit; do not pretend they are the same.
+- Do not freeze a public plugin API until several real providers force a stable contract.
 
 ---
 
-## Non-goals
+## Non-goals for now
 
-Things explicitly not in scope, so nobody wastes time asking:
-
-- Editing session content (claude-browse is read + resume only)
-- Integrating with editors/IDEs (out of scope; different product)
-- Running claude itself in a browser (Anthropic's problem, not ours)
-- Multi-user chat / collaboration on live sessions (complex, small value)
-- Session analytics dashboards beyond basic stats (save for a separate tool)
+- Editing session content
+- A cloud dependency for the core CLI
+- A public provider marketplace with compatibility guarantees
+- Live collaborative sessions
+- Generic memory for every app outside software work
 
 ---
 
 ## Changelog
 
-- 2026-04-22: First roadmap draft. v1.0 scope frozen.
+- 2026-04-22: First roadmap draft.
+- 2026-05-12: Reframed roadmap around resume-work, restart cards, task view, and shared work-state.

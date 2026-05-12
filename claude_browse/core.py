@@ -17,6 +17,7 @@ from .providers import common as provider_common
 from .providers import copilot as copilot_provider
 from .providers import gemini as gemini_provider
 from .providers import get_provider, provider_ids
+from .work_state import build_work_state, render_restart_card_markdown
 
 SESSIONS_DIR = claude_provider.SESSIONS_DIR
 CODEX_STATE_DB = codex_provider.CODEX_STATE_DB
@@ -108,34 +109,6 @@ def _codex_transcript_turns(session_id: str) -> list[tuple[str, str]]:
     return get_provider("codex").transcript_turns("", session_id)
 
 
-def _latest_turn_text(excerpt: list[tuple[str, str]], role: str) -> str:
-    for turn_role, text in reversed(excerpt):
-        if turn_role == role:
-            return text
-    return ""
-
-
-def _matching_turns(
-    provider: str,
-    path: str,
-    session_id: str,
-    selection_query: str,
-    limit: int = 6,
-) -> list[tuple[str, str]]:
-    terms = [term.lower() for term in extract_query_terms(selection_query) if term.strip()]
-    if not terms:
-        return []
-
-    turns = get_provider(provider).transcript_turns(path, session_id)
-
-    matched = [
-        (role, text)
-        for role, text in turns
-        if any(term in text.lower() for term in terms)
-    ]
-    return list(reversed(matched[-limit:]))
-
-
 def build_import_markdown(
     session: dict,
     target_provider: str,
@@ -147,21 +120,16 @@ def build_import_markdown(
     cwd = session.get("cwd") or ""
     started = session.get("timestamp") or "unknown"
     last_activity = session.get("last_timestamp") or started
-    title = session.get("name") or session.get("first_msg") or ""
-    first_msg = session.get("first_msg") or ""
-    last_msg = session.get("last_msg") or ""
     target_name = provider_display_name(target_provider)
-    path = session.get("path") or ""
     source_spec = get_provider(provider)
-    excerpt = source_spec.transcript_excerpt(path, session_id)
-    recent_excerpt = list(reversed(excerpt[-10:]))
-    latest_assistant = _latest_turn_text(excerpt, "assistant")
-    matched_turns = _matching_turns(
-        provider,
-        path,
-        session_id,
+    work_state = build_work_state(
+        session,
         selection_query or "",
+        recent_limit=10,
+        match_limit=6,
     )
+    recent_excerpt = work_state["recent_turns"]
+    matched_turns = work_state["matching_turns"]
 
     lines = [
         "# Imported Session Context",
@@ -182,6 +150,7 @@ def build_import_markdown(
         f"- Started: {started}",
         f"- Last activity: {last_activity}",
     ]
+    lines.extend([""] + render_restart_card_markdown(work_state))
 
     if selection_query and selection_query.strip():
         lines.extend([
@@ -208,21 +177,6 @@ def build_import_markdown(
                 "- No exact matching transcript turns were recovered for that query.",
                 "",
             ])
-
-    lines.extend([
-        "",
-        "## End-of-Thread Priority",
-        "",
-    ])
-
-    if last_msg:
-        lines.append(f"- Latest substantive user message: {last_msg}")
-    if latest_assistant:
-        lines.append(f"- Latest assistant response: {latest_assistant}")
-    if title:
-        lines.append(f"- Original session title or topic: {title}")
-    if first_msg:
-        lines.append(f"- Original first user prompt: {first_msg}")
 
     lines.extend([
         "",

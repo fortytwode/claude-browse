@@ -1,0 +1,137 @@
+"""Tests for structured restart-card extraction and repo-state overlays."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from claude_browse import git_state, work_state
+
+
+def test_build_work_state_prefers_end_of_thread_task_over_opening_topic(monkeypatch):
+    turns = [
+        ("user", "signup is broken on the staging deploy, can you investigate"),
+        ("assistant", "Looking at the signup handler."),
+        (
+            "user",
+            "ok signup is fine now. switching to a totally different topic, "
+            "need help drafting a Q3 hiring plan for the platform team",
+        ),
+        (
+            "assistant",
+            "Sure. For the platform team headcount expansion, I'd start with "
+            "a staffing matrix.",
+        ),
+    ]
+    monkeypatch.setattr(
+        work_state,
+        "get_provider",
+        lambda provider: SimpleNamespace(
+            display_name="Claude",
+            assistant_turns_available=True,
+            transcript_turns=lambda path, session_id: turns,
+        ),
+    )
+    monkeypatch.setattr(
+        work_state,
+        "inspect_repo_state",
+        lambda cwd: {"summary": "Branch `main` with a clean working tree."},
+    )
+
+    state = work_state.build_work_state(
+        {
+            "provider": "claude",
+            "path": "/tmp/session.jsonl",
+            "session_id": "abc-123",
+            "cwd": "/home/alice/webapp",
+            "name": "Q3 platform hiring plan",
+            "first_msg": "signup is broken on the staging deploy, can you investigate",
+        },
+        "signup",
+    )
+
+    assert state["current_task"] == "Q3 platform hiring plan"
+    assert state["topic_shifted"] is True
+    assert "hiring plan" in str(state["last_meaningful_user"]).lower()
+    assert "staffing matrix" in str(state["latest_assistant"]).lower()
+    assert any(
+        text.startswith("signup is broken on the staging deploy")
+        for _, text in state["matching_turns"]
+    )
+
+
+def test_build_work_state_marks_last_user_turn_as_open_question(monkeypatch):
+    monkeypatch.setattr(
+        work_state,
+        "get_provider",
+        lambda provider: SimpleNamespace(
+            display_name="CodeX",
+            assistant_turns_available=False,
+            transcript_turns=lambda path, session_id: [
+                ("user", "can you investigate why the deploy is failing?"),
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        work_state,
+        "inspect_repo_state",
+        lambda cwd: {"summary": "Branch `release` with 3 uncommitted files."},
+    )
+
+    state = work_state.build_work_state(
+        {
+            "provider": "codex",
+            "path": "codex://abc-123",
+            "session_id": "abc-123",
+            "cwd": "/home/alice/release",
+            "name": "Deploy debugging",
+            "first_msg": "can you investigate why the deploy is failing?",
+        }
+    )
+
+    assert state["likely_open_question"] == (
+        "can you investigate why the deploy is failing?"
+    )
+    assert "unresolved request" in str(state["suggested_next_prompt"])
+
+
+def test_render_restart_card_terminal_surfaces_repo_state_and_matches():
+    text = work_state.render_restart_card_terminal(
+        {
+            "current_task": "Q3 platform hiring plan",
+            "topic_shifted": True,
+            "opening_topic": "Investigate signup flow regression",
+            "session_title": "Q3 platform hiring plan",
+            "repo_state": {
+                "summary": "Branch `main` with 2 uncommitted files.",
+            },
+            "last_meaningful_user": "Draft the hiring plan",
+            "latest_assistant": "Start with a staffing matrix.",
+            "likely_open_question": "",
+            "suggested_next_prompt": "Continue the work in webapp.",
+            "matching_turns": [("assistant", "I checked the Sherlock output.")],
+            "recent_turns": [("user", "Draft the hiring plan")],
+        }
+    )
+
+    assert "Restart Card" in text
+    assert "Current repo state: Branch `main` with 2 uncommitted files." in text
+    assert "Why this likely matched your search:" in text
+    assert "Recent turns (latest first):" in text
+
+
+def test_inspect_repo_state_parses_branch_and_dirty(monkeypatch, tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+
+    class Result:
+        returncode = 0
+        stdout = "## feature/restart-card\n M README.md\n?? tests/test_work_state.py\n"
+
+    monkeypatch.setattr(git_state.subprocess, "run", lambda *args, **kwargs: Result())
+
+    state = git_state.inspect_repo_state(str(repo_dir))
+
+    assert state["is_git"] is True
+    assert state["branch"] == "feature/restart-card"
+    assert state["dirty"] is True
+    assert state["changed_files"] == 2

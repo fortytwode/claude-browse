@@ -105,13 +105,12 @@ sys.path.insert(0, {package_dir!r})
 
 from claude_browse.core import (
     extract_query_terms,
-    get_preview_messages,
     highlight_terms,
     provider_display_name,
 )
+from claude_browse.work_state import build_work_state, render_restart_card_terminal
 
 DB_PATH = {db_path!r}
-MAX_PREVIEW = 20
 
 
 def _lookup_session(session_id):
@@ -119,7 +118,8 @@ def _lookup_session(session_id):
     try:
         return conn.execute(
             '''
-            SELECT provider, path, cwd, timestamp, last_timestamp, title
+            SELECT provider, path, cwd, timestamp, last_timestamp, title,
+                   first_msg, last_msg, msg_count
             FROM sessions
             WHERE sid = ?
             ''',
@@ -135,9 +135,32 @@ def get_preview(session_id, query=""):
         print("Session not found.")
         return
 
-    provider, path, cwd, timestamp, last_timestamp, name = session
-    all_messages = get_preview_messages(provider, path, session_id)
-    total_user = len(all_messages)
+    (
+        provider,
+        path,
+        cwd,
+        timestamp,
+        last_timestamp,
+        name,
+        first_msg,
+        last_msg,
+        msg_count,
+    ) = session
+    state = build_work_state(
+        {{
+            "provider": provider,
+            "path": path,
+            "cwd": cwd,
+            "timestamp": timestamp,
+            "last_timestamp": last_timestamp,
+            "name": name,
+            "first_msg": first_msg,
+            "last_msg": last_msg,
+            "msg_count": msg_count,
+            "session_id": session_id,
+        }},
+        query,
+    )
     terms = extract_query_terms(query)
 
     def hl(text):
@@ -155,26 +178,9 @@ def get_preview(session_id, query=""):
         print(f"Started: {{timestamp[:19].replace('T', ' ')}}")
     if last_timestamp and last_timestamp != timestamp:
         print(f"Last activity: {{last_timestamp[:19].replace('T', ' ')}}")
-    print(f"Total user messages: {{total_user}}")
+    print(f"Messages: {{msg_count or 0}}")
     print()
-
-    recent = all_messages[-MAX_PREVIEW:]
-    if terms and not any(
-        any(term.lower() in msg.lower() for term in terms) for _, msg in recent
-    ):
-        matched = [
-            (n, msg) for n, msg in all_messages
-            if any(term.lower() in msg.lower() for term in terms)
-        ]
-        if matched:
-            recent = matched[-MAX_PREVIEW:]
-    recent.reverse()
-
-    label = "Messages (matches first):" if terms else "Messages (latest first):"
-    print(label)
-    print()
-    for num, text in recent:
-        print(f"  {{num}}. {{hl(text)}}")
+    print(hl(render_restart_card_terminal(state)))
 
 
 if __name__ == "__main__":

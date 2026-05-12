@@ -22,6 +22,8 @@ def test_readme_documents_target_app_browsers():
     assert "opens everything in Copilot" in text
     assert "opens everything in Cursor" in text
     assert "Cross-provider open is not a true native resume." in text
+    assert "Resume software work across Claude Code" in text
+    assert "restart card" in text.lower()
 
 
 def test_readme_no_longer_documents_removed_browser_shortcuts():

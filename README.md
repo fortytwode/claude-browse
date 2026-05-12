@@ -1,9 +1,10 @@
 # claude-browse
 
-**Find and reopen past Claude Code, CodeX, Gemini, and Copilot sessions from the terminal, then open them in Claude, CodeX, Gemini, Copilot, or Cursor.**
-Interactive fzf browser with a preview pane, full-text search across folders
-and first messages, provider-aware native resume, plus target-app browsers
-that open everything in Claude, CodeX, Gemini, Copilot, or Cursor by default.
+**Resume software work across Claude Code, CodeX, Gemini, and Copilot from the terminal, then continue it in Claude, CodeX, Gemini, Copilot, or Cursor.**
+Interactive fzf browser with a restart-card preview pane, full-text search
+across folders and first messages, provider-aware native resume, and
+target-app browsers that open everything in Claude, CodeX, Gemini, Copilot,
+or Cursor by default.
 
 <!-- Replace with a real asciinema/terminalizer GIF before launch -->
 <p align="center">
@@ -23,8 +24,9 @@ Sessions >
 
 No network. No accounts. No API calls. It reads local session history from
 `~/.claude/projects/`, `~/.codex/`, `~/.gemini/tmp/`, and
-`~/.copilot/session-state/`, then gives you a fast way to find and reopen
-conversations. Cursor is currently a launch target, not a local session source.
+`~/.copilot/session-state/`, then reconstructs enough task state to help you
+keep moving instead of dropping you into a stale transcript. Cursor is
+currently a launch target, not a local session source.
 
 ---
 
@@ -63,7 +65,7 @@ sudo apk add fzf        # Alpine
 - Python 3.9+
 - fzf (for `claude-browse`, `codex-browse`, `gemini-browse`, `copilot-browse`, and `cursor-browse`)
 - Claude Code, CodeX, Gemini, GitHub Copilot CLI, and/or Cursor Agent CLI
-- Optional experimental providers can be loaded from local Python modules
+- Optional experimental providers can be loaded from local Python modules or local provider directories
 
 ---
 
@@ -100,6 +102,7 @@ Examples:
 - In `gemini-browse`, a Gemini thread resumes natively in Gemini and Claude or CodeX threads start fresh Gemini sessions with imported context.
 - In `copilot-browse`, a Copilot thread resumes natively in Copilot and Claude, CodeX, or Gemini threads start fresh Copilot sessions with imported context.
 - In `cursor-browse`, Claude, CodeX, and Gemini threads start fresh Cursor sessions with imported context.
+- The preview pane shows a restart card: current task, opening topic when the thread drifted, current repo state, last meaningful ask, latest assistant answer, likely open question, and a suggested next prompt.
 - Cross-provider open is not a true native resume. It creates a new session seeded from the old thread.
 - Cursor is currently a **target-only** built-in provider. It opens everything in Cursor, but this tool does not yet claim to index Cursor-origin CLI sessions.
 
@@ -115,8 +118,9 @@ provider-local pickers. `claude-browse`, `codex-browse`, `gemini-browse`,
 - **Fuzzy search across all your sessions, not just the last few.** Type any
   word from any past conversation, any folder name, any relative date —
   find it.
-- **Preview before you resume.** See where the conversation ended up (latest
-  messages first) so you pick the right thread, not a stale one.
+- **Recover work state before you resume.** The preview pane reconstructs the
+  current task, topic drift, repo status, last meaningful ask, latest
+  assistant progress, and a suggested next prompt.
 - **Choose the target app up front.** Launch `claude-browse` if you want to
   work in Claude, `codex-browse` if you want to work in CodeX, or
   `gemini-browse` if you want to work in Gemini, `copilot-browse` if you want
@@ -125,8 +129,8 @@ provider-local pickers. `claude-browse`, `codex-browse`, `gemini-browse`,
   the browser writes a compact import brief and starts a fresh session in the
   target app instead of pretending cross-vendor native resume exists.
 
-If you live in `tmux` and start a lot of Claude Code sessions across
-different projects, this is the tool.
+If you live in `tmux` and start a lot of agent sessions across different
+projects, this is the tool.
 
 ---
 
@@ -249,7 +253,8 @@ Gemini stores project-scoped chat JSON under
 `~/.copilot/session-state/<session-id>/` with an `events.jsonl` transcript and
 `workspace.yaml` metadata. The browsers normalize all four into one local
 SQLite index, then hand that to fzf. When you pick a thread, the tool `cd`s
-back to the original cwd and then either launches the native resume command
+back to the original cwd, rebuilds a restart card from the local transcript
+plus current repo state, and then either launches the native resume command
 for the target app or creates a Markdown import brief and starts a fresh
 cross-provider handoff session.
 

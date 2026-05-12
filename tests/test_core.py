@@ -393,16 +393,33 @@ def test_list_index_records_requests_source_capable_providers(monkeypatch):
 def test_build_import_markdown_targets_codex(monkeypatch):
     monkeypatch.setattr(
         core,
+        "build_work_state",
+        lambda session, selection_query="", recent_limit=10, match_limit=6: {
+            "current_task": "Auth follow-up",
+            "topic_shifted": False,
+            "opening_topic": "Please fix the onboarding flow",
+            "session_title": "Auth follow-up",
+            "repo_state": {
+                "summary": "Branch `main` with a clean working tree.",
+            },
+            "last_meaningful_user": "Ship it after the auth fix.",
+            "latest_assistant": "I found the regression in auth.",
+            "likely_open_question": "",
+            "suggested_next_prompt": "Continue the work in proj.",
+            "matching_turns": [],
+            "recent_turns": [
+                ("user", "Ship it after the auth fix."),
+                ("assistant", "I found the regression in auth."),
+                ("user", "Please fix the onboarding flow"),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        core,
         "get_provider",
         lambda provider: (
             SimpleNamespace(
                 display_name="Claude",
-                transcript_excerpt=lambda _path, _session_id, limit=24: [
-                    ("user", "Please fix the onboarding flow"),
-                    ("assistant", "I found the regression in auth."),
-                    ("user", "Ship it after the auth fix."),
-                ],
-                transcript_turns=lambda _path, _session_id: [],
                 assistant_turns_available=True,
             )
             if provider == "claude"
@@ -428,9 +445,11 @@ def test_build_import_markdown_targets_codex(monkeypatch):
     assert "handed into a new CodeX session." in text
     assert "- Source app: Claude" in text
     assert "Prioritize the end-of-thread state" in text
-    assert "## End-of-Thread Priority" in text
-    assert "- Latest substantive user message: Ship it after the auth fix." in text
+    assert "## Restart Card" in text
+    assert "- Current task: Auth follow-up" in text
+    assert "- Last meaningful user ask: Ship it after the auth fix." in text
     assert "- Latest assistant response: I found the regression in auth." in text
+    assert "- Current repo state: Branch `main` with a clean working tree." in text
     assert "### Assistant" in text
     assert "I found the regression in auth." in text
 
@@ -438,20 +457,34 @@ def test_build_import_markdown_targets_codex(monkeypatch):
 def test_build_import_markdown_includes_search_match_context(monkeypatch):
     monkeypatch.setattr(
         core,
+        "build_work_state",
+        lambda session, selection_query="", recent_limit=10, match_limit=6: {
+            "current_task": "Now archive the backups after that.",
+            "topic_shifted": True,
+            "opening_topic": "Can you review the pokpok brief?",
+            "session_title": "Mixed thread",
+            "repo_state": {"summary": "Branch `main` with 2 uncommitted files."},
+            "last_meaningful_user": "Now archive the backups after that.",
+            "latest_assistant": "I checked the Sherlock output for pokpok.",
+            "likely_open_question": "",
+            "suggested_next_prompt": "Continue the work in proj.",
+            "matching_turns": [
+                ("assistant", "I checked the Sherlock output for pokpok."),
+                ("user", "Can you review the pokpok brief?"),
+            ],
+            "recent_turns": [
+                ("user", "Now archive the backups after that."),
+                ("assistant", "I checked the Sherlock output for pokpok."),
+                ("user", "Can you review the pokpok brief?"),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        core,
         "get_provider",
         lambda provider: (
             SimpleNamespace(
                 display_name="Claude",
-                transcript_excerpt=lambda _path, _session_id, limit=24: [
-                    ("user", "Can you review the pokpok brief?"),
-                    ("assistant", "I checked the Sherlock output for pokpok."),
-                    ("user", "Now archive the backups after that."),
-                ],
-                transcript_turns=lambda _path, _session_id: [
-                    ("user", "Can you review the pokpok brief?"),
-                    ("assistant", "I checked the Sherlock output for pokpok."),
-                    ("user", "Now archive the backups after that."),
-                ],
                 assistant_turns_available=True,
             )
             if provider == "claude"
@@ -479,19 +512,35 @@ def test_build_import_markdown_includes_search_match_context(monkeypatch):
     assert "This thread was reopened from a search for: `pokpok`" in text
     assert "Matching turns below are likely why this thread was selected." in text
     assert "I checked the Sherlock output for pokpok." in text
+    assert "- Opened with: Can you review the pokpok brief?" in text
 
 
 def test_build_import_markdown_targets_claude_from_codex(monkeypatch):
+    monkeypatch.setattr(
+        core,
+        "build_work_state",
+        lambda session, selection_query="", recent_limit=10, match_limit=6: {
+            "current_task": "Launch review",
+            "topic_shifted": False,
+            "opening_topic": "Review the launch checklist",
+            "session_title": "Launch review",
+            "repo_state": {
+                "summary": "Branch `release` with 1 uncommitted file.",
+            },
+            "last_meaningful_user": "Review the launch checklist",
+            "latest_assistant": "",
+            "likely_open_question": "Review the launch checklist",
+            "suggested_next_prompt": "Continue the work in proj.",
+            "matching_turns": [],
+            "recent_turns": [("user", "Review the launch checklist")],
+        },
+    )
     monkeypatch.setattr(
         core,
         "get_provider",
         lambda provider: (
             SimpleNamespace(
                 display_name="CodeX",
-                transcript_excerpt=lambda _path, _session_id, limit=24: [
-                    ("user", "Review the launch checklist")
-                ],
-                transcript_turns=lambda _path, _session_id: [],
                 assistant_turns_available=False,
             )
             if provider == "codex"
@@ -516,6 +565,7 @@ def test_build_import_markdown_targets_claude_from_codex(monkeypatch):
 
     assert "handed into a new Claude session." in text
     assert "- Source app: CodeX" in text
+    assert "- Current repo state: Branch `release` with 1 uncommitted file." in text
     assert "Note: CodeX local history only exposes user turns here." in text
     assert "Most recent turns are shown first." in text
     assert "### User" in text
@@ -525,15 +575,32 @@ def test_build_import_markdown_targets_claude_from_codex(monkeypatch):
 def test_build_import_markdown_targets_claude_from_gemini(monkeypatch):
     monkeypatch.setattr(
         core,
+        "build_work_state",
+        lambda session, selection_query="", recent_limit=10, match_limit=6: {
+            "current_task": "Retention review",
+            "topic_shifted": False,
+            "opening_topic": "Review the retention policy",
+            "session_title": "Retention review",
+            "repo_state": {
+                "summary": "Branch `policy` with a clean working tree.",
+            },
+            "last_meaningful_user": "Review the retention policy",
+            "latest_assistant": "The current window is 30 days.",
+            "likely_open_question": "",
+            "suggested_next_prompt": "Continue the work in proj.",
+            "matching_turns": [],
+            "recent_turns": [
+                ("assistant", "The current window is 30 days."),
+                ("user", "Review the retention policy"),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        core,
         "get_provider",
         lambda provider: (
             SimpleNamespace(
                 display_name="Gemini",
-                transcript_excerpt=lambda _path, _session_id, limit=24: [
-                    ("user", "Review the retention policy"),
-                    ("assistant", "The current window is 30 days."),
-                ],
-                transcript_turns=lambda _path, _session_id: [],
                 assistant_turns_available=True,
             )
             if provider == "gemini"
