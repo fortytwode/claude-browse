@@ -16,6 +16,8 @@ import tempfile
 from collections.abc import Iterable
 from datetime import datetime, timezone
 
+from .providers import get_provider
+
 SESSIONS_DIR = os.path.expanduser("~/.claude/projects")
 CODEX_STATE_DB = os.path.expanduser("~/.codex/state_5.sqlite")
 CODEX_HISTORY_PATH = os.path.expanduser("~/.codex/history.jsonl")
@@ -842,9 +844,7 @@ def folder_name(cwd: str | None, known_prefixes: Iterable[str] = ()) -> str:
 
 
 def provider_display_name(provider: str | None) -> str:
-    if provider == "codex":
-        return "CodeX"
-    return "Claude"
+    return get_provider(provider).display_name
 
 
 def extract_query_terms(query: str) -> list[str]:

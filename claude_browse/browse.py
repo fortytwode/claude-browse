@@ -24,10 +24,9 @@ from .core import (
     provider_display_name,
     write_import_file,
 )
+from .providers import alternate_provider, get_provider, provider_ids
 
 DEFAULT_LIMIT = 100
-TARGET_PROVIDERS = ("claude", "codex")
-ALTERNATE_TARGET = {"claude": "codex", "codex": "claude"}
 
 
 def _folder_prefixes() -> tuple[str, ...]:
@@ -262,11 +261,12 @@ def _default_target_provider(argv0: str) -> str:
 
 
 def _other_target_provider(target_provider: str) -> str:
-    return ALTERNATE_TARGET.get(target_provider, "codex")
+    return alternate_provider(target_provider)
 
 
 def _parse_target_provider(args: list[str], argv0: str) -> tuple[str, list[str]]:
     target_provider = _default_target_provider(argv0)
+    valid_targets = provider_ids()
     remaining: list[str] = []
     i = 0
     while i < len(args):
@@ -285,10 +285,10 @@ def _parse_target_provider(args: list[str], argv0: str) -> tuple[str, list[str]]
         remaining.append(arg)
         i += 1
 
-    if target_provider not in TARGET_PROVIDERS:
+    if target_provider not in valid_targets:
         print(
             f"Unknown target provider: {target_provider}. "
-            f"Expected one of: {', '.join(TARGET_PROVIDERS)}",
+            f"Expected one of: {', '.join(valid_targets)}",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -328,9 +328,10 @@ def _print_usage(argv0: str, target_provider: str) -> None:
 
 
 def _require_binary(provider: str) -> None:
-    if shutil.which(provider):
+    binary = get_provider(provider).binary
+    if shutil.which(binary):
         return
-    print(f"Target app not found on PATH: {provider}", file=sys.stderr)
+    print(f"Target app not found on PATH: {binary}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -343,20 +344,11 @@ def _native_resume(
     yolo: bool,
 ) -> None:
     _require_binary(provider)
-    if provider == "codex":
-        cmd = ["codex", "resume", session_id]
-        if yolo:
-            cmd.append("--dangerously-bypass-approvals-and-sandbox")
-        mode = " (yolo)" if yolo else ""
-        print(f"Resuming{mode} in CodeX ({folder_name(cwd, prefixes)})...")
-        os.execvp("codex", cmd)
-
-    cmd = ["claude", "--resume", session_id]
-    if yolo:
-        cmd.append("--dangerously-skip-permissions")
+    spec = get_provider(provider)
+    cmd = spec.native_resume_cmd(session_id, yolo)
     mode = " (yolo)" if yolo else ""
-    print(f"Resuming{mode} in {folder_name(cwd, prefixes)}...")
-    os.execvp("claude", cmd)
+    print(f"Resuming{mode} in {spec.display_name} ({folder_name(cwd, prefixes)})...")
+    os.execvp(spec.binary, cmd)
 
 
 def _continue_in_provider(
@@ -368,7 +360,8 @@ def _continue_in_provider(
     yolo: bool = True,
     selection_query: str = "",
 ) -> None:
-    target_name = provider_display_name(target_provider)
+    target_spec = get_provider(target_provider)
+    target_name = target_spec.display_name
 
     _require_binary(target_provider)
 
@@ -387,19 +380,10 @@ def _continue_in_provider(
         "most recent turns over the original opening prompt, then continue "
         "the work in this directory."
     )
-    if target_provider == "claude":
-        cmd = ["claude"]
-        if yolo:
-            cmd.append("--dangerously-skip-permissions")
-        cmd.extend(["--add-dir", import_dir, prompt])
-    else:
-        cmd = ["codex"]
-        if yolo:
-            cmd.append("--dangerously-bypass-approvals-and-sandbox")
-        cmd.extend(["--add-dir", import_dir, prompt])
+    cmd = target_spec.handoff_cmd(import_dir, prompt, yolo)
     mode = " (yolo)" if yolo else ""
     print(f"Continuing{mode} in {target_name} from {folder_name(cwd, prefixes)}...")
-    os.execvp(target_provider, cmd)
+    os.execvp(target_spec.binary, cmd)
 
 
 def _continue_in_other_app(
