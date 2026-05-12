@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from claude_browse.providers import alternate_provider, get_provider, provider_ids
 
 
@@ -9,10 +11,9 @@ def test_provider_ids_include_claude_and_codex():
     assert provider_ids() == ("claude", "codex")
 
 
-def test_get_provider_defaults_unknown_to_claude():
-    spec = get_provider("mystery")
-    assert spec.provider_id == "claude"
-    assert spec.display_name == "Claude"
+def test_get_provider_rejects_unknown_provider():
+    with pytest.raises(ValueError, match="Unknown provider: mystery"):
+        get_provider("mystery")
 
 
 def test_claude_native_resume_cmd_matches_current_shape():
@@ -22,6 +23,27 @@ def test_claude_native_resume_cmd_matches_current_shape():
         "--resume",
         "abc-123",
         "--dangerously-skip-permissions",
+    ]
+
+
+def test_codex_native_resume_cmd_matches_current_shape():
+    spec = get_provider("codex")
+    assert spec.native_resume_cmd("abc-123", True) == [
+        "codex",
+        "resume",
+        "abc-123",
+        "--dangerously-bypass-approvals-and-sandbox",
+    ]
+
+
+def test_claude_handoff_cmd_matches_current_shape():
+    spec = get_provider("claude")
+    assert spec.handoff_cmd("/tmp", "continue", True) == [
+        "claude",
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        "/tmp",
+        "continue",
     ]
 
 

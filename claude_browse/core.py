@@ -844,7 +844,10 @@ def folder_name(cwd: str | None, known_prefixes: Iterable[str] = ()) -> str:
 
 
 def provider_display_name(provider: str | None) -> str:
-    return get_provider(provider).display_name
+    try:
+        return get_provider(provider).display_name
+    except ValueError:
+        return str(provider or "Claude")
 
 
 def extract_query_terms(query: str) -> list[str]:

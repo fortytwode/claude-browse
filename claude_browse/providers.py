@@ -56,7 +56,9 @@ _PROVIDERS: dict[str, ProviderSpec] = {
 
 def get_provider(provider: str | None) -> ProviderSpec:
     key = (provider or "claude").lower()
-    return _PROVIDERS.get(key, _PROVIDERS["claude"])
+    if key not in _PROVIDERS:
+        raise ValueError(f"Unknown provider: {provider}")
+    return _PROVIDERS[key]
 
 
 def provider_ids() -> tuple[str, ...]:
