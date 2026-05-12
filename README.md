@@ -85,9 +85,9 @@ While the TUI is up:
 | Type             | Full-text search across Claude + CodeX threads                   |
 | ↑ ↓              | Move between sessions                                            |
 | Shift-↑ Shift-↓  | Scroll the preview pane                                          |
-| Enter            | Open in the app you launched (`claude-browse` or `codex-browse`) |
-| Ctrl-S           | Open in that same app, using safe mode when it is a native resume |
-| Ctrl-X           | Open in the other app instead                                    |
+| Enter            | Open in the app you launched (`claude-browse` or `codex-browse`) in yolo mode |
+| Ctrl-S           | Open in that same app in safe mode                                |
+| Ctrl-X           | Open in the other app instead, also in yolo mode                  |
 | Esc              | Quit                                                             |
 
 Examples:

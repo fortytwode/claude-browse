@@ -315,9 +315,9 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         "  runna*                Prefix match: runna, runnathon, runna2026, ...\n"
         "\n"
         "Keys while browsing:\n"
-        f"  Enter                 Open in {target_name} (yolo if native resume)\n"
-        f"  Ctrl-S                Open in {target_name} (safe if native resume)\n"
-        f"  Ctrl-X                Open in {other_name} instead\n"
+        f"  Enter                 Open in {target_name} (yolo)\n"
+        f"  Ctrl-S                Open in {target_name} (safe)\n"
+        f"  Ctrl-X                Open in {other_name} instead (yolo)\n"
         "  Shift-Up / Shift-Down Scroll the preview pane\n"
         "  Esc                   Quit\n"
         "\n"
@@ -365,6 +365,7 @@ def _continue_in_provider(
     target_provider: str,
     cwd: str,
     prefixes: tuple[str, ...],
+    yolo: bool = True,
     selection_query: str = "",
 ) -> None:
     target_name = provider_display_name(target_provider)
@@ -387,10 +388,17 @@ def _continue_in_provider(
         "the work in this directory."
     )
     if target_provider == "claude":
-        cmd = ["claude", "--add-dir", import_dir, prompt]
+        cmd = ["claude"]
+        if yolo:
+            cmd.append("--dangerously-skip-permissions")
+        cmd.extend(["--add-dir", import_dir, prompt])
     else:
-        cmd = ["codex", "--add-dir", import_dir, prompt]
-    print(f"Continuing in {target_name} from {folder_name(cwd, prefixes)}...")
+        cmd = ["codex"]
+        if yolo:
+            cmd.append("--dangerously-bypass-approvals-and-sandbox")
+        cmd.extend(["--add-dir", import_dir, prompt])
+    mode = " (yolo)" if yolo else ""
+    print(f"Continuing{mode} in {target_name} from {folder_name(cwd, prefixes)}...")
     os.execvp(target_provider, cmd)
 
 
@@ -408,6 +416,7 @@ def _continue_in_other_app(
         _other_target_provider(provider),
         cwd,
         prefixes,
+        True,
         "",
     )
 
@@ -431,6 +440,7 @@ def _open_in_target_provider(
         target_provider,
         cwd,
         prefixes,
+        yolo,
         selection_query,
     )
 
@@ -467,7 +477,6 @@ def _parse_fzf_output(
         yolo = False
     elif marker == "XAPP:":
         selected_target = _other_target_provider(target_provider)
-        yolo = False
 
     row = next((line for line in reversed(row_lines) if "###" in line), "")
     if not row and "###" in selection_query:
@@ -565,9 +574,9 @@ def main() -> None:
             "--prompt=Sessions > ",
             (
                 "--header="
-                f"Enter: open in {target_name} (yolo if native) | "
-                f"Ctrl-S: open in {target_name} (safe if native) | "
-                f"Ctrl-X: open in {alternate_name} | "
+                f"Enter: open in {target_name} (yolo) | "
+                f"Ctrl-S: open in {target_name} (safe) | "
+                f"Ctrl-X: open in {alternate_name} (yolo) | "
                 "Esc: quit | Shift-Up/Down: scroll preview"
             ),
             "--header-first",

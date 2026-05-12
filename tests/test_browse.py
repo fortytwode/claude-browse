@@ -98,7 +98,7 @@ def test_parse_fzf_output_handles_print_query_xapp_marker():
         f"pokpok\nXAPP:\n{row}\n",
         "claude",
     )
-    assert parsed == (row, "codex", False, "pokpok")
+    assert parsed == (row, "codex", True, "pokpok")
 
 
 def test_parse_fzf_output_handles_print_query_default_accept():
@@ -206,6 +206,7 @@ def test_continue_in_other_app_from_claude_execs_codex_with_add_dir(
     assert captured["binary"] == "codex"
     assert captured["cmd"] == [
         "codex",
+        "--dangerously-bypass-approvals-and-sandbox",
         "--add-dir",
         "/tmp",
         (
@@ -255,6 +256,7 @@ def test_continue_in_other_app_from_codex_execs_claude_with_add_dir(
     assert captured["binary"] == "claude"
     assert captured["cmd"] == [
         "claude",
+        "--dangerously-skip-permissions",
         "--add-dir",
         "/tmp",
         (
