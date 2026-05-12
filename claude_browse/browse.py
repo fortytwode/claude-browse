@@ -24,6 +24,7 @@ from .core import (
     write_import_file,
 )
 from .providers import get_provider, provider_entries, provider_ids
+from .work_state import build_work_state, render_restart_card_terminal
 
 DEFAULT_LIMIT = 100
 
@@ -321,6 +322,8 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         "Keys while browsing:\n"
         f"  Enter                 Open in {target_name} (yolo)\n"
         f"  Ctrl-S                Open in {target_name} (safe)\n"
+        "  Ctrl-Y                Print the suggested next prompt for the selection\n"
+        "  Ctrl-B                Print the restart card for the selection\n"
         "  Shift-Up / Shift-Down Scroll the preview pane\n"
         "  Esc                   Quit\n"
         "\n"
@@ -442,7 +445,7 @@ def _open_in_target_provider(
 def _parse_fzf_output(
     output: str,
     target_provider: str,
-) -> tuple[str, str, bool, str] | None:
+) -> tuple[str, str, str, str] | None:
     text = output.strip()
     if not text:
         return None
@@ -451,13 +454,17 @@ def _parse_fzf_output(
     if not lines:
         return None
 
-    # fzf --print-query prints the query first. ctrl-s adds a separate
-    # marker line via print(...)+accept before the selected row.
+    # fzf --print-query prints the query first. Control-key actions add a
+    # separate marker line via print(...)+accept before the selected row.
     selection_query = lines[0]
     marker = ""
     row_lines = lines[1:]
 
     if row_lines and row_lines[0] == "SAFE:":
+        marker = row_lines.pop(0)
+    elif row_lines and row_lines[0] == "PROMPT:":
+        marker = row_lines.pop(0)
+    elif row_lines and row_lines[0] == "BRIEF:":
         marker = row_lines.pop(0)
     elif selection_query.startswith("SAFE:"):
         original = selection_query
@@ -466,9 +473,13 @@ def _parse_fzf_output(
         row_lines = [original[5:]] + row_lines
 
     selected_target = target_provider
-    yolo = True
+    action = "open_yolo"
     if marker == "SAFE:":
-        yolo = False
+        action = "open_safe"
+    elif marker == "PROMPT:":
+        action = "print_prompt"
+    elif marker == "BRIEF:":
+        action = "print_brief"
 
     row = next((line for line in reversed(row_lines) if "###" in line), "")
     if not row and "###" in selection_query:
@@ -477,7 +488,7 @@ def _parse_fzf_output(
 
     if not row or "###" not in row:
         return None
-    return row, selected_target, yolo, selection_query
+    return row, selected_target, action, selection_query
 
 
 def _providers_with_local_state() -> list[str]:
@@ -518,6 +529,14 @@ def _print_provider_list() -> None:
         )
         if entry.source_type != "builtin":
             print(f"  origin: {entry.origin}")
+
+
+def _load_session_by_id(session_id: str) -> dict | None:
+    conn = fts.open_db()
+    try:
+        return fts.get_by_sid(conn, session_id)
+    finally:
+        conn.close()
 
 
 def main() -> None:
@@ -618,6 +637,7 @@ def main() -> None:
                 "--header="
                 f"Enter: open in {target_name} (yolo) | "
                 f"Ctrl-S: open in {target_name} (safe) | "
+                "Ctrl-Y: next prompt | Ctrl-B: restart card | "
                 "Esc: quit | Shift-Up/Down: scroll preview"
             ),
             "--header-first",
@@ -630,6 +650,8 @@ def main() -> None:
             "--preview-window=right:45%:wrap",
             "--bind=shift-up:preview-up,shift-down:preview-down",
             "--bind=ctrl-s:print(SAFE:)+accept",
+            "--bind=ctrl-y:print(PROMPT:)+accept",
+            "--bind=ctrl-b:print(BRIEF:)+accept",
         ]
 
         result = subprocess.run(
@@ -646,18 +668,24 @@ def main() -> None:
         if not parsed:
             sys.exit(0)
 
-        output, selected_target, yolo, selection_query = parsed
+        output, selected_target, action, selection_query = parsed
 
         parts = output.split("###")
         session_id = parts[1].strip() if len(parts) >= 2 else ""
         provider = parts[3].strip() if len(parts) >= 4 else "claude"
 
-        conn = fts.open_db()
-        session = fts.get_by_sid(conn, session_id)
-        conn.close()
+        session = _load_session_by_id(session_id)
         if not session:
             print(f"Session not found: {session_id}", file=sys.stderr)
             sys.exit(1)
+
+        if action == "print_prompt":
+            print(build_work_state(session, selection_query)["suggested_next_prompt"])
+            return
+
+        if action == "print_brief":
+            print(render_restart_card_terminal(build_work_state(session, selection_query)))
+            return
 
         cwd = session.get("cwd")
         if not cwd or not os.path.isdir(cwd):
@@ -678,7 +706,7 @@ def main() -> None:
             session_id,
             cwd,
             prefixes,
-            yolo,
+            action == "open_yolo",
             selection_query,
         )
 

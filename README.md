@@ -93,6 +93,8 @@ While the TUI is up:
 | Shift-↑ Shift-↓  | Scroll the preview pane                                          |
 | Enter            | Open in the app you launched (`claude-browse`, `codex-browse`, `gemini-browse`, `copilot-browse`, or `cursor-browse`) in yolo mode |
 | Ctrl-S           | Open in that same app in safe mode                               |
+| Ctrl-Y           | Print the suggested next prompt for the selected thread          |
+| Ctrl-B           | Print the restart card for the selected thread                   |
 | Esc              | Quit                                                             |
 
 Examples:
@@ -103,6 +105,7 @@ Examples:
 - In `copilot-browse`, a Copilot thread resumes natively in Copilot and Claude, CodeX, or Gemini threads start fresh Copilot sessions with imported context.
 - In `cursor-browse`, Claude, CodeX, and Gemini threads start fresh Cursor sessions with imported context.
 - The preview pane shows a restart card: current task, opening topic when the thread drifted, current repo state, last meaningful ask, latest assistant answer, likely open question, and a suggested next prompt.
+- `Ctrl-Y` lets you emit the suggested next prompt without launching anything. `Ctrl-B` prints the restart card itself for copy/paste or handoff.
 - Cross-provider open is not a true native resume. It creates a new session seeded from the old thread.
 - Cursor is currently a **target-only** built-in provider. It opens everything in Cursor, but this tool does not yet claim to index Cursor-origin CLI sessions.
 

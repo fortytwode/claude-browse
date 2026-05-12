@@ -36,6 +36,7 @@ of that wedge.
   - latest assistant answer
   - likely open question
   - suggested next prompt
+- Suggested next prompts and restart cards can be printed directly from the browser.
 
 ---
 
@@ -66,7 +67,7 @@ Why it matters:
 - The user wants to reopen `the Pokpok brief work`, not `session abc123`
 
 ### Phase 3 — Best next prompt
-**Status:** next
+**Status:** in progress
 
 Generate a deterministic continuation prompt from local state.
 

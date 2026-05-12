@@ -248,7 +248,7 @@ def test_parse_fzf_output_handles_print_query_safe_marker():
         f"pokpok\nSAFE:\n{row}\n",
         "claude",
     )
-    assert parsed == (row, "claude", False, "pokpok")
+    assert parsed == (row, "claude", "open_safe", "pokpok")
 
 
 def test_parse_fzf_output_handles_print_query_default_accept():
@@ -257,7 +257,25 @@ def test_parse_fzf_output_handles_print_query_default_accept():
         f"claude browse\n{row}\n",
         "claude",
     )
-    assert parsed == (row, "claude", True, "claude browse")
+    assert parsed == (row, "claude", "open_yolo", "claude browse")
+
+
+def test_parse_fzf_output_handles_print_query_prompt_marker():
+    row = "match ###abc-123###/home/alice/proj###claude"
+    parsed = browse._parse_fzf_output(
+        f"pokpok\nPROMPT:\n{row}\n",
+        "claude",
+    )
+    assert parsed == (row, "claude", "print_prompt", "pokpok")
+
+
+def test_parse_fzf_output_handles_print_query_brief_marker():
+    row = "match ###abc-123###/home/alice/proj###claude"
+    parsed = browse._parse_fzf_output(
+        f"pokpok\nBRIEF:\n{row}\n",
+        "claude",
+    )
+    assert parsed == (row, "claude", "print_brief", "pokpok")
 
 
 def test_open_in_target_provider_native_resume_when_source_matches_target(

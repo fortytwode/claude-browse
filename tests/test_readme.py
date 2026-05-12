@@ -24,6 +24,8 @@ def test_readme_documents_target_app_browsers():
     assert "Cross-provider open is not a true native resume." in text
     assert "Resume software work across Claude Code" in text
     assert "restart card" in text.lower()
+    assert "Ctrl-Y" in text
+    assert "Ctrl-B" in text
 
 
 def test_readme_no_longer_documents_removed_browser_shortcuts():
