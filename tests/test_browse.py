@@ -83,6 +83,33 @@ def test_parse_target_provider_allows_override():
     assert remaining == ["--all"]
 
 
+def test_parse_fzf_output_handles_print_query_safe_marker():
+    row = "match ###abc-123###/home/alice/proj###claude"
+    parsed = browse._parse_fzf_output(
+        f"pokpok\nSAFE:\n{row}\n",
+        "claude",
+    )
+    assert parsed == (row, "claude", False, "pokpok")
+
+
+def test_parse_fzf_output_handles_print_query_xapp_marker():
+    row = "match ###abc-123###/home/alice/proj###claude"
+    parsed = browse._parse_fzf_output(
+        f"pokpok\nXAPP:\n{row}\n",
+        "claude",
+    )
+    assert parsed == (row, "codex", False, "pokpok")
+
+
+def test_parse_fzf_output_handles_print_query_default_accept():
+    row = "match ###abc-123###/home/alice/proj###codex"
+    parsed = browse._parse_fzf_output(
+        f"claude browse\n{row}\n",
+        "claude",
+    )
+    assert parsed == (row, "claude", True, "claude browse")
+
+
 def test_open_in_target_provider_native_resume_when_source_matches_target(
     monkeypatch,
 ):

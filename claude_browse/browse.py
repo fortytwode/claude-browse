@@ -435,6 +435,50 @@ def _open_in_target_provider(
     )
 
 
+def _parse_fzf_output(
+    output: str,
+    target_provider: str,
+) -> tuple[str, str, bool, str] | None:
+    text = output.strip()
+    if not text:
+        return None
+
+    lines = [line for line in text.split("\n") if line]
+    if not lines:
+        return None
+
+    # fzf --print-query prints the query first. ctrl-s / ctrl-x add a separate
+    # marker line via print(...)+accept before the selected row.
+    selection_query = lines[0]
+    marker = ""
+    row_lines = lines[1:]
+
+    if row_lines and row_lines[0] in {"SAFE:", "XAPP:"}:
+        marker = row_lines.pop(0)
+    elif selection_query.startswith(("SAFE:", "XAPP:")):
+        original = selection_query
+        marker = selection_query[:5]
+        selection_query = ""
+        row_lines = [original[5:]] + row_lines
+
+    selected_target = target_provider
+    yolo = True
+    if marker == "SAFE:":
+        yolo = False
+    elif marker == "XAPP:":
+        selected_target = _other_target_provider(target_provider)
+        yolo = False
+
+    row = next((line for line in reversed(row_lines) if "###" in line), "")
+    if not row and "###" in selection_query:
+        row = selection_query
+        selection_query = ""
+
+    if not row or "###" not in row:
+        return None
+    return row, selected_target, yolo, selection_query
+
+
 def main() -> None:
     target_provider, args = _parse_target_provider(sys.argv[1:], sys.argv[0])
 
@@ -549,34 +593,11 @@ def main() -> None:
         if result.returncode != 0:
             sys.exit(0)
 
-        output = result.stdout.strip()
-        if not output or "###" not in output:
+        parsed = _parse_fzf_output(result.stdout, target_provider)
+        if not parsed:
             sys.exit(0)
 
-        action = "native"
-        selected_target = target_provider
-        yolo = True
-        if output.startswith("SAFE:"):
-            action = "target"
-            selected_target = target_provider
-            yolo = False
-            output = output[5:]
-        elif output.startswith("XAPP:"):
-            action = "target"
-            selected_target = alternate_target
-            yolo = False
-            output = output[5:]
-        else:
-            action = "target"
-            selected_target = target_provider
-
-        output_lines = output.strip().split("\n")
-        selection_query = output_lines[0] if output_lines else ""
-        if len(output_lines) > 1:
-            if "###" in output_lines[-1]:
-                output = output_lines[-1]
-            else:
-                output = next((line for line in reversed(output_lines) if "###" in line), "")
+        output, selected_target, yolo, selection_query = parsed
 
         parts = output.split("###")
         session_id = parts[1].strip() if len(parts) >= 2 else ""
@@ -599,17 +620,16 @@ def main() -> None:
             sys.exit(1)
 
         os.chdir(cwd)
-        if action == "target":
-            _open_in_target_provider(
-                session,
-                provider,
-                selected_target,
-                session_id,
-                cwd,
-                prefixes,
-                yolo,
-                selection_query,
-            )
+        _open_in_target_provider(
+            session,
+            provider,
+            selected_target,
+            session_id,
+            cwd,
+            prefixes,
+            yolo,
+            selection_query,
+        )
 
     finally:
         for path in (preview_script.name, search_script.name):
