@@ -38,7 +38,7 @@ jobs:
       - name: Smoke-test entry points
         run: |
           claude-browse --help
-          claude-resume --help || true  # exits 1 when no args, that's fine
+          codex-browse --help
 
   shim-smoke:
     name: Direct-script shim works (no pip install)
@@ -53,9 +53,9 @@ jobs:
 
       - name: Run shims directly
         run: |
-          chmod +x ./claude-browse ./claude-resume
+          chmod +x ./claude-browse ./codex-browse
           ./claude-browse --help
-          ./claude-resume --help || true
+          ./codex-browse --help
 
       - name: install.sh dry-run check
         run: bash -n install.sh

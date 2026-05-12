@@ -1,9 +1,7 @@
 """README regression checks for documented browser behavior."""
-
 from __future__ import annotations
 
 from pathlib import Path
-
 
 README = Path(__file__).resolve().parents[1] / "README.md"
 
