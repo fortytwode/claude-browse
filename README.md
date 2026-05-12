@@ -97,7 +97,7 @@ claude-resume <keyword>                # search sessions, pick, resume
 claude-resume --last [N]               # pick from N most recent (default 10)
 claude-resume --yolo <keyword>         # resume with skip-permissions
 claude-resume --here <keyword>         # only sessions from current dir
-claude-resume <kw> -- --model sonnet   # extra flags passed through to claude
+claude-resume <kw> -- --model sonnet   # extra flags passed through to the source app
 ```
 
 Useful when you remember a keyword from the conversation and don't want to
