@@ -54,6 +54,52 @@ _CLOSEOUT_CUE_WEIGHTS = {
     "finalise": 1.0,
     "final": 0.75,
 }
+_SELF_REFERENTIAL_CUES = (
+    "claude-browse",
+    "claude browse",
+    "codex-browse",
+    "codex browse",
+    "find the thread",
+    "session not found",
+    "typesense",
+)
+_IMPORTED_SESSION_CUES = (
+    "continue the imported claude session context",
+    "treat it as prior conversation state",
+    "claude_browse_import_",
+    "/var/folders/",
+)
+_AUTOMATION_CUES = (
+    "automated fix agent",
+    "cloud_run_job",
+    "cloud run job",
+    "auto-retry",
+    "data freshness",
+    "data_freshness",
+)
+_PLANNING_CUES = (
+    "daily standup",
+    "weekly review",
+    "reflections for tomorrow",
+    "working on today",
+    "what got done yesterday",
+    "morning briefing",
+)
+_HANDOVER_ARTIFACT_CUES = (
+    "session handover",
+    "session_handover",
+    "use git rigorously; commit per logical change",
+    "run the qa scripts",
+)
+_SEARCH_SYSTEM_QUERY_CUES = (
+    "claude-browse",
+    "codex-browse",
+    "browse",
+    "search",
+    "ranker",
+    "sqlite",
+    "typesense",
+)
 
 
 def open_db(path: str = DB_PATH) -> sqlite3.Connection:
@@ -682,6 +728,71 @@ def _decorate_match_metadata(
     return decorated
 
 
+def _contains_any(text: str, cues: tuple[str, ...]) -> bool:
+    return any(cue in text for cue in cues)
+
+
+def _query_mentions_search_system(query: str) -> bool:
+    lowered = query.lower()
+    return _contains_any(lowered, _SEARCH_SYSTEM_QUERY_CUES)
+
+
+def _metadata_anchor_score(row: dict, plan: QueryPlan) -> float:
+    anchors = [term for term in plan.anchor_terms if term]
+    if not anchors:
+        return 0.0
+    fields = (
+        (str(row.get("name") or "").lower(), 3.0),
+        (str(row.get("cwd") or "").lower(), 2.0),
+        (str(row.get("first_msg") or "").lower(), 2.5),
+        (str(row.get("last_msg") or "").lower(), 1.5),
+    )
+    score = 0.0
+    matched_anchors: set[str] = set()
+    for anchor in anchors:
+        parts = [part for part in anchor.lower().split() if part]
+        if not parts:
+            continue
+        for text, weight in fields:
+            if anchor.lower() in text:
+                score += weight
+                matched_anchors.add(anchor)
+            elif len(parts) > 1 and all(part in text for part in parts):
+                score += weight * 0.75
+                matched_anchors.add(anchor)
+    return score + (4.0 * len(matched_anchors))
+
+
+def _artifact_penalty(row: dict, plan: QueryPlan, query: str) -> float:
+    haystack = " ".join(
+        part
+        for part in (
+            row.get("name") or "",
+            row.get("cwd") or "",
+            row.get("first_msg") or "",
+            row.get("last_msg") or "",
+            row.get("context") or "",
+        )
+        if part
+    ).lower()
+    penalty = 0.0
+    if _contains_any(haystack, _IMPORTED_SESSION_CUES):
+        penalty += 8.0
+    if _contains_any(haystack, _SELF_REFERENTIAL_CUES) and not _query_mentions_search_system(query):
+        penalty += 6.0
+    if _contains_any(haystack, _AUTOMATION_CUES) and "automation" not in query.lower():
+        penalty += 4.0
+    if _contains_any(haystack, _HANDOVER_ARTIFACT_CUES) and "handover" not in query.lower():
+        penalty += 6.0
+    if _contains_any(haystack, _PLANNING_CUES) and (
+        plan.wants_closeout
+        or "feedback" in plan.normalized_terms
+        or "performance" in plan.normalized_terms
+    ):
+        penalty += 3.0
+    return penalty
+
+
 def _load_sessions_by_ids(
     conn: sqlite3.Connection,
     sids: list[str],
@@ -884,6 +995,12 @@ def search_ranked(
         )
         age = _age_days(relevant_ts, now)
         recency = math.exp(-age / half_life_days) if age >= 0 else 0.0
+        row["_metadata_anchor_score"] = _metadata_anchor_score(row, plan)
+        row["_artifact_penalty"] = _artifact_penalty(row, plan, query)
+        row["_quality_score"] = (
+            float(row.get("_metadata_anchor_score") or 0.0)
+            - float(row.get("_artifact_penalty") or 0.0)
+        )
         row["_score"] = float(row.get("_bm25") or 0.0) + recency_alpha * recency
         lifecycle_source = " ".join(
             part
@@ -902,10 +1019,12 @@ def search_ranked(
                 for cue, weight in _CLOSEOUT_CUE_WEIGHTS.items()
                 if cue in lifecycle_source.lower()
             ) * 0.5
+        row["_score"] += float(row.get("_quality_score") or 0.0)
 
     if plan.descriptive and plan.wants_closeout:
         decorated.sort(
             key=lambda row: (
+                float(row.get("_quality_score") or 0.0),
                 float(row.get("_closeout_score") or 0.0),
                 int(row.get("match_term_count") or 0),
                 _timestamp_sort_key(
@@ -926,6 +1045,7 @@ def search_ranked(
         decorated.sort(
             key=lambda row: (
                 int(row.get("match_term_count") or 0),
+                float(row.get("_quality_score") or 0.0),
                 1 if row.get("_assistant_bonus") else 0,
                 _timestamp_sort_key(
                     row.get("match_timestamp")
@@ -946,6 +1066,7 @@ def search_ranked(
         decorated.sort(
             key=lambda row: (
                 int(row.get("match_term_count") or 0),
+                float(row.get("_quality_score") or 0.0),
                 float(row.get("match_conversation_score") or 0.0),
                 _timestamp_sort_key(
                     row.get("match_timestamp")
@@ -970,6 +1091,9 @@ def search_ranked(
         clean.pop("_match_bm25", None)
         clean.pop("_assistant_bonus", None)
         clean.pop("_closeout_score", None)
+        clean.pop("_metadata_anchor_score", None)
+        clean.pop("_artifact_penalty", None)
+        clean.pop("_quality_score", None)
         trimmed.append(clean)
     return trimmed
 

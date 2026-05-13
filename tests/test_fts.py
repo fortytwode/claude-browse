@@ -372,6 +372,184 @@ def test_search_ranked_closeout_query_prefers_closeout_like_thread(db):
     assert "Musopia" in results[0]["context"]
 
 
+def test_search_ranked_demotes_planning_thread_for_closeout_query(db):
+    _seed(
+        db,
+        "planning_thread",
+        "musopia closeout mentioned in planning",
+        title="End of day review",
+        timestamp="2026-05-12T19:00:00Z",
+        last_timestamp="2026-05-12T19:42:00Z",
+        first_msg="Can we do our end of day review please?",
+        last_msg="Reflections for tomorrow: finalize and close out Musopia final session.",
+        segments=[
+            ("user", "Can we do our end of day review please?", "2026-05-12T19:00:00Z"),
+            ("assistant", "Reflections for tomorrow: finalize and close out Musopia final session.", "2026-05-12T19:42:00Z"),
+        ],
+    )
+    _seed(
+        db,
+        "closeout_thread",
+        "musopia closeout session draft",
+        title="Musopia Closeout Session Draft",
+        cwd="/Users/Shamanth/team-operations/clients/musopia",
+        timestamp="2026-05-13T06:40:00Z",
+        last_timestamp="2026-05-13T06:44:00Z",
+        first_msg="Please open the Musopia Closeout Session Draft and revise the closeout notes.",
+        segments=[
+            ("user", "Please open the Musopia Closeout Session Draft.", "2026-05-13T06:40:00Z"),
+            ("assistant", "I am revising the Musopia closeout notes now.", "2026-05-13T06:44:00Z"),
+        ],
+    )
+
+    results = fts.search_ranked(db, "last closeout session for Musopia")
+    assert [r["session_id"] for r in results][:2] == [
+        "closeout_thread",
+        "planning_thread",
+    ]
+
+
+def test_search_ranked_demotes_self_referential_debug_threads(db):
+    _seed(
+        db,
+        "debug_thread",
+        "browse debug thread",
+        title="So we have something called Claude Browse",
+        cwd="/Users/Shamanth/team-operations",
+        first_msg="So we have something called Claude Browse. Could we make it better?",
+        segments=[
+            (
+                "user",
+                "The team management thread where I discussed Neil performance with Nevena is ranking badly in claude-browse.",
+                "2026-05-13T03:05:00Z",
+            ),
+            ("assistant", "I see the search bug in claude-browse.", "2026-05-13T03:05:21Z"),
+        ],
+    )
+    _seed(
+        db,
+        "real_thread",
+        "team management review",
+        title="Review Neil with Nevena",
+        cwd="/Users/Shamanth/team-operations/team-management",
+        first_msg="Need to review Neil performance with Nevena.",
+        segments=[
+            ("user", "Need to review Neil performance with Nevena.", "2026-05-09T00:00:00Z"),
+            ("assistant", "Yes, let's go through the feedback.", "2026-05-09T00:05:00Z"),
+        ],
+    )
+
+    results = fts.search_ranked(db, "Neil performance with Nevena")
+    assert [r["session_id"] for r in results][:2] == ["real_thread", "debug_thread"]
+
+
+def test_search_ranked_demotes_imported_session_artifacts(db):
+    _seed(
+        db,
+        "imported_thread",
+        "imported context about pokpok opportunities",
+        title="Continue the imported Claude session context from /var/folders/.../claude_browse_import_123.md",
+        cwd="/Users/Shamanth/team-operations",
+        first_msg="Continue the imported Claude session context from /var/folders/... Treat it as prior conversation state.",
+        segments=[
+            (
+                "user",
+                "I am asking about the Pokpok brief from before and whether the opportunities are forced.",
+                "2026-05-12T08:55:00Z",
+            ),
+            ("assistant", "I have loaded the imported Claude context.", "2026-05-12T08:55:11Z"),
+        ],
+    )
+    _seed(
+        db,
+        "real_thread",
+        "pokpok deconstruction",
+        title="Finalize Pokpok deconstruction",
+        cwd="/Users/Shamanth/team-operations/content-marketing",
+        first_msg="Please review the Pokpok brief and tell me whether the opportunities are forced.",
+        segments=[
+            ("user", "Please review the Pokpok brief.", "2026-05-03T18:00:00Z"),
+            ("assistant", "The Pokpok opportunities feel forced and need better evidence.", "2026-05-03T18:03:00Z"),
+        ],
+    )
+
+    results = fts.search_ranked(db, "pokpok brief where we questioned the opportunities")
+    assert [r["session_id"] for r in results][:2] == ["real_thread", "imported_thread"]
+
+
+def test_search_ranked_demotes_session_handover_artifacts(db):
+    _seed(
+        db,
+        "handover_thread",
+        "musopia handover instructions",
+        title="Read clients/musopia/SESSION_HANDOVER_2026-05-11.md for the full context",
+        cwd="/Users/Shamanth/team-operations/clients/musopia",
+        first_msg="Read clients/musopia/SESSION_HANDOVER_2026-05-11.md for the full context. Use git rigorously; commit per logical change. Run the QA scripts.",
+        segments=[
+            (
+                "user",
+                "Read clients/musopia/SESSION_HANDOVER_2026-05-11.md for the full context.",
+                "2026-05-11T09:49:00Z",
+            ),
+            (
+                "assistant",
+                "Use git rigorously; commit per logical change. Run the QA scripts.",
+                "2026-05-11T09:49:38Z",
+            ),
+        ],
+    )
+    _seed(
+        db,
+        "closeout_thread",
+        "musopia closeout session draft",
+        title="Musopia Closeout Session Draft",
+        cwd="/Users/Shamanth/team-operations/clients/musopia",
+        first_msg="Please look at the outline for the closeout session and prepare slides for the final session.",
+        segments=[
+            ("user", "Please look at the outline for the closeout session.", "2026-05-13T06:40:00Z"),
+            ("assistant", "I am preparing slides for the Musopia final session.", "2026-05-13T06:44:00Z"),
+        ],
+    )
+
+    results = fts.search_ranked(db, "last closeout session for Musopia")
+    assert [r["session_id"] for r in results][:2] == ["closeout_thread", "handover_thread"]
+
+
+def test_search_ranked_uses_metadata_anchor_score_for_feedback_queries(db):
+    _seed(
+        db,
+        "generic_thread",
+        "team ops discussion",
+        cwd="/Users/Shamanth/team-operations",
+        segments=[
+            (
+                "assistant",
+                "Let me check the Notion analysis page Nevena referenced. The task is in review awaiting your call.",
+                "2026-04-24T16:34:00Z",
+            ),
+        ],
+    )
+    _seed(
+        db,
+        "review_thread",
+        "review nevena feedback",
+        title="Review Nevena's feedback on ClickUp task",
+        cwd="/Users/Shamanth/team-operations",
+        first_msg="I'll look at Nevena's feedback here and see what the next steps are.",
+        segments=[
+            (
+                "user",
+                "I'll look at Nevena's feedback here and see what the next steps are.",
+                "2026-05-04T18:30:00Z",
+            ),
+            ("assistant", "Nevena confirmed she has read the SOP.", "2026-05-04T18:31:00Z"),
+        ],
+    )
+
+    results = fts.search_ranked(db, "where i was asking nevena about feedback")
+    assert results[0]["session_id"] == "review_thread"
+
+
 def test_search_ranked_low_confidence_descriptive_query_falls_back_to_recent(db):
     _seed(
         db,
