@@ -550,6 +550,33 @@ def test_search_ranked_uses_metadata_anchor_score_for_feedback_queries(db):
     assert results[0]["session_id"] == "review_thread"
 
 
+def test_search_ranked_metadata_anchor_score_downweights_very_late_prompt_mentions(db):
+    _seed(
+        db,
+        "late_prompt_thread",
+        "mixed thread",
+        title=("Filler " * 4000) + " pokpok",
+        first_msg="General project planning without the target brand.",
+        segments=[
+            ("assistant", "One passing mention of Pokpok inside a giant pasted prompt.", "2026-05-10T00:00:00Z"),
+        ],
+    )
+    _seed(
+        db,
+        "real_thread",
+        "pokpok deconstruction review",
+        title="Finalize Pokpok deconstruction",
+        first_msg="Please review the Pokpok brief.",
+        segments=[
+            ("user", "Please review the Pokpok brief.", "2026-05-09T00:00:00Z"),
+            ("assistant", "Yes, the Pokpok brief needs work.", "2026-05-09T00:05:00Z"),
+        ],
+    )
+
+    results = fts.search_ranked(db, "pokpok")
+    assert results[0]["session_id"] == "real_thread"
+
+
 def test_search_ranked_low_confidence_descriptive_query_falls_back_to_recent(db):
     _seed(
         db,

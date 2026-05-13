@@ -749,18 +749,26 @@ def _metadata_anchor_score(row: dict, plan: QueryPlan) -> float:
     )
     score = 0.0
     matched_anchors: set[str] = set()
+
+    def _position_bonus(pos: int) -> float:
+        if pos < 0:
+            return 0.0
+        return 1.0 / (1.0 + (pos / 500.0))
+
     for anchor in anchors:
         parts = [part for part in anchor.lower().split() if part]
         if not parts:
             continue
         for text, weight in fields:
-            if anchor.lower() in text:
-                score += weight
+            pos = text.find(anchor.lower())
+            if pos >= 0:
+                score += weight * _position_bonus(pos)
                 matched_anchors.add(anchor)
             elif len(parts) > 1 and all(part in text for part in parts):
-                score += weight * 0.75
+                pos = min(text.find(part) for part in parts)
+                score += weight * 0.75 * _position_bonus(pos)
                 matched_anchors.add(anchor)
-    return score + (4.0 * len(matched_anchors))
+    return score + (1.5 * len(matched_anchors))
 
 
 def _artifact_penalty(row: dict, plan: QueryPlan, query: str) -> float:
