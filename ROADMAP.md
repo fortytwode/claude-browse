@@ -42,6 +42,8 @@ of that wedge.
   - suggested next prompt
   - reusable handoff brief
   - concise status update
+- Query-active result rows now show short rationale tags like `feedback`,
+  `critique`, `closeout`, and `older topic` before you open preview.
 - Natural-language thread description is now the primary query model:
   - descriptive `find the thread where...` inputs
   - ranking by most recent relevant mention
@@ -170,6 +172,7 @@ Current manual test gate:
 
 Next gated build after testing:
 - better artifact formatting and downstream integrations
+- richer result-list UI polish if row-level rationale still feels too opaque
 - only after that, reconsider `Task View` if real usage proves thread clustering is the actual problem
 
 ---

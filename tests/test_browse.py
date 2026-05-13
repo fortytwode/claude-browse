@@ -81,6 +81,35 @@ def test_format_row_shows_match_recency_and_thread_activity_when_query_active():
     assert "active" in row
 
 
+def test_format_row_shows_feedback_reason_tag_for_descriptive_query():
+    info = _info(
+        context="Nevena feedback summary for the ClickUp task",
+        match_intent_score=6.0,
+    )
+    row = format_row(info, query="where i was asking nevena about feedback")
+    assert "feedback" in row
+
+
+def test_format_row_shows_critique_reason_tag_for_opportunity_query():
+    info = _info(
+        context="The opportunities feel forced and need better evidence",
+        match_intent_score=5.0,
+    )
+    row = format_row(info, query="pokpok brief where we questioned the opportunities")
+    assert "critique" in row
+
+
+def test_format_row_shows_older_topic_tag_when_match_is_not_latest_activity():
+    info = _info(
+        context="pokpok brief",
+        timestamp="2026-05-01T10:00:00Z",
+        last_timestamp="2026-05-10T10:00:00Z",
+        match_timestamp="2026-05-02T10:00:00Z",
+    )
+    row = format_row(info, query="pokpok")
+    assert "older topic" in row
+
+
 def test_format_row_prioritizes_match_context_when_query_active():
     info = _info(
         name="Weekly Creator Briefs for MaxRewards",

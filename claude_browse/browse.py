@@ -36,6 +36,33 @@ DEFAULT_LIMIT = 100
 ROW_META_SEP = "\x1f"
 COACH_SESSION_ID = "__coach__"
 COACH_PROVIDER = "coach"
+_UI_CRITIQUE_TERMS = frozenset(
+    {
+        "critique",
+        "critical",
+        "evidence",
+        "forced",
+        "opportunities",
+        "opportunity",
+        "question",
+        "questioned",
+        "questioning",
+        "skeptic",
+        "skeptical",
+    }
+)
+_UI_FEEDBACK_TERMS = frozenset(
+    {
+        "comment",
+        "comments",
+        "feedback",
+        "note",
+        "notes",
+        "review",
+        "reviews",
+    }
+)
+_UI_REVIEW_TERMS = frozenset({"performance"})
 
 
 def _encode_row_metadata(
@@ -161,6 +188,41 @@ def _folder_prefixes() -> tuple[str, ...]:
     return tuple(p.strip() for p in raw.split(":") if p.strip())
 
 
+def _match_reason_tags(
+    info: dict,
+    query: str,
+    match_date: str,
+    thread_date: str,
+) -> list[str]:
+    if not query.strip():
+        return []
+
+    plan = build_query_plan(query)
+    tags: list[str] = []
+    normalized = set(plan.normalized_terms)
+    intent_score = float(info.get("match_intent_score") or 0.0) - float(
+        info.get("match_mismatch_penalty") or 0.0
+    )
+
+    if plan.wants_closeout and float(info.get("match_lifecycle_score") or 0.0) > 0:
+        tags.append("closeout")
+    elif intent_score > 0 and normalized & _UI_FEEDBACK_TERMS:
+        tags.append("feedback")
+    elif intent_score > 0 and normalized & _UI_CRITIQUE_TERMS:
+        tags.append("critique")
+    elif (
+        intent_score > 0
+        and normalized & _UI_REVIEW_TERMS
+        and any(term not in _UI_REVIEW_TERMS for term in plan.anchor_terms)
+    ):
+        tags.append("review")
+
+    if info.get("match_timestamp") and match_date != thread_date:
+        tags.append("older topic")
+
+    return tags[:2]
+
+
 def format_row(
     info: dict, query: str = "", prefixes: tuple[str, ...] = ()
 ) -> str:
@@ -205,7 +267,10 @@ def format_row(
             .replace(ROW_META_SEP, " ")
         )
         body = f"\033[2m→ {snippet}\033[0m"
+        reason_tags = _match_reason_tags(info, query, date, thread_date)
         meta_parts: list[str] = []
+        if reason_tags:
+            meta_parts.append(" · ".join(reason_tags))
         if title:
             meta_parts.append(title[:30])
         if query_active and info.get("match_timestamp") and date != thread_date:
