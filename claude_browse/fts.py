@@ -173,6 +173,17 @@ _CODE_REFERENCE_WINDOW_CUES = (
 )
 
 
+def _normalized_path_segments(path: str | None) -> list[str]:
+    if not path:
+        return []
+    segments: list[str] = []
+    for part in str(path).split("/"):
+        cleaned = re.sub(r"[^a-z0-9]+", "", part.lower())
+        if cleaned:
+            segments.append(cleaned)
+    return segments
+
+
 def _query_wants_critique(plan: QueryPlan) -> bool:
     return any(term in _CRITIQUE_QUERY_TERMS for term in plan.normalized_terms)
 
@@ -919,6 +930,21 @@ def _metadata_anchor_score(row: dict, plan: QueryPlan) -> float:
     return score + (1.5 * len(matched_anchors))
 
 
+def _workspace_anchor_score(row: dict, plan: QueryPlan) -> float:
+    anchors = [term.strip(".*").lower() for term in _semantic_anchor_terms(plan) if term]
+    if len(anchors) != 1:
+        return 0.0
+    anchor = anchors[0]
+    segments = _normalized_path_segments(str(row.get("cwd") or ""))
+    if not segments:
+        return 0.0
+    if anchor == segments[-1]:
+        return 6.0
+    if anchor in segments:
+        return 3.0
+    return 0.0
+
+
 def _artifact_penalty(row: dict, plan: QueryPlan, query: str) -> float:
     haystack = " ".join(
         part
@@ -1163,12 +1189,14 @@ def search_ranked(
         age = _age_days(relevant_ts, now)
         recency = math.exp(-age / half_life_days) if age >= 0 else 0.0
         row["_metadata_anchor_score"] = _metadata_anchor_score(row, plan)
+        row["_workspace_match_score"] = _workspace_anchor_score(row, plan)
         row["_artifact_penalty"] = _artifact_penalty(row, plan, query)
         row["_semantic_intent_score"] = float(
             row.get("match_intent_score") or 0.0
         ) - float(row.get("match_mismatch_penalty") or 0.0)
         row["_quality_score"] = (
-            float(row.get("_metadata_anchor_score") or 0.0)
+            float(row.get("_workspace_match_score") or 0.0)
+            + float(row.get("_metadata_anchor_score") or 0.0)
             + float(row.get("_semantic_intent_score") or 0.0)
             - float(row.get("_artifact_penalty") or 0.0)
         )
@@ -1215,6 +1243,7 @@ def search_ranked(
     elif len(terms) == 1:
         decorated.sort(
             key=lambda row: (
+                float(row.get("_workspace_match_score") or 0.0),
                 int(row.get("match_term_count") or 0),
                 float(row.get("_quality_score") or 0.0),
                 1 if row.get("_assistant_bonus") else 0,
@@ -1265,6 +1294,7 @@ def search_ranked(
         clean.pop("_assistant_bonus", None)
         clean.pop("_closeout_score", None)
         clean.pop("_metadata_anchor_score", None)
+        clean.pop("_workspace_match_score", None)
         clean.pop("_artifact_penalty", None)
         clean.pop("_quality_score", None)
         trimmed.append(clean)

@@ -188,6 +188,17 @@ def _folder_prefixes() -> tuple[str, ...]:
     return tuple(p.strip() for p in raw.split(":") if p.strip())
 
 
+def _normalized_path_segments(path: str | None) -> list[str]:
+    if not path:
+        return []
+    segments: list[str] = []
+    for part in str(path).split("/"):
+        cleaned = "".join(ch for ch in part.lower() if ch.isalnum())
+        if cleaned:
+            segments.append(cleaned)
+    return segments
+
+
 def _match_reason_tags(
     info: dict,
     query: str,
@@ -203,6 +214,20 @@ def _match_reason_tags(
     intent_score = float(info.get("match_intent_score") or 0.0) - float(
         info.get("match_mismatch_penalty") or 0.0
     )
+    single_anchor = len(plan.anchor_terms) == 1
+    if single_anchor:
+        anchor = str(plan.anchor_terms[0]).strip(".*").lower()
+        cwd_segments = _normalized_path_segments(info.get("cwd"))
+        title_text = str(info.get("name") or "").lower()
+        opening_text = str(info.get("first_msg") or "").lower()
+        if anchor and anchor == (cwd_segments[-1] if cwd_segments else None):
+            tags.append("folder match")
+        elif anchor and anchor in title_text:
+            tags.append("title match")
+        elif anchor and anchor in opening_text:
+            tags.append("opening match")
+        elif anchor:
+            tags.append("mentioned in thread")
 
     if plan.wants_closeout and float(info.get("match_lifecycle_score") or 0.0) > 0:
         tags.append("closeout")
@@ -220,7 +245,11 @@ def _match_reason_tags(
     if info.get("match_timestamp") and match_date != thread_date:
         tags.append("older topic")
 
-    return tags[:2]
+    deduped: list[str] = []
+    for tag in tags:
+        if tag not in deduped:
+            deduped.append(tag)
+    return deduped[:2]
 
 
 def format_row(

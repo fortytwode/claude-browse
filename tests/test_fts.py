@@ -692,6 +692,36 @@ def test_search_ranked_plain_entity_query_demotes_code_reference_mentions(db):
     assert results[0]["session_id"] == "real_thread"
 
 
+def test_search_ranked_single_anchor_workspace_match_beats_incidental_mention(db):
+    _seed(
+        db,
+        "workspace_thread",
+        "workspace thread",
+        cwd="/Users/Shamanth/tiktoker",
+        title="Verify Maxrewards automation health check issue",
+        first_msg="Investigate the latest automation issue in this repo.",
+        last_msg="Still working in the local repo.",
+        fts_cwd="/Users/Shamanth/tiktoker",
+        segments=[
+            ("user", "Investigate the latest automation issue in this repo.", "2026-05-10T00:00:00Z"),
+        ],
+    )
+    _seed(
+        db,
+        "incidental_thread",
+        "incidental mention",
+        cwd="/Users/Shamanth/team-operations",
+        title="Review Immutable audit and consolidate findings",
+        first_msg="AppsFlyer Search Ads API check (Tiktoker context).",
+        segments=[
+            ("assistant", "AppsFlyer Search Ads API check (Tiktoker context).", "2026-05-11T00:00:00Z"),
+        ],
+    )
+
+    results = fts.search_ranked(db, "tiktoker")
+    assert results[0]["session_id"] == "workspace_thread"
+
+
 def test_search_ranked_descriptive_single_anchor_query_demotes_code_reference_mentions(db):
     _seed(
         db,

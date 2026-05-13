@@ -42,7 +42,8 @@ of that wedge.
   - suggested next prompt
   - reusable handoff brief
   - concise status update
-- Query-active result rows now show short rationale tags like `feedback`,
+- Query-active result rows now show short rationale tags like `folder match`,
+  `title match`, `opening match`, `mentioned in thread`, `feedback`,
   `critique`, `closeout`, and `older topic` before you open preview.
 - Natural-language thread description is now the primary query model:
   - descriptive `find the thread where...` inputs

@@ -116,7 +116,7 @@ Examples:
 - The UI is meant to encourage sentence-style recall, not one- or two-word pecking. You should feel comfortable typing a short description like `where i was asking nevena about feedback`.
 - The picker now shows an interpreted-query tip row at the top, for example `Looking for: musopia + closeout` or `Looking for threads about: pokpok`.
 - If your query is too vague, the picker tells you to add one anchor like a person, client, brand, or folder instead of pretending the search is confident.
-- Result rows now show short why-this-matched tags like `feedback`, `critique`, `closeout`, or `older topic` so you can trust a hit faster before opening preview.
+- Result rows now show short why-this-matched tags like `folder match`, `title match`, `opening match`, `mentioned in thread`, `feedback`, `critique`, `closeout`, or `older topic` so you can trust a hit faster before opening preview.
 - Descriptive queries are reduced to the most specific anchors under the hood, so `find me the thread where i was asking about nevena feedback` behaves like a thread-recall query, not a hard AND over filler words.
 - Descriptive queries now separate anchor terms from intent words, so `last closeout session for musopia` treats `musopia` as the hard anchor and `last / closeout` as ranking signals instead of weighting every word equally.
 - Descriptive queries now use local concept cues for things like closeout, feedback, critique, and human-performance review, so the ranker can still prefer the right exchange when the exact wording differs.

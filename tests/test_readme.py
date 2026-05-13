@@ -36,6 +36,9 @@ def test_readme_documents_target_app_browsers():
     assert "add one anchor" in text.lower()
     assert "local concept cues" in text.lower()
     assert "why-this-matched tags" in text.lower()
+    assert "folder match" in text
+    assert "opening match" in text
+    assert "mentioned in thread" in text
 
 
 def test_readme_no_longer_documents_removed_browser_shortcuts():

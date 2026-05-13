@@ -90,6 +90,37 @@ def test_format_row_shows_feedback_reason_tag_for_descriptive_query():
     assert "feedback" in row
 
 
+def test_format_row_shows_folder_match_for_single_anchor_workspace_query():
+    info = _info(
+        cwd="/Users/Shamanth/tiktoker",
+        context="tiktoker repo work",
+    )
+    row = format_row(info, query="tiktoker")
+    assert "folder match" in row
+
+
+def test_format_row_shows_opening_match_when_anchor_is_in_first_message():
+    info = _info(
+        cwd="/Users/Shamanth/team-operations",
+        name="Review Immutable audit and consolidate findings",
+        first_msg="AppsFlyer Search Ads API check (Tiktoker context).",
+        context="AppsFlyer Search Ads API check (Tiktoker context).",
+    )
+    row = format_row(info, query="tiktoker")
+    assert "opening match" in row
+
+
+def test_format_row_shows_mentioned_in_thread_when_anchor_is_only_later_context():
+    info = _info(
+        cwd="/Users/Shamanth/team-operations",
+        name="Review Immutable audit and consolidate findings",
+        first_msg="General weekly review",
+        context="AppsFlyer Search Ads API check (Tiktoker context).",
+    )
+    row = format_row(info, query="tiktoker")
+    assert "mentioned in thread" in row
+
+
 def test_format_row_shows_critique_reason_tag_for_opportunity_query():
     info = _info(
         context="The opportunities feel forced and need better evidence",
