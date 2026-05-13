@@ -27,6 +27,26 @@ from .providers import get_provider, provider_entries, provider_ids
 from .work_state import build_work_state, render_restart_card_terminal
 
 DEFAULT_LIMIT = 100
+ROW_META_SEP = "\x1f"
+
+
+def _encode_row_metadata(
+    visible: str,
+    sid: str,
+    cwd: str,
+    provider: str,
+) -> str:
+    return f"{visible}{ROW_META_SEP}{sid}{ROW_META_SEP}{cwd}{ROW_META_SEP}{provider}"
+
+
+def _split_row_metadata(line: str) -> tuple[str, str, str, str] | None:
+    if ROW_META_SEP not in line:
+        return None
+    parts = line.rsplit(ROW_META_SEP, 3)
+    if len(parts) != 4:
+        return None
+    visible, sid, cwd, provider = parts
+    return visible, sid.strip(), cwd.strip(), provider.strip()
 
 
 def _folder_prefixes() -> tuple[str, ...]:
@@ -45,7 +65,7 @@ def format_row(
     """Render one session as a fzf row line.
 
     Layout:
-      `{date} {provider} {fname} {msgs} {title}{suffix}  ###{sid}###{cwd}###{provider}`
+      `{visible}{ROW_META_SEP}{sid}{ROW_META_SEP}{cwd}{ROW_META_SEP}{provider}`
 
     The suffix is FTS5's matched-context snippet when a query is active, or a
     topic-drift hint (latest user message) when the title looks stale.
@@ -58,8 +78,10 @@ def format_row(
     provider = (info.get("provider") or "claude").lower()
     cwd = info.get("cwd")
     fname = folder_name(cwd, prefixes)
-    title = ((info.get("name") or info.get("first_msg") or "")[:60]).replace(
-        "\n", " "
+    title = (
+        ((info.get("name") or info.get("first_msg") or "")[:60])
+        .replace("\n", " ")
+        .replace(ROW_META_SEP, " ")
     )
     sid = info.get("session_id") or "?"
     ffolder = display_cwd(cwd)
@@ -78,6 +100,7 @@ def format_row(
             .replace("\n", " ")
             .replace("\r", " ")
             .replace("\t", " ")
+            .replace(ROW_META_SEP, " ")
         )
         body = f"\033[2m→ {snippet}\033[0m"
         meta_parts: list[str] = []
@@ -90,9 +113,12 @@ def format_row(
             if meta_parts
             else ""
         )
-        return (
-            f"{date:<8} {provider:<6} {fname:<15} {body}{meta}  "
-            f"###{sid}###{ffolder}###{provider}"
+        visible = f"{date:<8} {provider:<6} {fname:<15} {body}{meta}  "
+        return _encode_row_metadata(
+            visible,
+            sid,
+            ffolder,
+            provider,
         )
     else:
         msgs = f"{info.get('msg_count', 0)}msg"
@@ -102,6 +128,7 @@ def format_row(
             .replace("\n", " ")
             .replace("\r", " ")
             .replace("\t", " ")
+            .replace(ROW_META_SEP, " ")
         )
         title_words = {w for w in title.lower().split() if len(w) >= 4}
         last_words = {w for w in last.lower().split() if len(w) >= 4}
@@ -110,9 +137,12 @@ def format_row(
 
     suffix = f"  {' · '.join(suffix_parts)}" if suffix_parts else ""
 
-    return (
-        f"{date:<8} {provider:<6} {fname:<15} {msgs:<7} {title}{suffix}  "
-        f"###{sid}###{ffolder}###{provider}"
+    visible = f"{date:<8} {provider:<6} {fname:<15} {msgs:<7} {title}{suffix}  "
+    return _encode_row_metadata(
+        visible,
+        sid,
+        ffolder,
+        provider,
     )
 
 
@@ -135,6 +165,7 @@ from claude_browse.core import (
 from claude_browse.work_state import build_work_state, render_restart_card_terminal
 
 DB_PATH = {db_path!r}
+ROW_META_SEP = {ROW_META_SEP!r}
 
 
 def _lookup_session(session_id):
@@ -210,9 +241,9 @@ def get_preview(session_id, query=""):
 if __name__ == "__main__":
     line = sys.argv[1] if len(sys.argv) > 1 else ""
     query = sys.argv[2] if len(sys.argv) > 2 else ""
-    if "###" in line:
-        parts = line.split("###")
-        sid = parts[1].strip() if len(parts) >= 2 else ""
+    if ROW_META_SEP in line:
+        parts = line.rsplit(ROW_META_SEP, 3)
+        sid = parts[1].strip() if len(parts) == 4 else ""
         if sid:
             get_preview(sid, query)
 """
@@ -544,12 +575,12 @@ def _parse_fzf_output(
     elif marker == "BRIEF:":
         action = "print_brief"
 
-    row = next((line for line in reversed(row_lines) if "###" in line), "")
-    if not row and "###" in selection_query:
+    row = next((line for line in reversed(row_lines) if ROW_META_SEP in line), "")
+    if not row and ROW_META_SEP in selection_query:
         row = selection_query
         selection_query = ""
 
-    if not row or "###" not in row:
+    if not row or ROW_META_SEP not in row:
         return None
     return row, selected_target, action, selection_query
 
@@ -706,7 +737,7 @@ def main() -> None:
                 "Esc: quit | Shift-Up/Down: scroll preview"
             ),
             "--header-first",
-            "--delimiter=###",
+            f"--delimiter={ROW_META_SEP}",
             "--with-nth=1",
             "--print-query",
             "--disabled",
@@ -736,9 +767,11 @@ def main() -> None:
 
         output, selected_target, action, selection_query = parsed
 
-        parts = output.split("###")
-        session_id = parts[1].strip() if len(parts) >= 2 else ""
-        provider = parts[3].strip() if len(parts) >= 4 else "claude"
+        row_meta = _split_row_metadata(output)
+        if not row_meta:
+            print("Could not parse selected session.", file=sys.stderr)
+            sys.exit(1)
+        _visible, session_id, _cwd_meta, provider = row_meta
 
         session = _load_session_by_id(session_id)
         if not session:

@@ -62,11 +62,12 @@ def test_format_row_strips_newlines_from_last_msg():
 
 
 def test_format_row_keeps_sid_tail_attached():
-    """No matter what's in the suffix, the row ends with ###sid###cwd so
-    fzf's --delimiter=### selection logic finds the sid."""
+    """No matter what's in the suffix, the row ends with hidden metadata."""
     info = _info(context="a\nb\nc\nd")
     row = format_row(info, query="anything")
-    assert row.rstrip().endswith("abc-123###/home/alice/proj###claude")
+    assert row.rstrip().endswith(
+        f"abc-123{browse.ROW_META_SEP}/home/alice/proj{browse.ROW_META_SEP}claude"
+    )
 
 
 def test_format_row_shows_match_recency_and_thread_activity_when_query_active():
@@ -87,6 +88,18 @@ def test_format_row_prioritizes_match_context_when_query_active():
     )
     row = format_row(info, query="nevena feedback")
     assert row.index("Nevena feedback summary") < row.index("Weekly Creator Briefs")
+
+
+def test_format_row_allows_visible_triple_hash_without_breaking_metadata():
+    info = _info(context="### Step 1. Export your ChatGPT history")
+    row = format_row(info, query="chatgpt history")
+    assert "### Step 1. Export your ChatGPT history" in row
+    assert browse._split_row_metadata(row) == (
+        row.split(browse.ROW_META_SEP)[0],
+        "abc-123",
+        "/home/alice/proj",
+        "claude",
+    )
 
 
 def test_default_target_provider_follows_entrypoint_name():
@@ -263,7 +276,10 @@ def test_main_list_providers_prints_without_fzf(monkeypatch, capsys):
 
 
 def test_parse_fzf_output_handles_print_query_safe_marker():
-    row = "match ###abc-123###/home/alice/proj###claude"
+    row = (
+        f"match {browse.ROW_META_SEP}abc-123{browse.ROW_META_SEP}"
+        f"/home/alice/proj{browse.ROW_META_SEP}claude"
+    )
     parsed = browse._parse_fzf_output(
         f"pokpok\nSAFE:\n{row}\n",
         "claude",
@@ -272,7 +288,10 @@ def test_parse_fzf_output_handles_print_query_safe_marker():
 
 
 def test_parse_fzf_output_handles_print_query_default_accept():
-    row = "match ###abc-123###/home/alice/proj###codex"
+    row = (
+        f"match {browse.ROW_META_SEP}abc-123{browse.ROW_META_SEP}"
+        f"/home/alice/proj{browse.ROW_META_SEP}codex"
+    )
     parsed = browse._parse_fzf_output(
         f"claude browse\n{row}\n",
         "claude",
@@ -281,7 +300,10 @@ def test_parse_fzf_output_handles_print_query_default_accept():
 
 
 def test_parse_fzf_output_handles_print_query_prompt_marker():
-    row = "match ###abc-123###/home/alice/proj###claude"
+    row = (
+        f"match {browse.ROW_META_SEP}abc-123{browse.ROW_META_SEP}"
+        f"/home/alice/proj{browse.ROW_META_SEP}claude"
+    )
     parsed = browse._parse_fzf_output(
         f"pokpok\nPROMPT:\n{row}\n",
         "claude",
@@ -290,7 +312,10 @@ def test_parse_fzf_output_handles_print_query_prompt_marker():
 
 
 def test_parse_fzf_output_handles_print_query_topic_marker():
-    row = "match ###abc-123###/home/alice/proj###claude"
+    row = (
+        f"match {browse.ROW_META_SEP}abc-123{browse.ROW_META_SEP}"
+        f"/home/alice/proj{browse.ROW_META_SEP}claude"
+    )
     parsed = browse._parse_fzf_output(
         f"pokpok\nTOPIC:\n{row}\n",
         "claude",
@@ -299,12 +324,29 @@ def test_parse_fzf_output_handles_print_query_topic_marker():
 
 
 def test_parse_fzf_output_handles_print_query_brief_marker():
-    row = "match ###abc-123###/home/alice/proj###claude"
+    row = (
+        f"match {browse.ROW_META_SEP}abc-123{browse.ROW_META_SEP}"
+        f"/home/alice/proj{browse.ROW_META_SEP}claude"
+    )
     parsed = browse._parse_fzf_output(
         f"pokpok\nBRIEF:\n{row}\n",
         "claude",
     )
     assert parsed == (row, "claude", "print_brief", "pokpok")
+
+
+def test_parse_fzf_output_ignores_visible_triple_hash_in_snippet():
+    row = (
+        "Apr 23   claude team-operations "
+        "→ ### Step 1. Export your ChatGPT history"
+        f"{browse.ROW_META_SEP}abc-123{browse.ROW_META_SEP}"
+        f"/home/alice/proj{browse.ROW_META_SEP}claude"
+    )
+    parsed = browse._parse_fzf_output(
+        f"last session from Musopia?\n{row}\n",
+        "codex",
+    )
+    assert parsed == (row, "codex", "open_yolo", "last session from Musopia?")
 
 
 def test_open_in_target_provider_native_resume_when_source_matches_target(
