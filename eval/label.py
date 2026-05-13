@@ -31,8 +31,6 @@ if str(_REPO_ROOT) not in sys.path:
 from claude_browse import fts  # noqa: E402
 from claude_browse.core import folder_name, format_date  # noqa: E402
 
-from eval.rankers import ranker_current  # noqa: E402
-
 DEFAULT_PATH = os.path.expanduser(
     os.environ.get(
         "CLAUDE_BROWSE_EVAL_QUERIES",

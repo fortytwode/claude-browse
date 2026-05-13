@@ -27,7 +27,6 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from claude_browse import fts  # noqa: E402
-
 from eval import metrics  # noqa: E402
 from eval.rankers import RANKERS  # noqa: E402
 
@@ -147,7 +146,7 @@ def print_aggregate(results_by_ranker: dict[str, list[metrics.QueryResult]]) -> 
         if k == "n_queries":
             continue
         row = f"{k:<12}"
-        for r, agg in aggs.items():
+        for _ranker, agg in aggs.items():
             v = agg[k]
             row += f"{v:>12.3f}" if isinstance(v, float) else f"{v:>12}"
         print(row)
