@@ -551,6 +551,83 @@ def test_search_ranked_uses_metadata_anchor_score_for_feedback_queries(db):
     assert results[0]["session_id"] == "review_thread"
 
 
+def test_search_ranked_descriptive_query_uses_semantic_anchor_terms(db):
+    plan = build_query_plan("pokpok brief where we questioned the opportunities")
+    assert fts._semantic_anchor_terms(plan) == ("pokpok",)
+
+
+def test_search_ranked_critique_query_prefers_critique_exchange_context(db):
+    _seed(
+        db,
+        "generic_thread",
+        "pokpok task draft",
+        title="Finalize Pokpok deck",
+        first_msg="Finalize the Pokpok deck and opportunity slides.",
+        segments=[
+            ("user", "Finalize the Pokpok deck and opportunities slides.", "2026-05-08T10:00:00Z"),
+            ("assistant", "Yes, I will finalize the Pokpok opportunities slides.", "2026-05-08T10:05:00Z"),
+        ],
+    )
+    _seed(
+        db,
+        "critique_thread",
+        "pokpok brief review",
+        title="Review Pokpok brief",
+        first_msg="Please review the Pokpok brief.",
+        segments=[
+            ("user", "Please review the Pokpok brief.", "2026-05-09T10:00:00Z"),
+            (
+                "assistant",
+                "The opportunities feel forced and need better evidence.",
+                "2026-05-09T10:05:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(
+        db,
+        "pokpok brief where we questioned the opportunities",
+    )
+    assert results[0]["session_id"] == "critique_thread"
+    assert "forced" in results[0]["context"].lower()
+
+
+def test_search_ranked_performance_review_query_demotes_performance_marketing(db):
+    _seed(
+        db,
+        "marketing_thread",
+        "campaign planning",
+        title="Campaign planning with Neil and Nevena",
+        first_msg="Nevena said we should remove the performance marketing section for Neil.",
+        segments=[
+            (
+                "user",
+                "Nevena said we should remove the performance marketing section for Neil.",
+                "2026-05-08T09:00:00Z",
+            ),
+            ("assistant", "I can update that marketing plan.", "2026-05-08T09:05:00Z"),
+        ],
+    )
+    _seed(
+        db,
+        "review_thread",
+        "neil review",
+        title="Review Neil with Nevena",
+        first_msg="Need to review Neil with Nevena in the next 1:1.",
+        segments=[
+            ("user", "Need to review Neil with Nevena in the next 1:1.", "2026-05-09T09:00:00Z"),
+            (
+                "assistant",
+                "Let's go through his feedback and support plan.",
+                "2026-05-09T09:05:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, "Neil performance with Nevena")
+    assert results[0]["session_id"] == "review_thread"
+
+
 def test_search_ranked_metadata_anchor_score_downweights_very_late_prompt_mentions(db):
     _seed(
         db,
@@ -612,6 +689,44 @@ def test_search_ranked_plain_entity_query_demotes_code_reference_mentions(db):
     assert fts._artifact_penalty(real_row, plan, "pokpok") == 0.0
 
     results = fts.search_ranked(db, "pokpok")
+    assert results[0]["session_id"] == "real_thread"
+
+
+def test_search_ranked_descriptive_single_anchor_query_demotes_code_reference_mentions(db):
+    _seed(
+        db,
+        "code_ref_thread",
+        "artifact thread",
+        title="Prompt audit",
+        first_msg="I pointed Claude at build_pokpok_deck.py to inspect the prompt before changing the opportunities slide.",
+        segments=[
+            (
+                "assistant",
+                "The prompt in build_pokpok_deck.py mentions Pokpok and opportunities repeatedly.",
+                "2026-05-10T00:00:00Z",
+            ),
+        ],
+    )
+    _seed(
+        db,
+        "real_thread",
+        "pokpok deconstruction review",
+        title="Finalize Pokpok deconstruction",
+        first_msg="Please review the Pokpok brief.",
+        segments=[
+            ("user", "Please review the Pokpok brief.", "2026-05-09T00:00:00Z"),
+            (
+                "assistant",
+                "The opportunities feel forced and need better evidence.",
+                "2026-05-09T00:05:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(
+        db,
+        "pokpok brief where we questioned the opportunities",
+    )
     assert results[0]["session_id"] == "real_thread"
 
 

@@ -54,6 +54,67 @@ _CLOSEOUT_CUE_WEIGHTS = {
     "finalise": 1.0,
     "final": 0.75,
 }
+_CRITIQUE_QUERY_TERMS = frozenset(
+    {
+        "critique",
+        "critical",
+        "evidence",
+        "forced",
+        "opportunities",
+        "opportunity",
+        "question",
+        "questioned",
+        "questioning",
+        "skeptic",
+        "skeptical",
+    }
+)
+_CRITIQUE_CUE_WEIGHTS = {
+    "forced": 3.0,
+    "better evidence": 3.0,
+    "evidence": 2.0,
+    "wrong": 1.5,
+    "backward": 2.0,
+    "weak": 1.5,
+    "convincing": 2.0,
+    "should not": 2.0,
+    "contradict": 2.0,
+    "need better": 1.5,
+    "undercut": 1.5,
+    "framing": 1.0,
+}
+_FEEDBACK_QUERY_TERMS = frozenset(
+    {
+        "comment",
+        "comments",
+        "feedback",
+        "note",
+        "notes",
+        "review",
+        "reviews",
+    }
+)
+_FEEDBACK_CUE_WEIGHTS = {
+    "feedback": 3.0,
+    "review": 2.0,
+    "comments": 1.5,
+    "notes": 1.0,
+    "next steps": 1.0,
+}
+_PERFORMANCE_QUERY_TERMS = frozenset({"performance"})
+_PERFORMANCE_REVIEW_CUE_WEIGHTS = {
+    "feedback": 2.0,
+    "review": 2.0,
+    "1:1": 1.5,
+    "support": 1.0,
+    "notes": 1.0,
+    "performance": 1.0,
+}
+_PERFORMANCE_MARKETING_MISMATCH_CUES = (
+    "campaign performance",
+    "creative performance",
+    "performance marketing",
+)
 _SELF_REFERENTIAL_CUES = (
     "claude-browse",
     "claude browse",
@@ -110,6 +171,66 @@ _CODE_REFERENCE_WINDOW_CUES = (
     "scripts",
     "marp",
 )
+
+
+def _query_wants_critique(plan: QueryPlan) -> bool:
+    return any(term in _CRITIQUE_QUERY_TERMS for term in plan.normalized_terms)
+
+
+def _query_wants_feedback(plan: QueryPlan) -> bool:
+    return any(term in _FEEDBACK_QUERY_TERMS for term in plan.normalized_terms)
+
+
+def _query_wants_performance_review(plan: QueryPlan) -> bool:
+    return (
+        any(term in _PERFORMANCE_QUERY_TERMS for term in plan.normalized_terms)
+        and any(term not in _PERFORMANCE_QUERY_TERMS for term in plan.anchor_terms)
+    )
+
+
+def _semantic_anchor_terms(plan: QueryPlan) -> tuple[str, ...]:
+    soft_terms = (
+        _CRITIQUE_QUERY_TERMS
+        | _FEEDBACK_QUERY_TERMS
+        | _PERFORMANCE_QUERY_TERMS
+    )
+    anchors = tuple(
+        term for term in plan.anchor_terms if term not in soft_terms
+    )
+    return anchors or plan.anchor_terms
+
+
+def _semantic_intent_score(text: str, plan: QueryPlan) -> float:
+    lowered = text.lower()
+    score = 0.0
+    if _query_wants_critique(plan):
+        score += sum(
+            weight
+            for cue, weight in _CRITIQUE_CUE_WEIGHTS.items()
+            if cue in lowered
+        )
+    if _query_wants_feedback(plan):
+        score += sum(
+            weight
+            for cue, weight in _FEEDBACK_CUE_WEIGHTS.items()
+            if cue in lowered
+        )
+    if _query_wants_performance_review(plan):
+        score += sum(
+            weight
+            for cue, weight in _PERFORMANCE_REVIEW_CUE_WEIGHTS.items()
+            if cue in lowered
+        )
+    return score
+
+
+def _semantic_mismatch_penalty(text: str, plan: QueryPlan) -> float:
+    lowered = text.lower()
+    penalty = 0.0
+    if _query_wants_performance_review(plan):
+        if any(cue in lowered for cue in _PERFORMANCE_MARKETING_MISMATCH_CUES):
+            penalty += 2.5
+    return penalty
 
 
 def open_db(path: str = DB_PATH) -> sqlite3.Connection:
@@ -486,6 +607,7 @@ def _latest_segment_matches(
 ) -> dict[str, dict[str, object]]:
     plan = plan or build_query_plan(query)
     terms = list(plan.fts_terms)
+    anchor_terms = list(_semantic_anchor_terms(plan))
     if not terms:
         return {}
     fts_query = _terms_to_fts_query(terms, joiner=" OR ")
@@ -537,13 +659,14 @@ def _latest_segment_matches(
         return {}
 
     matches: dict[str, dict[str, object]] = {}
-    lowered_terms = [term.lower() for term in terms]
-    if len(terms) <= 2:
-        required_term_count = len(terms)
+    lowered_terms = [term.lower() for term in anchor_terms]
+    required_term_source = anchor_terms or terms
+    if len(required_term_source) <= 2:
+        required_term_count = len(required_term_source)
     elif descriptive:
-        required_term_count = max(2, len(terms) - 1)
+        required_term_count = max(2, len(required_term_source) - 1)
     else:
-        required_term_count = len(terms)
+        required_term_count = len(required_term_source)
 
     def _match_stats(text: str) -> tuple[int, float, float]:
         lowered = text.lower()
@@ -655,6 +778,8 @@ def _latest_segment_matches(
         term_count, density, compactness = _match_stats(combined)
         if term_count < required_term_count:
             continue
+        intent_score = _semantic_intent_score(combined, plan)
+        mismatch_penalty = _semantic_mismatch_penalty(combined, plan)
         ranked.append(
             (
                 sid,
@@ -667,6 +792,8 @@ def _latest_segment_matches(
                     "match_compactness": compactness,
                     "match_conversation_score": _conversation_score(combined),
                     "match_lifecycle_score": _closeout_score(combined),
+                    "match_intent_score": intent_score,
+                    "match_mismatch_penalty": mismatch_penalty,
                     "_match_bm25": -float(bm or 0.0),
                     "_assistant_bonus": assistant_bonus,
                 },
@@ -691,6 +818,7 @@ def _latest_segment_matches(
         ranked.sort(
             key=lambda item: (
                 item[1]["match_term_count"],
+                item[1]["match_intent_score"] - item[1]["match_mismatch_penalty"],
                 item[1]["_assistant_bonus"],
                 _timestamp_sort_key(item[1]["match_timestamp"]),
                 item[1]["match_density"],
@@ -704,6 +832,7 @@ def _latest_segment_matches(
         ranked.sort(
             key=lambda item: (
                 item[1]["match_term_count"],
+                item[1]["match_intent_score"] - item[1]["match_mismatch_penalty"],
                 item[1]["match_conversation_score"],
                 item[1]["match_density"],
                 item[1]["match_compactness"],
@@ -817,8 +946,9 @@ def _artifact_penalty(row: dict, plan: QueryPlan, query: str) -> float:
         or "performance" in plan.normalized_terms
     ):
         penalty += 3.0
-    if _is_plain_entity_query(plan, query):
-        anchor = str(plan.anchor_terms[0]).lower()
+    semantic_anchors = _semantic_anchor_terms(plan)
+    if len(semantic_anchors) == 1 and (_is_plain_entity_query(plan, query) or plan.descriptive):
+        anchor = str(semantic_anchors[0]).lower()
         code_ref_patterns = (
             rf"\b\w*{re.escape(anchor)}\w*\.(py|md|pptx?|json|csv)\b",
             rf"`[^`]*{re.escape(anchor)}[^`]*`",
@@ -826,7 +956,7 @@ def _artifact_penalty(row: dict, plan: QueryPlan, query: str) -> float:
             rf"{re.escape(anchor)}[^\\n]{{0,40}}(?:{'|'.join(_CODE_REFERENCE_WINDOW_CUES)})",
         )
         if any(re.search(pattern, haystack) for pattern in code_ref_patterns):
-            penalty += 5.0
+            penalty += 5.0 if _is_plain_entity_query(plan, query) else 4.0
     return penalty
 
 
@@ -1034,8 +1164,12 @@ def search_ranked(
         recency = math.exp(-age / half_life_days) if age >= 0 else 0.0
         row["_metadata_anchor_score"] = _metadata_anchor_score(row, plan)
         row["_artifact_penalty"] = _artifact_penalty(row, plan, query)
+        row["_semantic_intent_score"] = float(
+            row.get("match_intent_score") or 0.0
+        ) - float(row.get("match_mismatch_penalty") or 0.0)
         row["_quality_score"] = (
             float(row.get("_metadata_anchor_score") or 0.0)
+            + float(row.get("_semantic_intent_score") or 0.0)
             - float(row.get("_artifact_penalty") or 0.0)
         )
         row["_score"] = float(row.get("_bm25") or 0.0) + recency_alpha * recency
@@ -1104,6 +1238,8 @@ def search_ranked(
             key=lambda row: (
                 int(row.get("match_term_count") or 0),
                 float(row.get("_quality_score") or 0.0),
+                float(row.get("match_intent_score") or 0.0)
+                - float(row.get("match_mismatch_penalty") or 0.0),
                 float(row.get("match_conversation_score") or 0.0),
                 _timestamp_sort_key(
                     row.get("match_timestamp")

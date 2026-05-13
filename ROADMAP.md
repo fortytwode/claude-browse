@@ -101,21 +101,21 @@ Why it matters:
 - Better UI guidance is cheaper and safer than piling on backend complexity when the current failure is mostly affordance mismatch
 
 ### Phase 5 — Semantic reranking under the hood
-**Status:** next
+**Status:** shipped
 
 Keep one visible query model while improving retrieval depth behind the scenes.
 
-What ships:
+What shipped:
 - Stronger query understanding and typed lexical reranking on top of SQLite first
-- Hybrid lexical + semantic reranking for descriptive thread queries only if the
-  typed SQLite path still plateaus on the eval set
+- Local semantic-proxy reranking for descriptive thread queries using intent cues
+  like closeout, feedback, critique, and human-performance review
 - Better fallback when the user remembers the idea but not the exact anchor words
 - Still one visible mode: describe the thread you want
 
 Why it matters:
 - Natural-language recall gets stronger without making the UI more complicated
 - This keeps the current local-first, no-daemon, zero-runtime-dependency product
-  intact while we validate whether a heavier backend is actually necessary
+  intact without forcing a cloud or external search backend
 
 ### Phase 6 — Work artifacts
 **Status:** later
@@ -164,7 +164,7 @@ Current manual test gate:
 - Test `Ctrl-B` for restart-card export output.
 
 Next gated build after testing:
-- semantic reranking under the hood for descriptive thread recall
+- work artifacts and better handoff exports
 - only after that, reconsider `Task View` if real usage proves thread clustering is the actual problem
 
 ---

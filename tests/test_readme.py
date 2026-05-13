@@ -32,6 +32,7 @@ def test_readme_documents_target_app_browsers():
     assert "last closeout session for musopia" in text
     assert "Looking for: musopia + closeout" in text
     assert "add one anchor" in text.lower()
+    assert "local concept cues" in text.lower()
 
 
 def test_readme_no_longer_documents_removed_browser_shortcuts():
