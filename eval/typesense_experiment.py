@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
 import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from dataclasses import dataclass
@@ -41,6 +43,7 @@ from claude_browse import fts  # noqa: E402
 from claude_browse.query import build_query_plan  # noqa: E402
 
 DEFAULT_COLLECTION = "claude_browse_windows"
+DEFAULT_TYPESENSE_VERSION = "30.2"
 DEFAULT_QUERIES = [
     "last closeout session for Musopia",
     "final discussion i had about the last closeout session for Musopia",
@@ -92,6 +95,61 @@ def _find_free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _typesense_platform_triplet() -> tuple[str, str]:
+    if sys.platform == "darwin":
+        os_name = "darwin"
+    elif sys.platform.startswith("linux"):
+        os_name = "linux"
+    else:
+        raise SystemExit(f"Unsupported platform for Typesense experiment: {sys.platform}")
+
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        arch = "arm64"
+    elif machine in {"x86_64", "amd64"}:
+        arch = "amd64"
+    else:
+        raise SystemExit(f"Unsupported architecture for Typesense experiment: {machine}")
+    return os_name, arch
+
+
+def _typesense_download_url(version: str = DEFAULT_TYPESENSE_VERSION) -> str:
+    os_name, arch = _typesense_platform_triplet()
+    return (
+        f"https://dl.typesense.org/releases/{version}/"
+        f"typesense-server-{version}-{os_name}-{arch}.tar.gz"
+    )
+
+
+def _ensure_typesense_binary(version: str = DEFAULT_TYPESENSE_VERSION) -> str:
+    existing = shutil.which("typesense-server")
+    if existing:
+        return existing
+
+    os_name, arch = _typesense_platform_triplet()
+    cache_dir = (
+        Path.home()
+        / ".claude"
+        / "cache"
+        / "claude-browse-experiments"
+        / "typesense"
+        / version
+        / f"{os_name}-{arch}"
+    )
+    binary = cache_dir / "typesense-server"
+    if binary.exists():
+        return str(binary)
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = cache_dir / "typesense-server.tar.gz"
+    with urlopen(_typesense_download_url(version), timeout=120) as resp:
+        archive_path.write_bytes(resp.read())
+    with tarfile.open(archive_path, "r:gz") as tar:
+        tar.extractall(cache_dir)
+    binary.chmod(0o755)
+    return str(binary)
 
 
 def _epoch_seconds(ts: str | None) -> int:
@@ -437,14 +495,7 @@ def _wait_for_health(server: TypesenseServer, timeout_s: float = 20.0) -> str:
 
 
 def start_temp_typesense() -> TypesenseServer:
-    binary = shutil.which("typesense-server")
-    if not binary:
-        raise SystemExit(
-            "typesense-server not found in PATH.\n"
-            "Install it first, e.g. on macOS:\n"
-            "  brew tap typesense/tap\n"
-            "  brew install typesense/tap/typesense-server"
-        )
+    binary = _ensure_typesense_binary()
     port = _find_free_port()
     data_dir = tempfile.mkdtemp(prefix="claude_browse_typesense_")
     api_key = "claude-browse-experiment"

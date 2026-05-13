@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from eval.typesense_experiment import _lifecycle_score, _project_typesense_search, _window_text
+from eval.typesense_experiment import (
+    _lifecycle_score,
+    _project_typesense_search,
+    _typesense_download_url,
+    _window_text,
+)
 
 
 def test_project_typesense_search_uses_raw_query_by_default():
@@ -50,3 +55,12 @@ def test_window_text_uses_local_context():
     assert "User: one" in text
     assert "Assistant: two" in text
     assert "User: three" in text
+
+
+def test_typesense_download_url_looks_like_official_release_url(monkeypatch):
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+
+    url = _typesense_download_url("30.2")
+
+    assert url == "https://dl.typesense.org/releases/30.2/typesense-server-30.2-darwin-arm64.tar.gz"
