@@ -16,6 +16,7 @@ import tempfile
 
 from . import fts
 from .core import (
+    build_handoff_markdown,
     build_import_markdown,
     display_cwd,
     folder_name,
@@ -25,7 +26,11 @@ from .core import (
 )
 from .providers import get_provider, provider_entries, provider_ids
 from .query import QueryPlan, build_query_plan
-from .work_state import build_work_state, render_restart_card_terminal
+from .work_state import (
+    build_work_state,
+    render_restart_card_terminal,
+    render_status_update_terminal,
+)
 
 DEFAULT_LIMIT = 100
 ROW_META_SEP = "\x1f"
@@ -487,6 +492,8 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         f"  Ctrl-S                Open in {target_name} (safe)\n"
         "  Ctrl-Y                Print the suggested next prompt for the selection\n"
         "  Ctrl-B                Print the restart card for the selection\n"
+        "  Ctrl-H                Print a reusable handoff brief\n"
+        "  Ctrl-U                Print a concise status update\n"
         "  Shift-Up / Shift-Down Scroll the preview pane\n"
         "  Esc                   Quit\n"
         "\n"
@@ -665,6 +672,10 @@ def _parse_fzf_output(
         marker = row_lines.pop(0)
     elif row_lines and row_lines[0] == "BRIEF:":
         marker = row_lines.pop(0)
+    elif row_lines and row_lines[0] == "HANDOFF:":
+        marker = row_lines.pop(0)
+    elif row_lines and row_lines[0] == "STATUS:":
+        marker = row_lines.pop(0)
     elif selection_query.startswith("SAFE:"):
         original = selection_query
         marker = selection_query[:5]
@@ -681,6 +692,10 @@ def _parse_fzf_output(
         action = "print_prompt"
     elif marker == "BRIEF:":
         action = "print_brief"
+    elif marker == "HANDOFF:":
+        action = "print_handoff"
+    elif marker == "STATUS:":
+        action = "print_status"
 
     row = next((line for line in reversed(row_lines) if ROW_META_SEP in line), "")
     if not row and ROW_META_SEP in selection_query:
@@ -843,6 +858,7 @@ def main() -> None:
                 f"Ctrl-T: re-enter matched topic in {target_name} | "
                 f"Ctrl-S: open in {target_name} (safe) | "
                 "Ctrl-Y: next prompt | Ctrl-B: restart card | "
+                "Ctrl-H: handoff brief | Ctrl-U: status update | "
                 "Esc: quit | Shift-Up/Down: scroll preview"
             ),
             "--header-first",
@@ -858,6 +874,8 @@ def main() -> None:
             "--bind=ctrl-t:print(TOPIC:)+accept",
             "--bind=ctrl-y:print(PROMPT:)+accept",
             "--bind=ctrl-b:print(BRIEF:)+accept",
+            "--bind=ctrl-h:print(HANDOFF:)+accept",
+            "--bind=ctrl-u:print(STATUS:)+accept",
         ]
 
         result = subprocess.run(
@@ -892,7 +910,7 @@ def main() -> None:
             sys.exit(1)
 
         state = None
-        if action in {"print_prompt", "print_brief", "reenter_topic"}:
+        if action in {"print_prompt", "print_brief", "print_status", "reenter_topic"}:
             state = build_work_state(session, selection_query)
 
         if action == "print_prompt":
@@ -901,6 +919,14 @@ def main() -> None:
 
         if action == "print_brief":
             print(render_restart_card_terminal(state))
+            return
+
+        if action == "print_handoff":
+            print(build_handoff_markdown(session, selection_query))
+            return
+
+        if action == "print_status":
+            print(render_status_update_terminal(state))
             return
 
         if action == "reenter_topic":

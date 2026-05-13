@@ -18,7 +18,11 @@ from .providers import copilot as copilot_provider
 from .providers import gemini as gemini_provider
 from .providers import get_provider, provider_ids
 from .query import significant_query_terms
-from .work_state import build_work_state, render_restart_card_markdown
+from .work_state import (
+    build_work_state,
+    render_restart_card_markdown,
+    render_status_update_markdown,
+)
 
 SESSIONS_DIR = claude_provider.SESSIONS_DIR
 CODEX_STATE_DB = codex_provider.CODEX_STATE_DB
@@ -209,6 +213,96 @@ def build_import_markdown(
         lines.append("No recent transcript excerpt was available.")
         return "\n".join(lines) + "\n"
 
+    if not source_spec.assistant_turns_available:
+        lines.append(
+            f"Note: {provider_display_name(provider)} local history only exposes user turns here."
+        )
+        lines.append("Most recent turns are shown first.")
+        lines.append("")
+    else:
+        lines.append("Most recent turns are shown first.")
+        lines.append("")
+
+    for role, text in recent_excerpt:
+        label = "User" if role == "user" else "Assistant"
+        lines.append(f"### {label}")
+        lines.append(text)
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def build_handoff_markdown(
+    session: dict,
+    selection_query: str | None = None,
+    *,
+    reenter_topic: bool = False,
+) -> str:
+    """Create a reusable human-readable handoff brief from one session."""
+    provider = session.get("provider") or "claude"
+    session_id = session.get("session_id") or "?"
+    cwd = session.get("cwd") or ""
+    started = session.get("timestamp") or "unknown"
+    last_activity = session.get("last_timestamp") or started
+    work_state = build_work_state(
+        session,
+        selection_query or "",
+        recent_limit=10,
+        match_limit=6,
+    )
+    recent_excerpt = work_state["recent_turns"]
+    matched_turns = work_state.get("matched_exchange") or work_state["matching_turns"]
+
+    lines = [
+        "# Resume Work Handoff",
+        "",
+        f"- Source app: {provider_display_name(provider)}",
+        f"- Original session id: `{session_id}`",
+        f"- Original folder: `{cwd}`" if cwd else "- Original folder: unknown",
+        f"- Started: {started}",
+        f"- Last activity: {last_activity}",
+        "",
+    ]
+
+    lines.extend(render_status_update_markdown(work_state))
+    lines.extend(render_restart_card_markdown(work_state))
+
+    if selection_query and selection_query.strip():
+        lines.extend(
+            [
+                "",
+                "## Reopen Intent",
+                "",
+                f"- This thread was reopened from a search for: `{selection_query.strip()}`",
+            ]
+        )
+        if reenter_topic:
+            lines.append("- Use the matching exchange below as the point to re-enter.")
+        if matched_turns:
+            lines.extend(
+                [
+                    "- Matching turns below are likely why this thread was selected.",
+                    "",
+                ]
+            )
+            for role, text in matched_turns:
+                label = "User" if role == "user" else "Assistant"
+                lines.append(f"### {label}")
+                lines.append(text)
+                lines.append("")
+
+    lines.extend(
+        [
+            "",
+            "## Most Recent Transcript Turns",
+            "",
+        ]
+    )
+    if not recent_excerpt:
+        lines.append("No recent transcript excerpt was available.")
+        return "\n".join(lines).rstrip() + "\n"
+
+    source_spec = get_provider(provider)
     if not source_spec.assistant_turns_available:
         lines.append(
             f"Note: {provider_display_name(provider)} local history only exposes user turns here."

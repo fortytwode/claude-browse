@@ -368,6 +368,30 @@ def test_parse_fzf_output_handles_print_query_brief_marker():
     assert parsed == (row, "claude", "print_brief", "pokpok")
 
 
+def test_parse_fzf_output_handles_print_query_handoff_marker():
+    row = (
+        f"match {browse.ROW_META_SEP}abc-123{browse.ROW_META_SEP}"
+        f"/home/alice/proj{browse.ROW_META_SEP}claude"
+    )
+    parsed = browse._parse_fzf_output(
+        f"pokpok\nHANDOFF:\n{row}\n",
+        "claude",
+    )
+    assert parsed == (row, "claude", "print_handoff", "pokpok")
+
+
+def test_parse_fzf_output_handles_print_query_status_marker():
+    row = (
+        f"match {browse.ROW_META_SEP}abc-123{browse.ROW_META_SEP}"
+        f"/home/alice/proj{browse.ROW_META_SEP}claude"
+    )
+    parsed = browse._parse_fzf_output(
+        f"pokpok\nSTATUS:\n{row}\n",
+        "claude",
+    )
+    assert parsed == (row, "claude", "print_status", "pokpok")
+
+
 def test_parse_fzf_output_ignores_visible_triple_hash_in_snippet():
     row = (
         "Apr 23   claude team-operations "

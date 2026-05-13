@@ -515,6 +515,73 @@ def test_build_import_markdown_includes_search_match_context(monkeypatch):
     assert "- Opened with: Can you review the pokpok brief?" in text
 
 
+def test_build_handoff_markdown_includes_status_restart_and_reopen_intent(monkeypatch):
+    monkeypatch.setattr(
+        core,
+        "build_work_state",
+        lambda session, selection_query="", recent_limit=10, match_limit=6: {
+            "current_task": "Now archive the backups after that.",
+            "topic_shifted": True,
+            "opening_topic": "Can you review the pokpok brief?",
+            "session_title": "Mixed thread",
+            "repo_state": {"summary": "Branch `main` with 2 uncommitted files."},
+            "last_meaningful_user": "Now archive the backups after that.",
+            "latest_assistant": "I checked the Sherlock output for pokpok.",
+            "likely_open_question": "Can you verify whether the opportunities are forced?",
+            "suggested_next_prompt": "Continue the work in proj.",
+            "matching_turns": [
+                ("assistant", "I checked the Sherlock output for pokpok."),
+                ("user", "Can you review the pokpok brief?"),
+            ],
+            "matched_exchange": [
+                ("user", "Can you review the pokpok brief?"),
+                ("assistant", "I checked the Sherlock output for pokpok."),
+            ],
+            "thread_continued_after_match": True,
+            "post_match_recent_turns": [
+                ("user", "Now archive the backups after that."),
+            ],
+            "recent_turns": [
+                ("user", "Now archive the backups after that."),
+                ("assistant", "I checked the Sherlock output for pokpok."),
+                ("user", "Can you review the pokpok brief?"),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "get_provider",
+        lambda provider: SimpleNamespace(
+            display_name="Claude",
+            assistant_turns_available=True,
+        ),
+    )
+
+    text = core.build_handoff_markdown(
+        {
+            "provider": "claude",
+            "session_id": "abc-123",
+            "cwd": "/home/alice/proj",
+            "timestamp": "2026-05-12T07:00:00Z",
+            "last_timestamp": "2026-05-12T07:30:00Z",
+            "name": "Mixed thread",
+            "first_msg": "Can you review the pokpok brief?",
+            "last_msg": "Now archive the backups after that.",
+            "path": "/tmp/session.jsonl",
+        },
+        selection_query="pokpok",
+    )
+
+    assert "# Resume Work Handoff" in text
+    assert "## Status Update" in text
+    assert "- Working on: Now archive the backups after that." in text
+    assert "## Restart Card" in text
+    assert "## Reopen Intent" in text
+    assert "This thread was reopened from a search for: `pokpok`" in text
+    assert "## Most Recent Transcript Turns" in text
+    assert "I checked the Sherlock output for pokpok." in text
+
+
 def test_build_import_markdown_reenter_topic_uses_match_as_anchor(monkeypatch):
     monkeypatch.setattr(
         core,

@@ -380,3 +380,32 @@ def render_restart_card_markdown(state: dict[str, object]) -> list[str]:
 
     lines.append("")
     return lines
+
+
+def render_status_update_markdown(state: dict[str, object]) -> list[str]:
+    lines = ["## Status Update", ""]
+
+    if state.get("current_task"):
+        lines.append(f"- Working on: {state['current_task']}")
+
+    repo_state = state.get("repo_state")
+    if isinstance(repo_state, dict) and repo_state.get("summary"):
+        lines.append(f"- Repo state: {repo_state['summary']}")
+
+    if state.get("latest_assistant"):
+        lines.append(f"- Latest progress: {state['latest_assistant']}")
+
+    if state.get("likely_open_question"):
+        lines.append(f"- Open question: {state['likely_open_question']}")
+    elif state.get("last_meaningful_user"):
+        lines.append(f"- Last ask: {state['last_meaningful_user']}")
+
+    if state.get("suggested_next_prompt"):
+        lines.append(f"- Next step: {state['suggested_next_prompt']}")
+
+    lines.append("")
+    return lines
+
+
+def render_status_update_terminal(state: dict[str, object]) -> str:
+    return "\n".join(line for line in render_status_update_markdown(state) if line)

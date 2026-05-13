@@ -37,6 +37,11 @@ of that wedge.
   - likely open question
   - suggested next prompt
 - Suggested next prompts and restart cards can be printed directly from the browser.
+- Exportable work artifacts are shipped from the browser:
+  - restart card
+  - suggested next prompt
+  - reusable handoff brief
+  - concise status update
 - Natural-language thread description is now the primary query model:
   - descriptive `find the thread where...` inputs
   - ranking by most recent relevant mention
@@ -118,15 +123,15 @@ Why it matters:
   intact without forcing a cloud or external search backend
 
 ### Phase 6 — Work artifacts
-**Status:** later
+**Status:** shipped
 
 Turn session + repo state into reusable outputs.
 
-What ships:
-- Restart brief
+What shipped:
+- Restart brief / restart card
 - Human-to-agent handoff brief
-- Agent-to-human summary
-- Standup / “what changed and why” export
+- Agent-to-human status update
+- Suggested next prompt export
 
 Why it matters:
 - Session history becomes operationally useful outside the TUI
@@ -164,7 +169,7 @@ Current manual test gate:
 - Test `Ctrl-B` for restart-card export output.
 
 Next gated build after testing:
-- work artifacts and better handoff exports
+- better artifact formatting and downstream integrations
 - only after that, reconsider `Task View` if real usage proves thread clustering is the actual problem
 
 ---

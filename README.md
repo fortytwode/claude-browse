@@ -96,6 +96,8 @@ While the TUI is up:
 | Ctrl-S           | Open in that same app in safe mode                               |
 | Ctrl-Y           | Print the suggested next prompt for the selected thread          |
 | Ctrl-B           | Print the restart card for the selected thread                   |
+| Ctrl-H           | Print a reusable handoff brief                                   |
+| Ctrl-U           | Print a concise status update                                    |
 | Esc              | Quit                                                             |
 
 Examples:
@@ -121,6 +123,7 @@ Examples:
 - The preview pane leads with the last matching exchange when a query matches earlier in the thread, then shows whether the thread later drifted to another topic.
 - `Ctrl-T` is the honest cross-provider answer to thread drift: it starts a new session anchored on the matched exchange instead of pretending the tool can rewind the original thread in place.
 - `Ctrl-Y` lets you emit the suggested next prompt without launching anything. `Ctrl-B` prints the restart card itself for copy/paste or handoff.
+- `Ctrl-H` prints a fuller handoff brief with restart state, reopen intent, and recent turns. `Ctrl-U` prints a shorter status update you can paste into Slack, notes, or a standup.
 - Cross-provider open is not a true native resume. It creates a new session seeded from the old thread.
 - Cursor is currently a **target-only** built-in provider. It opens everything in Cursor, but this tool does not yet claim to index Cursor-origin CLI sessions.
 

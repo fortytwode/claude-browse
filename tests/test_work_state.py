@@ -134,6 +134,27 @@ def test_render_restart_card_terminal_surfaces_repo_state_and_matches():
     assert "Recent turns (latest first):" in text
 
 
+def test_render_status_update_terminal_surfaces_task_progress_and_next_step():
+    text = work_state.render_status_update_terminal(
+        {
+            "current_task": "Q3 platform hiring plan",
+            "repo_state": {
+                "summary": "Branch `main` with 2 uncommitted files.",
+            },
+            "latest_assistant": "Start with a staffing matrix.",
+            "likely_open_question": "Should we hire two engineers or three?",
+            "suggested_next_prompt": "Continue the work in webapp.",
+        }
+    )
+
+    assert "Status Update" in text
+    assert "- Working on: Q3 platform hiring plan" in text
+    assert "- Repo state: Branch `main` with 2 uncommitted files." in text
+    assert "- Latest progress: Start with a staffing matrix." in text
+    assert "- Open question: Should we hire two engineers or three?" in text
+    assert "- Next step: Continue the work in webapp." in text
+
+
 def test_inspect_repo_state_parses_branch_and_dirty(monkeypatch, tmp_path):
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()

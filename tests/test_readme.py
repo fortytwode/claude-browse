@@ -27,6 +27,8 @@ def test_readme_documents_target_app_browsers():
     assert "Ctrl-Y" in text
     assert "Ctrl-B" in text
     assert "Ctrl-T" in text
+    assert "Ctrl-H" in text
+    assert "Ctrl-U" in text
     assert "Find thread where..." in text
     assert "where i was asking nevena about feedback" in text
     assert "last closeout session for musopia" in text
