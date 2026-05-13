@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from .core import list_index_records
 from .providers import get_provider
-from .query import is_descriptive_query, significant_query_terms
+from .query import QueryPlan, build_query_plan, significant_query_terms
 
 DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
 # v2: added last_timestamp column so the list view can sort by most recent
@@ -38,6 +38,22 @@ DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
 #     where..." recall, last-matching-mention ranking, and query-anchored
 #     snippets instead of pure thread-end recency.
 SCHEMA_VERSION = 5
+_CLOSEOUT_CUE_WEIGHTS = {
+    "closeout": 3.0,
+    "close out": 3.0,
+    "final session": 3.0,
+    "handoff": 2.5,
+    "hand off": 2.5,
+    "wrapup": 2.0,
+    "wrap up": 2.0,
+    "debrief": 2.0,
+    "recap": 2.0,
+    "summary": 1.0,
+    "final discussion": 2.0,
+    "finalize": 1.0,
+    "finalise": 1.0,
+    "final": 0.75,
+}
 
 
 def open_db(path: str = DB_PATH) -> sqlite3.Connection:
@@ -410,12 +426,15 @@ def _latest_segment_matches(
     query: str,
     *,
     sids: list[str] | None = None,
+    plan: QueryPlan | None = None,
 ) -> dict[str, dict[str, object]]:
-    terms = significant_query_terms(query)
+    plan = plan or build_query_plan(query)
+    terms = list(plan.fts_terms)
     if not terms:
         return {}
     fts_query = _terms_to_fts_query(terms, joiner=" OR ")
-    descriptive = is_descriptive_query(query)
+    descriptive = plan.descriptive
+    highlight_terms = list(plan.highlight_terms or plan.fts_terms)
 
     where = ["segments_fts MATCH ?"]
     params: list[object] = [fts_query]
@@ -432,18 +451,28 @@ def _latest_segment_matches(
                cur.text,
                snippet(segments_fts, 4, '\x01', '\x02', '…', 12) AS context,
                bm25(segments_fts) AS bm,
+               prev2.role,
+               prev2.text,
+               prev2.timestamp,
                prev.role,
                prev.text,
                prev.timestamp,
                nxt.role,
                nxt.text,
-               nxt.timestamp
+               nxt.timestamp,
+               nxt2.role,
+               nxt2.text,
+               nxt2.timestamp
         FROM segments_fts
         JOIN segments AS cur ON cur.rowid = segments_fts.rowid
+        LEFT JOIN segments AS prev2
+            ON prev2.sid = cur.sid AND prev2.segment_idx = cur.segment_idx - 2
         LEFT JOIN segments AS prev
             ON prev.sid = cur.sid AND prev.segment_idx = cur.segment_idx - 1
         LEFT JOIN segments AS nxt
             ON nxt.sid = cur.sid AND nxt.segment_idx = cur.segment_idx + 1
+        LEFT JOIN segments AS nxt2
+            ON nxt2.sid = cur.sid AND nxt2.segment_idx = cur.segment_idx + 2
         WHERE {' AND '.join(where)}
     """
     try:
@@ -456,7 +485,7 @@ def _latest_segment_matches(
     if len(terms) <= 2:
         required_term_count = len(terms)
     elif descriptive:
-        required_term_count = 2
+        required_term_count = max(2, len(terms) - 1)
     else:
         required_term_count = len(terms)
 
@@ -478,6 +507,14 @@ def _latest_segment_matches(
         compactness = term_count / max(span, 1)
         return (term_count, density, compactness)
 
+    def _closeout_score(text: str) -> float:
+        if not plan.wants_closeout:
+            return 0.0
+        lowered = text.lower()
+        return sum(
+            weight for cue, weight in _CLOSEOUT_CUE_WEIGHTS.items() if cue in lowered
+        )
+
     def _conversation_score(text: str) -> float:
         lowered = text.lower()
         structured_markers = (
@@ -495,7 +532,7 @@ def _latest_segment_matches(
         lowered = clean.lower()
         positions = [
             (lowered.find(term), lowered.find(term) + len(term))
-            for term in lowered_terms
+            for term in highlight_terms
             if lowered.find(term) >= 0
         ]
         if not positions:
@@ -508,7 +545,7 @@ def _latest_segment_matches(
                 excerpt = "…" + excerpt
             if end < len(clean):
                 excerpt = excerpt + "…"
-        for term in sorted(terms, key=len, reverse=True):
+        for term in sorted(highlight_terms, key=len, reverse=True):
             excerpt = re.sub(
                 re.escape(term),
                 lambda match: f"\x01{match.group(0)}\x02",
@@ -526,30 +563,39 @@ def _latest_segment_matches(
         text,
         context,
         bm,
+        _prev2_role,
+        prev2_text,
+        _prev2_timestamp,
         prev_role,
         prev_text,
         _prev_timestamp,
         next_role,
         next_text,
         next_timestamp,
+        _next2_role,
+        next2_text,
+        _next2_timestamp,
     ) in rows:
-        exchange_parts: list[str] = []
         assistant_bonus = 0
         match_timestamp = timestamp
         match_segment_idx = segment_idx
         if role == "assistant" and prev_role == "user":
-            exchange_parts = [str(prev_text or ""), str(text or "")]
             assistant_bonus = 1
         elif role == "user" and next_role == "assistant":
-            exchange_parts = [str(text or ""), str(next_text or "")]
             assistant_bonus = 1
             match_timestamp = next_timestamp or timestamp
             match_segment_idx = segment_idx + 1
         else:
-            exchange_parts = [str(text or "")]
             assistant_bonus = 1 if role == "assistant" else 0
 
-        combined = " ".join(part for part in exchange_parts if part).strip()
+        window_parts = [
+            str(prev2_text or ""),
+            str(prev_text or ""),
+            str(text or ""),
+            str(next_text or ""),
+            str(next2_text or ""),
+        ]
+        combined = " ".join(part for part in window_parts if part).strip()
         term_count, density, compactness = _match_stats(combined)
         if term_count < required_term_count:
             continue
@@ -564,13 +610,28 @@ def _latest_segment_matches(
                     "match_density": density,
                     "match_compactness": compactness,
                     "match_conversation_score": _conversation_score(combined),
+                    "match_lifecycle_score": _closeout_score(combined),
                     "_match_bm25": -float(bm or 0.0),
                     "_assistant_bonus": assistant_bonus,
                 },
             )
         )
 
-    if len(terms) == 1:
+    if plan.descriptive and plan.wants_closeout:
+        ranked.sort(
+            key=lambda item: (
+                item[1]["match_lifecycle_score"],
+                item[1]["match_term_count"],
+                _timestamp_sort_key(item[1]["match_timestamp"]),
+                item[1]["match_conversation_score"],
+                item[1]["match_density"],
+                item[1]["match_compactness"],
+                item[1]["_match_bm25"],
+                item[1]["match_segment_idx"],
+            ),
+            reverse=True,
+        )
+    elif len(terms) == 1:
         ranked.sort(
             key=lambda item: (
                 item[1]["match_term_count"],
@@ -653,10 +714,13 @@ def search(
     if not query.strip():
         return list_recent(conn, limit)
 
+    plan = build_query_plan(query)
+    if plan.low_confidence:
+        return list_recent(conn, limit)
     fts_query = normalize_query(query)
     if not fts_query:
         return list_recent(conn, limit)
-    descriptive = is_descriptive_query(query)
+    descriptive = plan.descriptive
 
     # Filter by FTS5 match, but order by recency, not BM25. Users already
     # know what they searched for; what they want is "the newest session
@@ -678,9 +742,14 @@ def search(
 
     results = [_row_to_dict(r) for r in rows]
     existing_ids = [str(r["session_id"]) for r in results]
-    match_map = _latest_segment_matches(conn, query, sids=existing_ids or None)
+    match_map = _latest_segment_matches(
+        conn,
+        query,
+        sids=existing_ids or None,
+        plan=plan,
+    )
     if not results and descriptive:
-        match_map = _latest_segment_matches(conn, query)
+        match_map = _latest_segment_matches(conn, query, plan=plan)
         results = _load_sessions_by_ids(conn, list(match_map)[:limit])
     if not results:
         return []
@@ -753,11 +822,14 @@ def search_ranked(
     if not query.strip():
         return list_recent(conn, limit)
 
+    plan = build_query_plan(query)
+    if plan.low_confidence:
+        return list_recent(conn, limit)
     fts_query = normalize_query(query)
     if not fts_query:
         return list_recent(conn, limit)
-    descriptive = is_descriptive_query(query)
-    terms = significant_query_terms(query)
+    descriptive = plan.descriptive
+    terms = list(plan.fts_terms)
 
     # Pull more candidates than we'll return so reranking has room to
     # surface non-recent strong matches that pure-recency would have buried.
@@ -789,6 +861,7 @@ def search_ranked(
         conn,
         query,
         sids=None if descriptive else list(existing_ids),
+        plan=plan,
     )
     extra_ids = [sid for sid in match_map if sid not in existing_ids] if descriptive else []
     if extra_ids:
@@ -812,8 +885,44 @@ def search_ranked(
         age = _age_days(relevant_ts, now)
         recency = math.exp(-age / half_life_days) if age >= 0 else 0.0
         row["_score"] = float(row.get("_bm25") or 0.0) + recency_alpha * recency
+        lifecycle_source = " ".join(
+            part
+            for part in (
+                row.get("name") or "",
+                row.get("first_msg") or "",
+                row.get("last_msg") or "",
+                row.get("context") or "",
+            )
+            if part
+        )
+        row["_closeout_score"] = float(row.get("match_lifecycle_score") or 0.0)
+        if plan.wants_closeout:
+            row["_closeout_score"] += sum(
+                weight
+                for cue, weight in _CLOSEOUT_CUE_WEIGHTS.items()
+                if cue in lifecycle_source.lower()
+            ) * 0.5
 
-    if len(terms) == 1:
+    if plan.descriptive and plan.wants_closeout:
+        decorated.sort(
+            key=lambda row: (
+                float(row.get("_closeout_score") or 0.0),
+                int(row.get("match_term_count") or 0),
+                _timestamp_sort_key(
+                    row.get("match_timestamp")
+                    or row.get("last_timestamp")
+                    or row.get("timestamp")
+                ),
+                float(row.get("match_conversation_score") or 0.0),
+                float(row.get("_score") or 0.0),
+                float(row.get("match_density") or 0.0),
+                float(row.get("match_compactness") or 0.0),
+                float(row.get("_match_bm25") or 0.0),
+                float(row.get("mtime") or 0.0),
+            ),
+            reverse=True,
+        )
+    elif len(terms) == 1:
         decorated.sort(
             key=lambda row: (
                 int(row.get("match_term_count") or 0),
@@ -860,6 +969,7 @@ def search_ranked(
         clean.pop("_score", None)
         clean.pop("_match_bm25", None)
         clean.pop("_assistant_bonus", None)
+        clean.pop("_closeout_score", None)
         trimmed.append(clean)
     return trimmed
 

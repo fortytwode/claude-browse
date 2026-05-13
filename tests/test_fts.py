@@ -340,6 +340,79 @@ def test_search_ranked_context_uses_combined_exchange_window(db):
     assert "performance" in results[0]["context"]
 
 
+def test_search_ranked_closeout_query_prefers_closeout_like_thread(db):
+    _seed(
+        db,
+        "closeout_thread",
+        "musopia closeout wrapup",
+        timestamp="2026-05-10T00:00:00Z",
+        last_timestamp="2026-05-10T01:00:00Z",
+        segments=[
+            ("user", "Can you close out Musopia after the final session?", "2026-05-10T00:00:00Z"),
+            ("assistant", "Yes, I will finalize the Musopia handoff summary.", "2026-05-10T01:00:00Z"),
+        ],
+    )
+    _seed(
+        db,
+        "generic_thread",
+        "musopia dashboard work",
+        timestamp="2026-05-11T00:00:00Z",
+        last_timestamp="2026-05-11T01:00:00Z",
+        segments=[
+            ("user", "Can you check the Musopia dashboard?", "2026-05-11T00:00:00Z"),
+            ("assistant", "Yes, I am looking at Musopia metrics now.", "2026-05-11T01:00:00Z"),
+        ],
+    )
+
+    results = fts.search_ranked(db, "last closeout session for Musopia")
+    assert [r["session_id"] for r in results][:2] == [
+        "closeout_thread",
+        "generic_thread",
+    ]
+    assert "Musopia" in results[0]["context"]
+
+
+def test_search_ranked_low_confidence_descriptive_query_falls_back_to_recent(db):
+    _seed(
+        db,
+        "older",
+        "anything",
+        timestamp="2026-05-01T00:00:00Z",
+        last_timestamp="2026-05-01T01:00:00Z",
+        mtime=1.0,
+    )
+    _seed(
+        db,
+        "newer",
+        "more anything",
+        timestamp="2026-05-02T00:00:00Z",
+        last_timestamp="2026-05-02T01:00:00Z",
+        mtime=2.0,
+    )
+
+    results = fts.search_ranked(db, "that we discussed, please?")
+    assert [r["session_id"] for r in results][:2] == ["newer", "older"]
+
+
+def test_search_ranked_descriptive_query_matches_local_window(db):
+    _seed(
+        db,
+        "s1",
+        "team management discussion",
+        segments=[
+            ("user", "Need to discuss Neil today.", "2026-05-09T00:00:00Z"),
+            ("assistant", "Sure, what part?", "2026-05-09T00:02:00Z"),
+            ("user", "His performance review with Nevena.", "2026-05-09T00:04:00Z"),
+            ("assistant", "I can help with that.", "2026-05-09T00:06:00Z"),
+        ],
+    )
+
+    results = fts.search_ranked(db, "where i was discussing neil performance with nevena")
+    assert [r["session_id"] for r in results] == ["s1"]
+    assert "Neil" in results[0]["context"]
+    assert "Nevena" in results[0]["context"]
+
+
 # --- reindex ---------------------------------------------------------------
 
 
