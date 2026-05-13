@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from claude_browse import fts
+from claude_browse.query import build_query_plan
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -572,6 +573,43 @@ def test_search_ranked_metadata_anchor_score_downweights_very_late_prompt_mentio
             ("assistant", "Yes, the Pokpok brief needs work.", "2026-05-09T00:05:00Z"),
         ],
     )
+
+    results = fts.search_ranked(db, "pokpok")
+    assert results[0]["session_id"] == "real_thread"
+
+
+def test_search_ranked_plain_entity_query_demotes_code_reference_mentions(db):
+    _seed(
+        db,
+        "code_ref_thread",
+        "artifact thread",
+        title="MaxRewards prompt audit",
+        first_msg="I pointed Claude at build_pokpok_deck.py and pokpok_strategy.md to inspect the prompts.",
+        segments=[
+            (
+                "assistant",
+                "This references the same recent scripts (Pokpok, Zeta, BeFreed) and build_pokpok_deck.py to inspect the prompt.",
+                "2026-05-10T00:00:00Z",
+            ),
+        ],
+    )
+    _seed(
+        db,
+        "real_thread",
+        "pokpok deconstruction review",
+        title="Finalize Pokpok deconstruction",
+        first_msg="Please review the Pokpok brief.",
+        segments=[
+            ("user", "Please review the Pokpok brief.", "2026-05-09T00:00:00Z"),
+            ("assistant", "Yes, the Pokpok brief needs work.", "2026-05-09T00:05:00Z"),
+        ],
+    )
+
+    plan = build_query_plan("pokpok")
+    code_row = fts.get_by_sid(db, "code_ref_thread")
+    real_row = fts.get_by_sid(db, "real_thread")
+    assert fts._artifact_penalty(code_row, plan, "pokpok") >= 5.0
+    assert fts._artifact_penalty(real_row, plan, "pokpok") == 0.0
 
     results = fts.search_ranked(db, "pokpok")
     assert results[0]["session_id"] == "real_thread"

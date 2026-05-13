@@ -100,6 +100,16 @@ _SEARCH_SYSTEM_QUERY_CUES = (
     "sqlite",
     "typesense",
 )
+_CODE_REFERENCE_WINDOW_CUES = (
+    "build",
+    "deck",
+    "decks",
+    "prompt",
+    "prompts",
+    "script",
+    "scripts",
+    "marp",
+)
 
 
 def open_db(path: str = DB_PATH) -> sqlite3.Connection:
@@ -737,6 +747,15 @@ def _query_mentions_search_system(query: str) -> bool:
     return _contains_any(lowered, _SEARCH_SYSTEM_QUERY_CUES)
 
 
+def _is_plain_entity_query(plan: QueryPlan, query: str) -> bool:
+    stripped = query.strip().lower().replace("’", "'")
+    if len(plan.anchor_terms) != 1:
+        return False
+    if stripped != str(plan.anchor_terms[0]).lower():
+        return False
+    return bool(re.fullmatch(r"[a-z0-9']+", stripped))
+
+
 def _metadata_anchor_score(row: dict, plan: QueryPlan) -> float:
     anchors = [term for term in plan.anchor_terms if term]
     if not anchors:
@@ -798,6 +817,16 @@ def _artifact_penalty(row: dict, plan: QueryPlan, query: str) -> float:
         or "performance" in plan.normalized_terms
     ):
         penalty += 3.0
+    if _is_plain_entity_query(plan, query):
+        anchor = str(plan.anchor_terms[0]).lower()
+        code_ref_patterns = (
+            rf"\b\w*{re.escape(anchor)}\w*\.(py|md|pptx?|json|csv)\b",
+            rf"`[^`]*{re.escape(anchor)}[^`]*`",
+            rf"(?:{'|'.join(_CODE_REFERENCE_WINDOW_CUES)})[^\\n]{{0,40}}{re.escape(anchor)}",
+            rf"{re.escape(anchor)}[^\\n]{{0,40}}(?:{'|'.join(_CODE_REFERENCE_WINDOW_CUES)})",
+        )
+        if any(re.search(pattern, haystack) for pattern in code_ref_patterns):
+            penalty += 5.0
     return penalty
 
 
