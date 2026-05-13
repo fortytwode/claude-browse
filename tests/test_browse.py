@@ -102,6 +102,39 @@ def test_format_row_allows_visible_triple_hash_without_breaking_metadata():
     )
 
 
+def test_format_query_coach_row_suggests_anchor_summary_for_descriptive_query():
+    row = browse.format_query_coach_row("last closeout session for Musopia")
+    assert row is not None
+    visible, sid, cwd, provider = browse._split_row_metadata(row)
+    assert "Looking for: musopia + closeout" in visible
+    assert sid == browse.COACH_SESSION_ID
+    assert cwd == ""
+    assert provider == browse.COACH_PROVIDER
+
+
+def test_format_query_coach_row_shows_low_confidence_guidance():
+    row = browse.format_query_coach_row("that we discussed, please?")
+    assert row is not None
+    visible, sid, _cwd, _provider = browse._split_row_metadata(row)
+    assert "Add one anchor" in visible
+    assert sid == browse.COACH_SESSION_ID
+
+
+def test_render_query_coach_preview_explains_descriptive_query_interpretation():
+    preview = browse.render_query_coach_preview(
+        "where i was asking nevena about feedback"
+    )
+    assert "Looking for: nevena + feedback" in preview
+    assert "Anchors: nevena, feedback" in preview
+    assert "Sentence-style query detected." in preview
+
+
+def test_render_query_coach_preview_handles_low_confidence_query():
+    preview = browse.render_query_coach_preview("that we discussed, please?")
+    assert "Add one concrete anchor" in preview
+    assert "nevena feedback" in preview
+
+
 def test_default_target_provider_follows_entrypoint_name():
     assert browse._default_target_provider("claude-browse") == "claude"
     assert browse._default_target_provider("/tmp/codex-browse") == "codex"

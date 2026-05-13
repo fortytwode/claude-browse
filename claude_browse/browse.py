@@ -24,10 +24,13 @@ from .core import (
     write_import_file,
 )
 from .providers import get_provider, provider_entries, provider_ids
+from .query import QueryPlan, build_query_plan
 from .work_state import build_work_state, render_restart_card_terminal
 
 DEFAULT_LIMIT = 100
 ROW_META_SEP = "\x1f"
+COACH_SESSION_ID = "__coach__"
+COACH_PROVIDER = "coach"
 
 
 def _encode_row_metadata(
@@ -47,6 +50,100 @@ def _split_row_metadata(line: str) -> tuple[str, str, str, str] | None:
         return None
     visible, sid, cwd, provider = parts
     return visible, sid.strip(), cwd.strip(), provider.strip()
+
+
+def _query_feedback_terms(plan: QueryPlan) -> list[str]:
+    terms = list(plan.anchor_terms[:3])
+    if plan.wants_closeout and "closeout" not in terms:
+        terms.append("closeout")
+    elif plan.wants_recent and "latest" not in terms:
+        terms.append("latest")
+    return terms[:4]
+
+
+def _query_coach_summary(plan: QueryPlan) -> str:
+    if plan.low_confidence:
+        return "Add one anchor: person, client, brand, or folder"
+
+    terms = _query_feedback_terms(plan)
+    if len(terms) == 1 and not plan.descriptive:
+        return f"Looking for threads about: {terms[0]}"
+    if terms:
+        return f"Looking for: {' + '.join(terms)}"
+    return "Describe one thread with a person, client, brand, or folder"
+
+
+def format_query_coach_row(query: str) -> str | None:
+    if not query.strip():
+        return None
+    plan = build_query_plan(query)
+    summary = _query_coach_summary(plan)
+    visible = (
+        "\033[2mTip\033[0m      "
+        "\033[2mcoach\033[0m "
+        f"{'':<15} \033[1;36m{summary}\033[0m  "
+    )
+    return _encode_row_metadata(
+        visible,
+        COACH_SESSION_ID,
+        "",
+        COACH_PROVIDER,
+    )
+
+
+def render_query_coach_preview(query: str) -> str:
+    plan = build_query_plan(query)
+    stripped = query.strip()
+    if not stripped:
+        return (
+            "Query coaching\n\n"
+            "Describe the thread you want in a short sentence.\n\n"
+            "Examples:\n"
+            "  where i was asking nevena about feedback\n"
+            "  last closeout session for musopia\n"
+            "  pokpok brief where we questioned the opportunities"
+        )
+
+    lines = ["Query coaching", "", _query_coach_summary(plan)]
+    if plan.low_confidence:
+        lines.extend(
+            [
+                "",
+                "Add one concrete anchor so the search can stop guessing.",
+                "Good anchors: person, client, brand, folder, or exact phrase.",
+                "",
+                "Try something like:",
+                "  nevena feedback",
+                "  musopia closeout",
+                "  pokpok opportunities",
+            ]
+        )
+        return "\n".join(lines)
+
+    if plan.anchor_terms:
+        lines.append("")
+        lines.append(f"Anchors: {', '.join(plan.anchor_terms)}")
+
+    intents: list[str] = []
+    if plan.wants_recent:
+        intents.append("latest / last")
+    if plan.wants_closeout:
+        intents.append("closeout / wrap-up")
+    if intents:
+        lines.append(f"Intent: {', '.join(intents)}")
+
+    lines.extend(
+        [
+            "",
+            (
+                "Sentence-style query detected. The ranker will prefer these anchors "
+                "over filler words."
+                if plan.descriptive
+                else "Exact anchor search. Add more context if the results still feel broad."
+            ),
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _folder_prefixes() -> tuple[str, ...]:
@@ -162,6 +259,7 @@ from claude_browse.core import (
     highlight_terms,
     provider_display_name,
 )
+from claude_browse.browse import COACH_SESSION_ID, render_query_coach_preview
 from claude_browse.work_state import build_work_state, render_restart_card_terminal
 
 DB_PATH = {db_path!r}
@@ -185,6 +283,10 @@ def _lookup_session(session_id):
 
 
 def get_preview(session_id, query=""):
+    if session_id == COACH_SESSION_ID:
+        print(render_query_coach_preview(query))
+        return
+
     session = _lookup_session(session_id)
     if not session:
         print("Session not found.")
@@ -266,7 +368,7 @@ import sys
 sys.path.insert(0, {package_dir!r})
 
 from claude_browse import fts
-from claude_browse.browse import format_row
+from claude_browse.browse import format_query_coach_row, format_row
 
 DB_PATH = {db_path!r}
 CWD_FILTER = {cwd_filter!r}
@@ -287,6 +389,10 @@ else:
 
 if CWD_FILTER:
     results = [r for r in results if (r.get("cwd") or "").startswith(CWD_FILTER)]
+
+coach_row = format_query_coach_row(q)
+if coach_row:
+    print(coach_row)
 
 for r in results:
     print(format_row(r, q))
@@ -775,6 +881,10 @@ def main() -> None:
             print("Could not parse selected session.", file=sys.stderr)
             sys.exit(1)
         _visible, session_id, _cwd_meta, provider = row_meta
+
+        if session_id == COACH_SESSION_ID:
+            print(render_query_coach_preview(selection_query))
+            return
 
         session = _load_session_by_id(session_id)
         if not session:

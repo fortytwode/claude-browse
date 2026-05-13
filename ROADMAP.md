@@ -85,11 +85,11 @@ Why it matters:
 - Cross-provider tools cannot universally rewind an original thread in place, but they can reliably start a new session from the earlier matched exchange
 
 ### Phase 4 — Query-first UI
-**Status:** next
+**Status:** shipped
 
 Make the visible affordance match the descriptive retrieval model that already exists.
 
-What ships:
+What shipped:
 - Prompt copy that reads like a sentence starter, not a token search box
 - In-picker examples that encourage longer natural-language recall queries
 - Low-confidence coaching when the query is too vague and needs one concrete anchor
@@ -164,8 +164,7 @@ Current manual test gate:
 - Test `Ctrl-B` for restart-card export output.
 
 Next gated build after testing:
-- query-first UI polish for sentence-style search affordances
-- then semantic reranking under the hood for descriptive thread recall
+- semantic reranking under the hood for descriptive thread recall
 - only after that, reconsider `Task View` if real usage proves thread clustering is the actual problem
 
 ---
