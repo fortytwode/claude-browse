@@ -90,12 +90,16 @@ Why it matters:
 Keep one visible query model while improving retrieval depth behind the scenes.
 
 What ships:
-- Hybrid lexical + semantic reranking for descriptive thread queries
+- Stronger query understanding and typed lexical reranking on top of SQLite first
+- Hybrid lexical + semantic reranking for descriptive thread queries only if the
+  typed SQLite path still plateaus on the eval set
 - Better fallback when the user remembers the idea but not the exact anchor words
 - Still one visible mode: describe the thread you want
 
 Why it matters:
 - Natural-language recall gets stronger without making the UI more complicated
+- This keeps the current local-first, no-daemon, zero-runtime-dependency product
+  intact while we validate whether a heavier backend is actually necessary
 
 ### Phase 5 — Work artifacts
 **Status:** later
