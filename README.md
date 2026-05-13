@@ -14,7 +14,7 @@ or Cursor by default.
 ```text
 claude-browse
 
-Find thread >
+Find thread where...
   45m ago  team-ops   22msg  finalize pre-flight smoke tests  ###abc…
   3h ago   claude-br  7msg   roadmap for shipping v1          ###def…
   Apr 19   sales      14msg  draft proposal for acme co       ###ghi…
@@ -88,7 +88,7 @@ While the TUI is up:
 
 | Key              | What it does                                                     |
 | ---------------- | ---------------------------------------------------------------- |
-| Type             | Describe the thread you want in plain English, or use exact names / phrases |
+| Type             | Write a short sentence about the thread you want, or use exact names / phrases |
 | ↑ ↓              | Move between sessions                                            |
 | Shift-↑ Shift-↓  | Scroll the preview pane                                          |
 | Enter            | Resume the selected thread in the app you launched (`claude-browse`, `codex-browse`, `gemini-browse`, `copilot-browse`, or `cursor-browse`) in yolo mode |
@@ -100,8 +100,9 @@ While the TUI is up:
 
 Examples:
 
-- Query examples:
+- Sentence-style query examples:
   - `where i was asking nevena about feedback`
+  - `last closeout session for musopia`
   - `pokpok brief where we questioned the opportunities`
   - `"runna sca2"` when you know the exact phrase already
 
@@ -110,6 +111,7 @@ Examples:
 - In `gemini-browse`, a Gemini thread resumes natively in Gemini and Claude or CodeX threads start fresh Gemini sessions with imported context.
 - In `copilot-browse`, a Copilot thread resumes natively in Copilot and Claude, CodeX, or Gemini threads start fresh Copilot sessions with imported context.
 - In `cursor-browse`, Claude, CodeX, and Gemini threads start fresh Cursor sessions with imported context.
+- The UI is meant to encourage sentence-style recall, not one- or two-word pecking. You should feel comfortable typing a short description like `where i was asking nevena about feedback`.
 - Descriptive queries are reduced to the most specific anchors under the hood, so `find me the thread where i was asking about nevena feedback` behaves like a thread-recall query, not a hard AND over filler words.
 - Descriptive queries now separate anchor terms from intent words, so `last closeout session for musopia` treats `musopia` as the hard anchor and `last / closeout` as ranking signals instead of weighting every word equally.
 - Search now prioritizes the most recent relevant mention of your query, not only the thread's latest unrelated activity.

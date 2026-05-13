@@ -84,7 +84,23 @@ What shipped:
 Why it matters:
 - Cross-provider tools cannot universally rewind an original thread in place, but they can reliably start a new session from the earlier matched exchange
 
-### Phase 4 — Semantic reranking under the hood
+### Phase 4 — Query-first UI
+**Status:** next
+
+Make the visible affordance match the descriptive retrieval model that already exists.
+
+What ships:
+- Prompt copy that reads like a sentence starter, not a token search box
+- In-picker examples that encourage longer natural-language recall queries
+- Low-confidence coaching when the query is too vague and needs one concrete anchor
+- Interpreted-query feedback so the user can see which subject the tool is actually searching for
+- A clearer distinction between plain entity lookups and descriptive thread recall
+
+Why it matters:
+- The product should visibly invite `where i was asking nevena about feedback`, not accidentally train users to type `nevena feedback`
+- Better UI guidance is cheaper and safer than piling on backend complexity when the current failure is mostly affordance mismatch
+
+### Phase 5 — Semantic reranking under the hood
 **Status:** next
 
 Keep one visible query model while improving retrieval depth behind the scenes.
@@ -101,7 +117,7 @@ Why it matters:
 - This keeps the current local-first, no-daemon, zero-runtime-dependency product
   intact while we validate whether a heavier backend is actually necessary
 
-### Phase 5 — Work artifacts
+### Phase 6 — Work artifacts
 **Status:** later
 
 Turn session + repo state into reusable outputs.
@@ -115,7 +131,7 @@ What ships:
 Why it matters:
 - Session history becomes operationally useful outside the TUI
 
-### Phase 6 — Shared work graph
+### Phase 7 — Shared work graph
 **Status:** later
 
 Move from local task recovery to shared team context.
@@ -148,7 +164,8 @@ Current manual test gate:
 - Test `Ctrl-B` for restart-card export output.
 
 Next gated build after testing:
-- semantic reranking under the hood for descriptive thread recall
+- query-first UI polish for sentence-style search affordances
+- then semantic reranking under the hood for descriptive thread recall
 - only after that, reconsider `Task View` if real usage proves thread clustering is the actual problem
 
 ---

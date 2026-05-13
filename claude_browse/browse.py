@@ -367,9 +367,10 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         f"  --target PROVIDER     Override launch target (`{valid_targets}`)\n"
         "  -h, --help            Show this help\n"
         "\n"
-        "Describe the thread inside the picker:\n"
+        "Type a sentence inside the picker, not just one or two words:\n"
         "  pokpok brief where we questioned the opportunities\n"
         "  where i was asking nevena about feedback\n"
+        "  last closeout session for musopia\n"
         '  "runna sca2"          Exact phrase when you know the words already\n'
         "  runna*                Prefix match: runna, runnathon, runna2026, ...\n"
         "  Longer descriptive queries are reduced to the most specific anchors.\n"
@@ -726,10 +727,12 @@ def main() -> None:
             "--reverse",
             "--height=90%",
             "--border=rounded",
-            "--prompt=Find thread > ",
+            "--prompt=Find thread where... ",
             (
                 "--header="
-                'Describe the thread, person, client, or folder you want. '
+                'Type a sentence, not just keywords. Try: "where i was asking nevena about feedback" | '
+                '"last closeout session for musopia" | '
+                '"pokpok brief where we questioned the opportunities". '
                 f"Enter: resume in {target_name} (yolo) | "
                 f"Ctrl-T: re-enter matched topic in {target_name} | "
                 f"Ctrl-S: open in {target_name} (safe) | "
