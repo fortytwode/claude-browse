@@ -676,7 +676,7 @@ def test_build_import_markdown_targets_claude_from_codex(monkeypatch):
         lambda provider: (
             SimpleNamespace(
                 display_name="CodeX",
-                assistant_turns_available=False,
+                assistant_turns_available=True,
             )
             if provider == "codex"
             else SimpleNamespace(display_name="Claude")
@@ -701,7 +701,6 @@ def test_build_import_markdown_targets_claude_from_codex(monkeypatch):
     assert "handed into a new Claude session." in text
     assert "- Source app: CodeX" in text
     assert "- Current repo state: Branch `release` with 1 uncommitted file." in text
-    assert "Note: CodeX local history only exposes user turns here." in text
     assert "Most recent turns are shown first." in text
     assert "### User" in text
     assert "Review the launch checklist" in text

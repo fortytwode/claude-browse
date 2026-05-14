@@ -348,6 +348,7 @@ def reindex(conn: sqlite3.Connection) -> tuple[int, int, int]:
     """
     records = list_index_records()
     record_map: dict[str, dict] = {r["path"]: r for r in records}
+    current_sids = {str(r.get("session_id") or "") for r in records}
 
     existing: dict[str, tuple[str, float]] = {
         row[0]: (row[1], row[2])
@@ -367,7 +368,7 @@ def reindex(conn: sqlite3.Connection) -> tuple[int, int, int]:
                 updated += 1
 
     for path, (sid, _) in existing.items():
-        if path not in record_map:
+        if path not in record_map and sid not in current_sids:
             conn.execute("DELETE FROM sessions WHERE sid = ?", (sid,))
             conn.execute("DELETE FROM sessions_fts WHERE sid = ?", (sid,))
             _delete_segments_for_sid(conn, sid)

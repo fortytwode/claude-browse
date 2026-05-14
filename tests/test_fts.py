@@ -924,6 +924,65 @@ def test_reindex_removes_deleted_files(db, tmp_path, monkeypatch):
     assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
 
 
+def test_reindex_keeps_session_when_same_sid_moves_paths(db, tmp_path, monkeypatch):
+    old_dir = tmp_path / "projects" / "old"
+    new_dir = tmp_path / "projects" / "new"
+    old_dir.mkdir(parents=True)
+    new_dir.mkdir(parents=True)
+    old_target = old_dir / "session.jsonl"
+    new_target = new_dir / "session.jsonl"
+    shutil.copy(FIXTURES / "sample_session.jsonl", old_target)
+    shutil.copy(FIXTURES / "sample_session.jsonl", new_target)
+
+    sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    def _record(path: str, mtime: float) -> list[dict[str, object]]:
+        return [{
+            "path": path,
+            "provider": "claude",
+            "session_id": sid,
+            "first_msg": "the login page crashes when I click continue",
+            "last_msg": "email validation should happen before the redirect",
+            "timestamp": "2026-04-01T10:00:00Z",
+            "last_timestamp": "2026-04-01T10:10:00Z",
+            "cwd": "/Users/alice/code/webapp",
+            "name": "Debug login flow",
+            "msg_count": 4,
+            "mtime": mtime,
+            "fields": {
+                "cwd": "/users/alice/code/webapp",
+                "title": "debug login flow",
+                "first_msg": "the login page crashes when i click continue",
+                "user_text": "email validation should happen before the redirect",
+                "asst_text": "the login handler is short-circuiting on missing email validation",
+                "boilerplate": "",
+            },
+        }]
+
+    monkeypatch.setattr(
+        fts,
+        "list_index_records",
+        lambda: _record(str(old_target), os.path.getmtime(old_target)),
+    )
+    fts.reindex(db)
+
+    monkeypatch.setattr(
+        fts,
+        "list_index_records",
+        lambda: _record(str(new_target), os.path.getmtime(new_target)),
+    )
+    added, updated, removed = fts.reindex(db)
+
+    row = db.execute(
+        "SELECT sid, path FROM sessions WHERE sid = ?",
+        (sid,),
+    ).fetchone()
+    assert row == (sid, str(new_target))
+    assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+    assert removed == 0
+    assert added + updated == 1
+
+
 def test_get_by_sid_roundtrip(db):
     _seed(db, "s1", "hello world", title="My Session", cwd="/Users/me/proj")
     info = fts.get_by_sid(db, "s1")

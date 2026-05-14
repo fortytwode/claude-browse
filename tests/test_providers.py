@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -283,7 +284,7 @@ def test_provider_capabilities_match_current_products():
     assert claude.can_native_resume is True
     assert claude.assistant_turns_available is True
     assert codex.can_native_resume is True
-    assert codex.assistant_turns_available is False
+    assert codex.assistant_turns_available is True
     assert gemini.can_native_resume is True
     assert gemini.assistant_turns_available is True
     assert copilot.source_capable is True
@@ -342,12 +343,18 @@ def test_claude_provider_exposes_file_backed_helpers():
 def test_codex_provider_lists_index_records(monkeypatch, tmp_path):
     state_path = tmp_path / "state.sqlite"
     history_path = tmp_path / "history.jsonl"
+    sessions_dir = tmp_path / "sessions" / "2026" / "05" / "12"
+    sessions_dir.mkdir(parents=True)
+    session_path = sessions_dir / (
+        "rollout-2026-05-12T09-05-25-019e-test-aaaa-bbbb-cccccccccccc.jsonl"
+    )
 
     conn = sqlite3.connect(state_path)
     conn.execute(
         """
         CREATE TABLE threads (
             id TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
             cwd TEXT NOT NULL,
             title TEXT NOT NULL,
             first_user_message TEXT NOT NULL DEFAULT '',
@@ -362,12 +369,13 @@ def test_codex_provider_lists_index_records(monkeypatch, tmp_path):
     conn.execute(
         """
         INSERT INTO threads (
-            id, cwd, title, first_user_message, created_at_ms, updated_at_ms,
+            id, path, cwd, title, first_user_message, created_at_ms, updated_at_ms,
             created_at, updated_at, thread_source
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "019e-test-aaaa-bbbb-cccccccccccc",
+            str(session_path),
             "/Users/alice/code/codex-app",
             "Fix onboarding bug",
             "Please debug the onboarding flow",
@@ -388,11 +396,58 @@ def test_codex_provider_lists_index_records(monkeypatch, tmp_path):
             '{"session_id":"019e-test-aaaa-bbbb-cccccccccccc","ts":1776000120,"text":"Now switch to paywall copy after that"}',
         ]) + "\n"
     )
+    session_path.write_text(
+        "\n".join([
+            json.dumps({
+                "timestamp": "2026-05-12T08:00:00.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "Please debug the onboarding flow",
+                },
+            }),
+            json.dumps({
+                "timestamp": "2026-05-12T08:00:05.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "I found the root cause in the signup gate.",
+                        }
+                    ],
+                },
+            }),
+            json.dumps({
+                "timestamp": "2026-05-12T08:00:30.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "Now switch to paywall copy after that",
+                },
+            }),
+            json.dumps({
+                "timestamp": "2026-05-12T08:01:00.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "last_agent_message": (
+                        "Now switch to paywall copy after that and keep the "
+                        "same relief structure."
+                    ),
+                },
+            }),
+        ]) + "\n"
+    )
 
     monkeypatch.setattr(codex_provider, "CODEX_STATE_DB", str(state_path))
     monkeypatch.setattr(codex_provider, "CODEX_HISTORY_PATH", str(history_path))
+    monkeypatch.setattr(codex_provider, "CODEX_SESSIONS_DIR", str(tmp_path / "sessions"))
     codex_provider._CODEX_HISTORY_CACHE["mtime"] = None
     codex_provider._CODEX_HISTORY_CACHE["entries"] = {}
+    codex_provider._CODEX_SESSION_TURNS_CACHE["entries"] = {}
 
     spec = get_provider("codex")
     records = spec.list_index_records()
@@ -400,7 +455,57 @@ def test_codex_provider_lists_index_records(monkeypatch, tmp_path):
     assert len(records) == 1
     assert records[0]["provider"] == "codex"
     assert records[0]["session_id"] == "019e-test-aaaa-bbbb-cccccccccccc"
+    assert records[0]["path"] == str(session_path)
     assert "paywall copy" in records[0]["last_msg"]
+    assert "root cause in the signup gate" in records[0]["fields"]["asst_text"]
+
+
+def test_codex_provider_transcript_turns_prefer_session_file(monkeypatch, tmp_path):
+    history_path = tmp_path / "history.jsonl"
+    session_path = tmp_path / "rollout-2026-05-12T09-05-25-019e-test.jsonl"
+
+    history_path.write_text(
+        '{"session_id":"019e-test","ts":1776000000,"text":"fallback user text"}\n'
+    )
+    session_path.write_text(
+        "\n".join([
+            json.dumps({
+                "timestamp": "2026-05-12T08:00:00.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "Port the travel relief sequence into everyday-life moments",
+                },
+            }),
+            json.dumps({
+                "timestamp": "2026-05-12T08:00:05.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Pokpok already knows how to stage parent stress and calmer outcome.",
+                        }
+                    ],
+                },
+            }),
+        ]) + "\n"
+    )
+
+    monkeypatch.setattr(codex_provider, "CODEX_HISTORY_PATH", str(history_path))
+    codex_provider._CODEX_HISTORY_CACHE["mtime"] = None
+    codex_provider._CODEX_HISTORY_CACHE["entries"] = {}
+    codex_provider._CODEX_SESSION_TURNS_CACHE["entries"] = {}
+
+    assert codex_provider.transcript_turns(str(session_path), "019e-test") == [
+        ("user", "Port the travel relief sequence into everyday-life moments"),
+        (
+            "assistant",
+            "Pokpok already knows how to stage parent stress and calmer outcome.",
+        ),
+    ]
 
 
 def test_gemini_provider_lists_index_records(monkeypatch, tmp_path):
