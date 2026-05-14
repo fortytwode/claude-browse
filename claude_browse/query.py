@@ -111,6 +111,27 @@ _NOISY_WORKFLOW_TERMS = frozenset(
 )
 
 _TOKEN_EDGE_RE = re.compile(r"(^[^\w*]+|[^\w*]+$)")
+
+
+def term_spans(text: str, term: str) -> list[tuple[int, int]]:
+    lowered = text.lower()
+    if " " in term:
+        spans: list[tuple[int, int]] = []
+        start = 0
+        while True:
+            idx = lowered.find(term, start)
+            if idx < 0:
+                return spans
+            spans.append((idx, idx + len(term)))
+            start = idx + 1
+    pattern = re.compile(rf"(?<!\w){re.escape(term)}(?!\w)")
+    return [(match.start(), match.end()) for match in pattern.finditer(lowered)]
+
+
+def text_contains_term(text: str, term: str) -> bool:
+    return bool(term_spans(text, term))
+
+
 @dataclass(frozen=True)
 class QueryPlan:
     """Typed interpretation of a user query.
@@ -227,8 +248,13 @@ def build_query_plan(query: str, max_terms: int = 5) -> QueryPlan:
         word_terms = [term for term in word_terms if term in keep]
 
     fts_terms = _dedupe_preserve_order([*phrase_terms, *word_terms])
+    normalized_query_phrase = " ".join(normalized_terms).strip()
+    phrase_highlights = []
+    if len(raw_terms) >= 4 and normalized_query_phrase:
+        phrase_highlights.append(normalized_query_phrase)
     highlight_terms = _dedupe_preserve_order(
         [
+            *phrase_highlights,
             *fts_terms,
             *[
                 term

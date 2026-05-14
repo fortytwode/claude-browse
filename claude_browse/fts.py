@@ -19,7 +19,12 @@ from datetime import datetime, timezone
 
 from .core import list_index_records
 from .providers import get_provider
-from .query import QueryPlan, build_query_plan, significant_query_terms
+from .query import (
+    QueryPlan,
+    build_query_plan,
+    significant_query_terms,
+    term_spans,
+)
 
 DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
 # v2: added last_timestamp column so the list view can sort by most recent
@@ -681,12 +686,11 @@ def _latest_segment_matches(
         required_term_count = len(required_term_source)
 
     def _match_stats(text: str) -> tuple[int, float, float]:
-        lowered = text.lower()
         positions: list[tuple[int, int]] = []
         for term in lowered_terms:
-            pos = lowered.find(term)
-            if pos >= 0:
-                positions.append((pos, pos + len(term)))
+            spans = term_spans(text, term)
+            if spans:
+                positions.append(spans[0])
         term_count = len(positions)
         if not positions:
             return (0, 0.0, 0.0)
@@ -720,29 +724,48 @@ def _latest_segment_matches(
 
     def _context_from_exchange(text: str) -> str:
         clean = " ".join(text.split())
-        lowered = clean.lower()
-        positions = [
-            (lowered.find(term), lowered.find(term) + len(term))
-            for term in highlight_terms
-            if lowered.find(term) >= 0
-        ]
-        if not positions:
+        matches = []
+        for term in highlight_terms:
+            spans = term_spans(clean, term)
+            if spans:
+                start, end = spans[0]
+                matches.append((term, start, end))
+        if not matches:
             excerpt = clean[:180]
+            highlight_set: set[str] = set()
         else:
-            start = max(0, min(pos for pos, _end in positions) - 32)
-            end = min(len(clean), max(pos for _start, pos in positions) + 80)
+            phrase_matches = [
+                (_term, start, end)
+                for _term, start, end in matches
+                if " " in _term
+            ]
+            chosen = phrase_matches or matches
+            highlight_set = {term for term, _start, _end in chosen}
+            start = max(0, min(pos for _term, pos, _end in chosen) - 32)
+            end = min(
+                len(clean),
+                max(pos for _term, _start, pos in chosen) + 80,
+            )
             excerpt = clean[start:end]
             if start > 0:
                 excerpt = "…" + excerpt
             if end < len(clean):
                 excerpt = excerpt + "…"
-        for term in sorted(highlight_terms, key=len, reverse=True):
-            excerpt = re.sub(
-                re.escape(term),
-                lambda match: f"\x01{match.group(0)}\x02",
-                excerpt,
-                flags=re.IGNORECASE,
-            )
+        for term in sorted(highlight_set, key=len, reverse=True):
+            if " " in term:
+                excerpt = re.sub(
+                    re.escape(term),
+                    lambda match: f"\x01{match.group(0)}\x02",
+                    excerpt,
+                    flags=re.IGNORECASE,
+                )
+            else:
+                excerpt = re.sub(
+                    rf"(?<!\w){re.escape(term)}(?!\w)",
+                    lambda match: f"\x01{match.group(0)}\x02",
+                    excerpt,
+                    flags=re.IGNORECASE,
+                )
         return excerpt
 
     ranked = []

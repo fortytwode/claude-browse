@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from .git_state import inspect_repo_state
 from .providers import get_provider
 from .providers.common import is_substantive_text
-from .query import significant_query_terms
+from .query import build_query_plan, term_spans, text_contains_term
 
 _QUESTION_STARTERS = (
     "what ",
@@ -80,19 +80,51 @@ def _matching_turns(
     selection_query: str,
     limit: int,
 ) -> list[tuple[str, str]]:
-    terms = [
-        term.lower()
-        for term in significant_query_terms(selection_query)
-        if term.strip()
-    ]
+    terms = _query_match_terms(selection_query)
     if not terms:
         return []
     matched = [
-        (role, text)
+        (role, _excerpt_around_terms(text, terms))
         for role, text in turns
-        if any(term in text.lower() for term in terms)
+        if any(text_contains_term(text, term) for term in terms)
     ]
     return list(reversed(matched[-limit:]))
+
+
+def _query_match_terms(selection_query: str) -> list[str]:
+    plan = build_query_plan(selection_query)
+    return [term.lower() for term in plan.highlight_terms if term.strip()]
+
+
+def _excerpt_around_terms(
+    text: str,
+    terms: list[str],
+    *,
+    before: int = 48,
+    after: int = 180,
+) -> str:
+    clean = " ".join(text.split())
+    lowered = clean.lower()
+    matches = []
+    for term in terms:
+        spans = term_spans(lowered, term)
+        if spans:
+            start, end = spans[0]
+            matches.append((term, start, end))
+    if not matches:
+        return clean
+    phrase_matches = [
+        (_term, start, end) for _term, start, end in matches if " " in _term
+    ]
+    chosen = phrase_matches or matches
+    start = max(0, min(pos for _term, pos, _end in chosen) - before)
+    end = min(len(clean), max(pos for _term, _start, pos in chosen) + after)
+    excerpt = clean[start:end]
+    if start > 0:
+        excerpt = "…" + excerpt
+    if end < len(clean):
+        excerpt = excerpt + "…"
+    return excerpt
 
 
 def _exchange_for_index(
@@ -118,7 +150,7 @@ def _exchange_match_score(
     lowered_terms: list[str],
 ) -> tuple[int, int]:
     combined = " ".join(text.lower() for _role, text in exchange)
-    term_count = sum(1 for term in lowered_terms if term in combined)
+    term_count = sum(1 for term in lowered_terms if text_contains_term(combined, term))
     return term_count, -len(combined)
 
 
@@ -126,18 +158,14 @@ def _latest_match_index(
     turns: list[tuple[str, str]],
     selection_query: str,
 ) -> int | None:
-    terms = [
-        term.lower()
-        for term in significant_query_terms(selection_query)
-        if term.strip()
-    ]
+    terms = _query_match_terms(selection_query)
     if not terms:
         return None
 
     ranked: list[tuple[int, int, int, int]] = []
     for idx in range(len(turns) - 1, -1, -1):
         role, text = turns[idx]
-        if any(term in text.lower() for term in terms):
+        if any(text_contains_term(text, term) for term in terms):
             exchange = _exchange_for_index(turns, idx)
             term_count, brevity = _exchange_match_score(exchange, terms)
             ranked.append((term_count, brevity, 1 if role == "assistant" else 0, idx))
@@ -150,10 +178,15 @@ def _latest_match_index(
 def _matched_exchange(
     turns: list[tuple[str, str]],
     match_index: int | None,
+    selection_query: str,
 ) -> list[tuple[str, str]]:
     if match_index is None or not turns:
         return []
-    return _exchange_for_index(turns, match_index)
+    terms = _query_match_terms(selection_query)
+    return [
+        (role, _excerpt_around_terms(text, terms))
+        for role, text in _exchange_for_index(turns, match_index)
+    ]
 
 
 def _post_match_recent_turns(
@@ -236,7 +269,7 @@ def build_work_state(
     latest_assistant = _latest_assistant_turn(turns)
     current_task = _current_task(title, first_msg, last_meaningful_user)
     latest_match_index = _latest_match_index(turns, selection_query)
-    matched_exchange = _matched_exchange(turns, latest_match_index)
+    matched_exchange = _matched_exchange(turns, latest_match_index, selection_query)
     likely_open_question = _likely_open_question(turns)
 
     return {

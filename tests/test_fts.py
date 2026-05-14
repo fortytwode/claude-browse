@@ -801,6 +801,29 @@ def test_search_ranked_descriptive_query_matches_local_window(db):
     assert "Nevena" in results[0]["context"]
 
 
+def test_search_ranked_phrase_highlight_prefers_long_query_span(db):
+    _seed(
+        db,
+        "s1",
+        "placeholder",
+        provider="codex",
+        segments=[
+            (
+                "assistant",
+                "This is not a blank-slate brief. Pokpok already has a real "
+                "winning system. Later in the same note: Pokpok does not need "
+                "a reinvention. It already has a working visual system.",
+                "2026-05-12T00:00:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, "Pokpok does not need a re-invention")
+    assert results[0]["session_id"] == "s1"
+    assert "Pokpok does not need a reinvention" in results[0]["context"]
+    assert "blank-slate brief" not in results[0]["context"]
+
+
 # --- reindex ---------------------------------------------------------------
 
 

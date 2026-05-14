@@ -103,6 +103,48 @@ def test_build_work_state_marks_last_user_turn_as_open_question(monkeypatch):
     assert "unresolved request" in str(state["suggested_next_prompt"])
 
 
+def test_build_work_state_centers_matched_exchange_on_long_query_span(monkeypatch):
+    turns = [
+        ("user", "Can you tighten the Pokpok strategic close?"),
+        (
+            "assistant",
+            "Here is the draft. This is not a blank-slate brief. Pokpok already "
+            "has a real winning system in-market. Later in the same note: Pokpok "
+            "does not need a reinvention. It already has a working visual system.",
+        ),
+    ]
+    monkeypatch.setattr(
+        work_state,
+        "get_provider",
+        lambda provider: SimpleNamespace(
+            display_name="CodeX",
+            assistant_turns_available=True,
+            transcript_turns=lambda path, session_id: turns,
+        ),
+    )
+    monkeypatch.setattr(
+        work_state,
+        "inspect_repo_state",
+        lambda cwd: {"summary": "Branch `main` with a clean working tree."},
+    )
+
+    state = work_state.build_work_state(
+        {
+            "provider": "codex",
+            "path": "/tmp/codex-session.jsonl",
+            "session_id": "abc-123",
+            "cwd": "/home/alice/release",
+            "name": "Pokpok strategic close",
+            "first_msg": "Can you tighten the Pokpok strategic close?",
+        },
+        "Pokpok does not need a re-invention",
+    )
+
+    assistant_excerpt = state["matched_exchange"][1][1]
+    assert "Pokpok does not need a reinvention" in assistant_excerpt
+    assert "This is not a blank-slate brief." not in assistant_excerpt
+
+
 def test_render_restart_card_terminal_surfaces_repo_state_and_matches():
     text = work_state.render_restart_card_terminal(
         {

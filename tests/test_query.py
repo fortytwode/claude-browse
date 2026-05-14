@@ -36,3 +36,10 @@ def test_query_plan_normalizes_possessives_and_hyphens():
     assert plan.normalized_terms == ("neil", "closeout", "feedback")
     assert plan.anchor_terms == ("neil", "feedback")
     assert plan.wants_closeout is True
+
+
+def test_query_plan_keeps_full_sentence_as_highlight_for_descriptive_queries():
+    plan = build_query_plan("Pokpok does not need a re-invention")
+
+    assert plan.anchor_terms == ("pokpok", "does", "not", "need", "reinvention")
+    assert plan.highlight_terms[0] == "pokpok does not need a reinvention"
