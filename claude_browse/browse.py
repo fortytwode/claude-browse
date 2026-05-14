@@ -507,9 +507,10 @@ def _write_enter_guard_script(script_path: str, state_path: str) -> None:
 
     fzf treats carriage return as accept. Multi-line terminal pastes can
     therefore auto-open the current top result before the user has a chance
-    to inspect the list. We record query-change timing plus whether the query
-    arrived as a large pasted chunk, then only allow Enter after a brief
-    review window.
+    to inspect the list. The tricky part is that fzf can dispatch the paste's
+    newline-triggered Enter before our change hook finishes updating state.
+    So we keep both a timed guard and an explicit one-shot confirmation for
+    paste-like query jumps.
     """
     script = f"""#!/usr/bin/env python3
 import json
@@ -531,7 +532,12 @@ def _read_state():
                 return data
     except Exception:
         pass
-    return {{"last_change_ms": 0, "last_query": "", "paste_guard_until_ms": 0}}
+    return {{
+        "last_change_ms": 0,
+        "last_query": "",
+        "paste_guard_until_ms": 0,
+        "guard_pending_query": "",
+    }}
 
 
 def _write_state(state):
@@ -553,21 +559,44 @@ def main():
             paste_guard_until_ms = max(paste_guard_until_ms, now_ms + PASTE_GUARD_MS)
         elif paste_guard_until_ms <= now_ms:
             paste_guard_until_ms = 0
+        guard_pending_query = state.get("guard_pending_query", "")
+        if query != prev_query:
+            guard_pending_query = ""
         _write_state(
             {{
                 "last_change_ms": now_ms,
                 "last_query": query,
                 "paste_guard_until_ms": paste_guard_until_ms,
+                "guard_pending_query": guard_pending_query,
             }}
         )
         return
     if mode == "maybe-accept":
         now_ms = int(time.time() * 1000)
         state = _read_state()
+        query = os.environ.get("FZF_QUERY", "")
+        last_query = state.get("last_query", "")
+        guard_pending_query = state.get("guard_pending_query", "")
         paste_guard_until_ms = int(state.get("paste_guard_until_ms", 0) or 0)
-        if paste_guard_until_ms > now_ms:
+        jump_chars = abs(len(query) - len(last_query))
+        paste_like_jump = jump_chars >= PASTE_JUMP_CHARS
+        if guard_pending_query == query and query:
+            print("accept")
+            return
+        if paste_guard_until_ms > now_ms or paste_like_jump:
+            _write_state(
+                {{
+                    "last_change_ms": max(
+                        int(state.get("last_change_ms", 0) or 0),
+                        now_ms,
+                    ),
+                    "last_query": query,
+                    "paste_guard_until_ms": paste_guard_until_ms,
+                    "guard_pending_query": query,
+                }}
+            )
             print(
-                "ignore+change-header(Pasted query detected. Review the list, then press Enter to open. Ctrl-O opens immediately.)"
+                "ignore+change-header(Pasted query detected. Review the list, then press Enter again to open. Ctrl-O opens immediately.)"
             )
             return
         age_ms = now_ms - int(state.get("last_change_ms", 0) or 0)

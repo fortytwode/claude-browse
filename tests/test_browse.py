@@ -290,13 +290,30 @@ def test_enter_guard_detects_large_paste_and_blocks_immediate_accept(tmp_path):
     assert state["last_query"].startswith("Pricing should feel modular and frugal")
     assert state["paste_guard_until_ms"] > state["last_change_ms"]
 
-    result = subprocess.run(
+    first_result = subprocess.run(
         [sys.executable, str(script_path), "maybe-accept"],
         check=True,
         capture_output=True,
         text=True,
+        env=env,
     )
-    assert result.stdout.startswith("ignore+change-header(Pasted query detected.")
+    assert first_result.stdout.startswith(
+        "ignore+change-header(Pasted query detected."
+    )
+
+    state = json.loads(state_path.read_text())
+    assert state["guard_pending_query"].startswith(
+        "Pricing should feel modular and frugal"
+    )
+
+    second_result = subprocess.run(
+        [sys.executable, str(script_path), "maybe-accept"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert second_result.stdout.strip() == "accept"
 
 
 def test_enter_guard_accepts_when_query_is_stable_and_not_paste_guarded(tmp_path):
