@@ -195,6 +195,42 @@ def test_render_query_coach_preview_handles_low_confidence_query():
     assert "nevena feedback" in preview
 
 
+def test_write_search_script_reads_query_from_fzf_env(tmp_path):
+    script_path = tmp_path / "search.py"
+    browse._write_search_script(
+        str(script_path),
+        "/tmp/test.db",
+        "/tmp/pkg",
+        None,
+        25,
+    )
+    text = script_path.read_text()
+    assert 'q = os.environ.get("FZF_QUERY", "")' in text
+    assert 'sys.argv[1]' not in text
+
+
+def test_write_preview_script_reads_query_from_fzf_env(tmp_path):
+    script_path = tmp_path / "preview.py"
+    browse._write_preview_script(
+        str(script_path),
+        "/tmp/test.db",
+        "/tmp/pkg",
+    )
+    text = script_path.read_text()
+    assert 'query = os.environ.get("FZF_QUERY", "")' in text
+    assert 'sys.argv[2]' not in text
+
+
+def test_build_fzf_cmd_avoids_raw_query_placeholder_in_shell_commands():
+    cmd = browse._build_fzf_cmd("Claude", "/tmp/search.py", "/tmp/preview.py")
+    bind = next(part for part in cmd if part.startswith("--bind=change:reload"))
+    preview = next(part for part in cmd if part.startswith("--preview="))
+    assert bind == "--bind=change:reload(python3 /tmp/search.py)"
+    assert preview == "--preview=python3 /tmp/preview.py {}"
+    assert "{q}" not in bind
+    assert "{q}" not in preview
+
+
 def test_default_target_provider_follows_entrypoint_name():
     assert browse._default_target_provider("claude-browse") == "claude"
     assert browse._default_target_provider("/tmp/codex-browse") == "codex"

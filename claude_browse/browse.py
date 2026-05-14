@@ -441,7 +441,7 @@ def get_preview(session_id, query=""):
 
 if __name__ == "__main__":
     line = sys.argv[1] if len(sys.argv) > 1 else ""
-    query = sys.argv[2] if len(sys.argv) > 2 else ""
+    query = os.environ.get("FZF_QUERY", "")
     if ROW_META_SEP in line:
         parts = line.rsplit(ROW_META_SEP, 3)
         sid = parts[1].strip() if len(parts) == 4 else ""
@@ -463,6 +463,7 @@ def _write_search_script(
 ) -> None:
     """Write the keystroke-driven search helper invoked by fzf change:reload."""
     script = f"""#!/usr/bin/env python3
+import os
 import sys
 sys.path.insert(0, {package_dir!r})
 
@@ -473,7 +474,7 @@ DB_PATH = {db_path!r}
 CWD_FILTER = {cwd_filter!r}
 LIMIT = {limit}
 
-q = sys.argv[1] if len(sys.argv) > 1 else ""
+q = os.environ.get("FZF_QUERY", "")
 conn = fts.open_db(DB_PATH)
 if q.strip():
     # ranker_v1: multi-column BM25 + exp-decay recency. See fts.search_ranked.
@@ -499,6 +500,49 @@ for r in results:
     with open(script_path, "w") as f:
         f.write(script)
     os.chmod(script_path, 0o755)
+
+
+def _build_fzf_cmd(
+    target_name: str,
+    search_script_path: str,
+    preview_script_path: str,
+) -> list[str]:
+    return [
+        "fzf",
+        "--ansi",
+        "--no-sort",
+        "--reverse",
+        "--height=90%",
+        "--border=rounded",
+        "--prompt=Find thread where... ",
+        (
+            "--header="
+            'Type a sentence, not just keywords. Try: "where i was asking nevena about feedback" | '
+            '"last closeout session for musopia" | '
+            '"pokpok brief where we questioned the opportunities". '
+            f"Enter: resume in {target_name} (yolo) | "
+            f"Ctrl-T: re-enter matched topic in {target_name} | "
+            f"Ctrl-S: open in {target_name} (safe) | "
+            "Ctrl-Y: next prompt | Ctrl-B: restart card | "
+            "Ctrl-H: handoff brief | Ctrl-U: status update | "
+            "Esc: quit | Shift-Up/Down: scroll preview"
+        ),
+        "--header-first",
+        f"--delimiter={ROW_META_SEP}",
+        "--with-nth=1",
+        "--print-query",
+        "--disabled",
+        f"--bind=change:reload(python3 {search_script_path})",
+        f"--preview=python3 {preview_script_path} {{}}",
+        "--preview-window=right:45%:wrap",
+        "--bind=shift-up:preview-up,shift-down:preview-down",
+        "--bind=ctrl-s:print(SAFE:)+accept",
+        "--bind=ctrl-t:print(TOPIC:)+accept",
+        "--bind=ctrl-y:print(PROMPT:)+accept",
+        "--bind=ctrl-b:print(BRIEF:)+accept",
+        "--bind=ctrl-h:print(HANDOFF:)+accept",
+        "--bind=ctrl-u:print(STATUS:)+accept",
+    ]
 
 
 def _check_fzf() -> None:
@@ -935,42 +979,11 @@ def main() -> None:
 
     try:
         target_name = provider_display_name(target_provider)
-        fzf_cmd = [
-            "fzf",
-            "--ansi",
-            "--no-sort",
-            "--reverse",
-            "--height=90%",
-            "--border=rounded",
-            "--prompt=Find thread where... ",
-            (
-                "--header="
-                'Type a sentence, not just keywords. Try: "where i was asking nevena about feedback" | '
-                '"last closeout session for musopia" | '
-                '"pokpok brief where we questioned the opportunities". '
-                f"Enter: resume in {target_name} (yolo) | "
-                f"Ctrl-T: re-enter matched topic in {target_name} | "
-                f"Ctrl-S: open in {target_name} (safe) | "
-                "Ctrl-Y: next prompt | Ctrl-B: restart card | "
-                "Ctrl-H: handoff brief | Ctrl-U: status update | "
-                "Esc: quit | Shift-Up/Down: scroll preview"
-            ),
-            "--header-first",
-            f"--delimiter={ROW_META_SEP}",
-            "--with-nth=1",
-            "--print-query",
-            "--disabled",
-            f"--bind=change:reload(python3 {search_script.name} {{q}})",
-            f"--preview=python3 {preview_script.name} {{}} {{q}}",
-            "--preview-window=right:45%:wrap",
-            "--bind=shift-up:preview-up,shift-down:preview-down",
-            "--bind=ctrl-s:print(SAFE:)+accept",
-            "--bind=ctrl-t:print(TOPIC:)+accept",
-            "--bind=ctrl-y:print(PROMPT:)+accept",
-            "--bind=ctrl-b:print(BRIEF:)+accept",
-            "--bind=ctrl-h:print(HANDOFF:)+accept",
-            "--bind=ctrl-u:print(STATUS:)+accept",
-        ]
+        fzf_cmd = _build_fzf_cmd(
+            target_name,
+            search_script.name,
+            preview_script.name,
+        )
 
         result = subprocess.run(
             fzf_cmd,
