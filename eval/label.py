@@ -15,6 +15,10 @@ Grade scale:
     2 = also acceptable; would satisfy this query
     1 = related but wouldn't satisfy
     (omit any sid that's not relevant; default grade is 0)
+
+Preferred action:
+    enter  = resume the thread from its latest state
+    ctrl-t = re-enter the older matched topic
 """
 
 from __future__ import annotations
@@ -54,7 +58,7 @@ def save(path: str, data: dict) -> None:
 
 def show_top(conn, query: str, limit: int = 20) -> list[dict]:
     """Run today's ranker; print a numbered candidate list for grading."""
-    rows = fts.search(conn, query, limit=limit)
+    rows = fts.search_ranked(conn, query, limit=limit)
     print()
     if not rows:
         print(f"  (no results for {query!r})")
@@ -145,7 +149,18 @@ def label_one(conn, existing_qs: list[dict]) -> dict | None:
     note = input("> note (optional): ").strip()
     cwd = os.environ.get("PWD") or os.getcwd()
 
-    entry = {"q": query, "cwd": cwd, "note": note, "relevant": relevant}
+    preferred_action = input("> preferred action (enter / ctrl-t, blank=enter): ").strip().lower()
+    if preferred_action not in {"", "enter", "ctrl-t"}:
+        print("  ! unknown action; defaulting to enter")
+        preferred_action = ""
+
+    entry = {
+        "q": query,
+        "cwd": cwd,
+        "note": note,
+        "preferred_action": preferred_action or "enter",
+        "relevant": relevant,
+    }
 
     existing_idx = next((i for i, q in enumerate(existing_qs) if q["q"] == query), None)
     if existing_idx is not None:

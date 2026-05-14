@@ -72,6 +72,7 @@ def test_format_row_keeps_sid_tail_attached():
     row = format_row(info, query="anything")
     assert row.rstrip().endswith(
         f"abc-123{browse.ROW_META_SEP}/home/alice/proj{browse.ROW_META_SEP}claude"
+        f"{browse.ROW_META_SEP}mentioned later{browse.ROW_META_SEP}{browse.ROW_META_SEP}medium"
     )
 
 
@@ -123,7 +124,7 @@ def test_format_row_shows_mentioned_in_thread_when_anchor_is_only_later_context(
         context="AppsFlyer Search Ads API check (Tiktoker context).",
     )
     row = format_row(info, query="tiktoker")
-    assert "mentioned in thread" in row
+    assert "mentioned later" in row
 
 
 def test_format_row_shows_critique_reason_tag_for_opportunity_query():
@@ -143,7 +144,19 @@ def test_format_row_shows_older_topic_tag_when_match_is_not_latest_activity():
         match_timestamp="2026-05-02T10:00:00Z",
     )
     row = format_row(info, query="pokpok")
-    assert "older topic" in row
+    assert "drifted" in row
+
+
+def test_format_row_shows_primary_subject_for_descriptive_query():
+    info = _info(
+        context="The opportunities feel forced and need better evidence",
+        first_msg="Can you look at the Sherlock output and review this brief?",
+        match_term_count=4,
+        _quality_score=7.0,
+        _metadata_anchor_score=5.0,
+    )
+    row = format_row(info, query="pokpok brief where we questioned the opportunities")
+    assert "primary subject" in row
 
 
 def test_format_row_prioritizes_match_context_when_query_active():
@@ -165,6 +178,28 @@ def test_format_row_allows_visible_triple_hash_without_breaking_metadata():
         "/home/alice/proj",
         "claude",
     )
+
+
+def test_decode_row_metadata_exposes_match_provenance_fields():
+    row = browse._encode_row_metadata(
+        "visible",
+        "abc-123",
+        "/tmp/proj",
+        "claude",
+        match_label="primary subject",
+        match_timestamp="2026-05-12T10:00:00Z",
+        match_confidence="high",
+    )
+    meta = browse._decode_row_metadata(row)
+    assert meta == {
+        "visible": "visible",
+        "session_id": "abc-123",
+        "cwd": "/tmp/proj",
+        "provider": "claude",
+        "match_label": "primary subject",
+        "match_timestamp": "2026-05-12T10:00:00Z",
+        "match_confidence": "high",
+    }
 
 
 def test_format_query_coach_row_suggests_anchor_summary_for_descriptive_query():

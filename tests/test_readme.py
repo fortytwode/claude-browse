@@ -36,10 +36,14 @@ def test_readme_documents_target_app_browsers():
     assert "Looking for: musopia + closeout" in text
     assert "add one anchor" in text.lower()
     assert "local concept cues" in text.lower()
-    assert "why-this-matched tags" in text.lower()
+    assert "trust/provenance tags" in text.lower()
+    assert "why this surfaced" in text.lower()
+    assert "match confidence" in text.lower()
     assert "folder match" in text
     assert "opening match" in text
-    assert "mentioned in thread" in text
+    assert "mentioned later" in text
+    assert "primary subject" in text
+    assert "drifted" in text
 
 
 def test_readme_no_longer_documents_removed_browser_shortcuts():

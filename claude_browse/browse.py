@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 
 from . import fts
 from .core import (
@@ -70,18 +71,75 @@ def _encode_row_metadata(
     sid: str,
     cwd: str,
     provider: str,
+    *,
+    match_label: str = "",
+    match_timestamp: str = "",
+    match_confidence: str = "",
 ) -> str:
-    return f"{visible}{ROW_META_SEP}{sid}{ROW_META_SEP}{cwd}{ROW_META_SEP}{provider}"
+    parts = (
+        visible,
+        _sanitize_row_meta_value(sid),
+        _sanitize_row_meta_value(cwd),
+        _sanitize_row_meta_value(provider),
+        _sanitize_row_meta_value(match_label),
+        _sanitize_row_meta_value(match_timestamp),
+        _sanitize_row_meta_value(match_confidence),
+    )
+    return ROW_META_SEP.join(parts)
+
+
+def _sanitize_row_meta_value(value: object) -> str:
+    return (
+        str(value or "")
+        .replace(ROW_META_SEP, " ")
+        .replace("\n", " ")
+        .replace("\r", " ")
+        .strip()
+    )
+
+
+def _decode_row_metadata(line: str) -> dict[str, str] | None:
+    if ROW_META_SEP not in line:
+        return None
+    parts = line.rsplit(ROW_META_SEP, 6)
+    if len(parts) == 4:
+        visible, sid, cwd, provider = parts
+        match_label = ""
+        match_timestamp = ""
+        match_confidence = ""
+    elif len(parts) == 7:
+        (
+            visible,
+            sid,
+            cwd,
+            provider,
+            match_label,
+            match_timestamp,
+            match_confidence,
+        ) = parts
+    else:
+        return None
+    return {
+        "visible": visible,
+        "session_id": sid.strip(),
+        "cwd": cwd.strip(),
+        "provider": provider.strip(),
+        "match_label": match_label.strip(),
+        "match_timestamp": match_timestamp.strip(),
+        "match_confidence": match_confidence.strip(),
+    }
 
 
 def _split_row_metadata(line: str) -> tuple[str, str, str, str] | None:
-    if ROW_META_SEP not in line:
+    data = _decode_row_metadata(line)
+    if not data:
         return None
-    parts = line.rsplit(ROW_META_SEP, 3)
-    if len(parts) != 4:
-        return None
-    visible, sid, cwd, provider = parts
-    return visible, sid.strip(), cwd.strip(), provider.strip()
+    return (
+        data["visible"],
+        data["session_id"],
+        data["cwd"],
+        data["provider"],
+    )
 
 
 def _query_feedback_terms(plan: QueryPlan) -> list[str]:
@@ -91,6 +149,75 @@ def _query_feedback_terms(plan: QueryPlan) -> list[str]:
     elif plan.wants_recent and "latest" not in terms:
         terms.append("latest")
     return terms[:4]
+
+
+def _is_drifted_match(info: Mapping[str, object]) -> bool:
+    match_timestamp = str(info.get("match_timestamp") or "").strip()
+    last_timestamp = str(info.get("last_timestamp") or info.get("timestamp") or "").strip()
+    return bool(match_timestamp and last_timestamp and match_timestamp != last_timestamp)
+
+
+def _match_provenance(info: Mapping[str, object], query: str) -> dict[str, str]:
+    if not query.strip():
+        return {
+            "match_label": "",
+            "match_confidence": "",
+        }
+
+    plan = build_query_plan(query)
+    anchor_terms = [str(term).strip(".*").lower() for term in plan.anchor_terms if term]
+    normalized = set(plan.normalized_terms)
+    drifted = _is_drifted_match(info)
+    metadata_anchor_score = float(info.get("_metadata_anchor_score") or 0.0)
+    quality_score = float(info.get("_quality_score") or 0.0)
+    match_term_count = int(info.get("match_term_count") or 0)
+    title_text = str(info.get("name") or "").lower()
+    opening_text = str(info.get("first_msg") or "").lower()
+    cwd_segments = _normalized_path_segments(info.get("cwd"))
+
+    match_label = ""
+    match_confidence = "medium"
+
+    if len(anchor_terms) == 1:
+        anchor = anchor_terms[0]
+        if anchor and anchor == (cwd_segments[-1] if cwd_segments else None):
+            match_label = "folder match"
+            match_confidence = "high"
+        elif anchor and anchor in title_text:
+            match_label = "title match"
+            match_confidence = "high" if not drifted else "medium"
+        elif anchor and anchor in opening_text:
+            match_label = "opening match"
+            match_confidence = "medium"
+        elif anchor:
+            match_label = "mentioned later"
+            match_confidence = "low" if drifted else "medium"
+    else:
+        opening_anchor_hits = sum(1 for anchor in anchor_terms if anchor and anchor in opening_text)
+        if opening_anchor_hits >= max(1, min(2, len(anchor_terms))):
+            match_label = "opening match"
+            match_confidence = "high" if not drifted else "medium"
+        elif metadata_anchor_score >= 4.5 or (
+            match_term_count >= max(2, min(3, len(anchor_terms)))
+            and quality_score >= 6.0
+        ):
+            match_label = "primary subject"
+            match_confidence = "high" if quality_score >= 7.5 else "medium"
+        else:
+            match_label = "mentioned later"
+            match_confidence = "low" if drifted else "medium"
+
+    if not match_label and plan.wants_closeout and float(info.get("match_lifecycle_score") or 0.0) > 0:
+        match_label = "primary subject"
+        match_confidence = "medium"
+    elif not match_label and normalized:
+        match_label = "mentioned later"
+        match_confidence = "low" if drifted else "medium"
+
+    return {
+        "match_label": match_label,
+        "match_confidence": match_confidence,
+    }
 
 
 def _query_coach_summary(plan: QueryPlan) -> str:
@@ -214,20 +341,9 @@ def _match_reason_tags(
     intent_score = float(info.get("match_intent_score") or 0.0) - float(
         info.get("match_mismatch_penalty") or 0.0
     )
-    single_anchor = len(plan.anchor_terms) == 1
-    if single_anchor:
-        anchor = str(plan.anchor_terms[0]).strip(".*").lower()
-        cwd_segments = _normalized_path_segments(info.get("cwd"))
-        title_text = str(info.get("name") or "").lower()
-        opening_text = str(info.get("first_msg") or "").lower()
-        if anchor and anchor == (cwd_segments[-1] if cwd_segments else None):
-            tags.append("folder match")
-        elif anchor and anchor in title_text:
-            tags.append("title match")
-        elif anchor and anchor in opening_text:
-            tags.append("opening match")
-        elif anchor:
-            tags.append("mentioned in thread")
+    provenance = _match_provenance(info, query)
+    if provenance["match_label"]:
+        tags.append(provenance["match_label"])
 
     if plan.wants_closeout and float(info.get("match_lifecycle_score") or 0.0) > 0:
         tags.append("closeout")
@@ -242,14 +358,14 @@ def _match_reason_tags(
     ):
         tags.append("review")
 
-    if info.get("match_timestamp") and match_date != thread_date:
-        tags.append("older topic")
+    if _is_drifted_match(info):
+        tags.append("drifted")
 
     deduped: list[str] = []
     for tag in tags:
         if tag not in deduped:
             deduped.append(tag)
-    return deduped[:2]
+    return deduped[:3]
 
 
 def format_row(
@@ -278,9 +394,10 @@ def format_row(
     )
     sid = info.get("session_id") or "?"
     ffolder = display_cwd(cwd)
+    provenance = _match_provenance(info, query)
 
     suffix_parts: list[str] = []
-    if query_active and info.get("match_timestamp") and date != thread_date:
+    if query_active and _is_drifted_match(info):
         suffix_parts.append(f"\033[2mactive {thread_date}\033[0m")
 
     if query_active and info.get("context"):
@@ -302,7 +419,7 @@ def format_row(
             meta_parts.append(" · ".join(reason_tags))
         if title:
             meta_parts.append(title[:30])
-        if query_active and info.get("match_timestamp") and date != thread_date:
+        if query_active and _is_drifted_match(info):
             meta_parts.append(f"active {thread_date}")
         meta = (
             f"  \033[2m[{ ' · '.join(meta_parts) }]\033[0m"
@@ -315,6 +432,9 @@ def format_row(
             sid,
             ffolder,
             provider,
+            match_label=provenance["match_label"],
+            match_timestamp=str(info.get("match_timestamp") or ""),
+            match_confidence=provenance["match_confidence"],
         )
     else:
         msgs = f"{info.get('msg_count', 0)}msg"
@@ -339,6 +459,9 @@ def format_row(
         sid,
         ffolder,
         provider,
+        match_label=provenance["match_label"],
+        match_timestamp=str(info.get("match_timestamp") or ""),
+        match_confidence=provenance["match_confidence"],
     )
 
 
@@ -358,7 +481,7 @@ from claude_browse.core import (
     highlight_terms,
     provider_display_name,
 )
-from claude_browse.browse import COACH_SESSION_ID, render_query_coach_preview
+from claude_browse.browse import COACH_SESSION_ID, _decode_row_metadata, render_query_coach_preview
 from claude_browse.work_state import build_work_state, render_restart_card_terminal
 
 DB_PATH = {db_path!r}
@@ -381,7 +504,8 @@ def _lookup_session(session_id):
         conn.close()
 
 
-def get_preview(session_id, query=""):
+def get_preview(row_meta, query=""):
+    session_id = row_meta.get("session_id", "")
     if session_id == COACH_SESSION_ID:
         print(render_query_coach_preview(query))
         return
@@ -414,6 +538,9 @@ def get_preview(session_id, query=""):
             "last_msg": last_msg,
             "msg_count": msg_count,
             "session_id": session_id,
+            "match_label": row_meta.get("match_label", ""),
+            "match_timestamp": row_meta.get("match_timestamp", ""),
+            "match_confidence": row_meta.get("match_confidence", ""),
         }},
         query,
     )
@@ -442,11 +569,9 @@ def get_preview(session_id, query=""):
 if __name__ == "__main__":
     line = sys.argv[1] if len(sys.argv) > 1 else ""
     query = os.environ.get("FZF_QUERY", "")
-    if ROW_META_SEP in line:
-        parts = line.rsplit(ROW_META_SEP, 3)
-        sid = parts[1].strip() if len(parts) == 4 else ""
-        if sid:
-            get_preview(sid, query)
+    row_meta = _decode_row_metadata(line)
+    if row_meta and row_meta.get("session_id"):
+        get_preview(row_meta, query)
 """
 
     with open(script_path, "w") as f:
@@ -1133,11 +1258,12 @@ def main() -> None:
 
         output, selected_target, action, selection_query = parsed
 
-        row_meta = _split_row_metadata(output)
+        row_meta = _decode_row_metadata(output)
         if not row_meta:
             print("Could not parse selected session.", file=sys.stderr)
             sys.exit(1)
-        _visible, session_id, _cwd_meta, provider = row_meta
+        session_id = row_meta["session_id"]
+        provider = row_meta["provider"]
 
         if session_id == COACH_SESSION_ID:
             print(render_query_coach_preview(selection_query))
@@ -1147,6 +1273,12 @@ def main() -> None:
         if not session:
             print(f"Session not found: {session_id}", file=sys.stderr)
             sys.exit(1)
+        session = {
+            **session,
+            "match_label": row_meta.get("match_label", ""),
+            "match_timestamp": row_meta.get("match_timestamp", ""),
+            "match_confidence": row_meta.get("match_confidence", ""),
+        }
 
         state = None
         if action in {"print_prompt", "print_brief", "print_status", "reenter_topic"}:

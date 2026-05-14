@@ -42,9 +42,14 @@ of that wedge.
   - suggested next prompt
   - reusable handoff brief
   - concise status update
-- Query-active result rows now show short rationale tags like `folder match`,
-  `title match`, `opening match`, `mentioned in thread`, `feedback`,
-  `critique`, `closeout`, and `older topic` before you open preview.
+- Query-active result rows now show trust/provenance tags like `primary subject`,
+  `folder match`, `title match`, `opening match`, `mentioned later`,
+  `feedback`, `critique`, `closeout`, and `drifted` before you open preview.
+- Restart-card previews now include a `Why this surfaced` block:
+  - match type
+  - match timestamp
+  - match confidence
+  - best action (`Enter` vs `Ctrl-T`)
 - Natural-language thread description is now the primary query model:
   - descriptive `find the thread where...` inputs
   - ranking by most recent relevant mention
@@ -139,7 +144,23 @@ What shipped:
 Why it matters:
 - Session history becomes operationally useful outside the TUI
 
-### Phase 7 — Shared work graph
+### Phase 7 — Search trust
+**Status:** shipped
+
+Make every result explain itself clearly enough that the user knows whether to
+resume the latest thread state or re-enter an older matched topic.
+
+What shipped:
+- Row-level provenance and drift labels
+- Preview/header provenance with match type, match time, and match confidence
+- Explicit best-action guidance (`Enter` vs `Ctrl-T`) for drifted threads
+- Eval-label support for storing a preferred action alongside each real query
+
+Why it matters:
+- Retrieval quality is only half the product. Users need to trust why a thread
+  surfaced and which action is safest before they launch anything.
+
+### Phase 8 — Shared work graph
 **Status:** later
 
 Move from local task recovery to shared team context.

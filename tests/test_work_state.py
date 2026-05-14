@@ -148,6 +148,11 @@ def test_build_work_state_centers_matched_exchange_on_long_query_span(monkeypatc
 def test_render_restart_card_terminal_surfaces_repo_state_and_matches():
     text = work_state.render_restart_card_terminal(
         {
+            "match_label": "primary subject",
+            "match_timestamp": "2026-05-12T14:54:28Z",
+            "match_confidence": "high",
+            "recommended_action": "Ctrl-T",
+            "recommended_action_reason": "Re-enter the earlier matched topic; the thread later moved to newer work.",
             "current_task": "Q3 platform hiring plan",
             "topic_shifted": True,
             "opening_topic": "Investigate signup flow regression",
@@ -168,12 +173,64 @@ def test_render_restart_card_terminal_surfaces_repo_state_and_matches():
     )
 
     assert "Restart Card" in text
+    assert "Why this surfaced:" in text
+    assert "Match type: primary subject" in text
+    assert "Matched on: 2026-05-12 14:54:28" in text
+    assert "Match confidence: high" in text
+    assert "Best action: Ctrl-T" in text
     assert "Current repo state: Branch `main` with 2 uncommitted files." in text
     assert "Last matching exchange:" in text
+    assert text.index("Why this surfaced:") < text.index("Last matching exchange:")
     assert text.index("Last matching exchange:") < text.index("Current task:")
     assert "Thread continued afterward on another topic." in text
     assert "Later turns after the match (latest first):" in text
     assert "Recent turns (latest first):" in text
+
+
+def test_build_work_state_recommends_reenter_when_query_matches_older_topic(monkeypatch):
+    turns = [
+        ("user", "what wins the deal"),
+        (
+            "assistant",
+            "Pricing should feel modular and frugal: likely $4K-$6K depending on mix. Keep the big retainer out of the first close unless he pulls you there.",
+        ),
+        ("user", "Now write the AppsFlyer Notion draft."),
+        ("assistant", "The page is created in Notion and ready to record."),
+    ]
+
+    spec = type(
+        "Spec",
+        (),
+        {
+            "display_name": "CodeX",
+            "assistant_turns_available": True,
+            "transcript_turns": staticmethod(lambda path, session_id: turns),
+        },
+    )()
+
+    monkeypatch.setattr(work_state, "get_provider", lambda provider: spec)
+    monkeypatch.setattr(
+        work_state,
+        "inspect_repo_state",
+        lambda cwd: {"summary": "Branch `main` clean."},
+    )
+
+    state = work_state.build_work_state(
+        {
+            "provider": "codex",
+            "path": "/tmp/session.jsonl",
+            "cwd": "/tmp/sales",
+            "name": "Jisoo + Elise tasks",
+            "first_msg": "Send the calendar invite to Jisoo and prep the deal dossier.",
+            "match_label": "primary subject",
+            "match_timestamp": "2026-05-12T14:54:28Z",
+            "match_confidence": "high",
+        },
+        "Pricing should feel modular and frugal: likely $4K-$6K depending on mix",
+    )
+
+    assert state["recommended_action"] == "Ctrl-T"
+    assert "earlier matched topic" in state["recommended_action_reason"]
 
 
 def test_render_status_update_terminal_surfaces_task_progress_and_next_step():

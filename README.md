@@ -115,15 +115,15 @@ Examples:
 - In `copilot-browse`, a Copilot thread resumes natively in Copilot and Claude, CodeX, or Gemini threads start fresh Copilot sessions with imported context.
 - In `cursor-browse`, Claude, CodeX, and Gemini threads start fresh Cursor sessions with imported context.
 - The UI is meant to encourage sentence-style recall, not one- or two-word pecking. You should feel comfortable typing a short description like `where i was asking nevena about feedback`.
-- `Enter` is the normal open key again. There is now a short paste guard: if a multiline paste just changed the query, the first immediate Enter is ignored so the picker does not auto-launch the top result. `Ctrl-O` still opens immediately.
+- `Enter` is the normal open key again. There is now a short paste guard: if a pasted long or multiline quote just changed the query, the first Enter arms the selection and the second Enter opens it. `Ctrl-O` still opens immediately.
 - The picker now shows an interpreted-query tip row at the top, for example `Looking for: musopia + closeout` or `Looking for threads about: pokpok`.
 - If your query is too vague, the picker tells you to add one anchor like a person, client, brand, or folder instead of pretending the search is confident.
-- Result rows now show short why-this-matched tags like `folder match`, `title match`, `opening match`, `mentioned in thread`, `feedback`, `critique`, `closeout`, or `older topic` so you can trust a hit faster before opening preview.
+- Result rows now show trust/provenance tags like `primary subject`, `folder match`, `title match`, `opening match`, `mentioned later`, `feedback`, `critique`, `closeout`, or `drifted` so you can tell why a hit surfaced before opening preview.
 - Descriptive queries are reduced to the most specific anchors under the hood, so `find me the thread where i was asking about nevena feedback` behaves like a thread-recall query, not a hard AND over filler words.
 - Descriptive queries now separate anchor terms from intent words, so `last closeout session for musopia` treats `musopia` as the hard anchor and `last / closeout` as ranking signals instead of weighting every word equally.
 - Descriptive queries now use local concept cues for things like closeout, feedback, critique, and human-performance review, so the ranker can still prefer the right exchange when the exact wording differs.
 - Search now prioritizes the most recent relevant mention of your query, not only the thread's latest unrelated activity.
-- The preview pane leads with the last matching exchange when a query matches earlier in the thread, then shows whether the thread later drifted to another topic.
+- The preview pane now starts with a `Why this surfaced` block: match type, match time, match confidence, and best action (`Enter` vs `Ctrl-T`), then shows the last matching exchange and whether the thread later drifted to another topic.
 - `Ctrl-T` is the honest cross-provider answer to thread drift: it starts a new session anchored on the matched exchange instead of pretending the tool can rewind the original thread in place.
 - `Ctrl-Y` lets you emit the suggested next prompt without launching anything. `Ctrl-B` prints the restart card itself for copy/paste or handoff.
 - `Ctrl-H` prints a fuller handoff brief with restart state, reopen intent, and recent turns. `Ctrl-U` prints a shorter status update you can paste into Slack, notes, or a standup.
@@ -144,7 +144,8 @@ provider-local pickers. `claude-browse`, `codex-browse`, `gemini-browse`,
   old thread you want.
 - **Recover work state before you resume.** The preview pane reconstructs the
   current task, topic drift, repo status, last meaningful ask, latest
-  assistant progress, and a suggested next prompt.
+  assistant progress, suggested next prompt, and a provenance block that says
+  why this result surfaced and whether `Enter` or `Ctrl-T` is the better move.
 - **Re-enter an earlier topic honestly.** When topic A is buried inside a thread
   that later drifted to B/C/D, the browser can start a fresh session anchored
   on the matched exchange instead of faking a mid-thread native rewind.

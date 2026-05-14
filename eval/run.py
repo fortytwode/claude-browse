@@ -99,8 +99,7 @@ def run_ranker(ranker_name: str, conn, queries: list[dict], threshold: int) -> l
         # demotes grade-1 ("tangentially related") sessions doesn't get charged
         # as a recall regression. `missing_relevant` keeps threshold=1 so any
         # labeled session that didn't appear at all stays visible.
-        results.append(
-            metrics.QueryResult(
+        result = metrics.QueryResult(
                 query=q["q"],
                 mrr=rr,
                 p_at_1=metrics.p_at_1(ranked, grades, threshold=threshold),
@@ -110,7 +109,9 @@ def run_ranker(ranker_name: str, conn, queries: list[dict], threshold: int) -> l
                 missing_relevant=metrics.missing(ranked, grades, threshold=1),
                 latency_ms=latency_ms,
             )
-        )
+        result.preferred_action = q.get("preferred_action", "enter")
+        result.note = q.get("note", "")
+        results.append(result)
     return results
 
 
@@ -120,7 +121,11 @@ def print_per_query(results_by_ranker: dict[str, list[metrics.QueryResult]]) -> 
     rankers = list(results_by_ranker.keys())
     n = len(results_by_ranker[rankers[0]])
 
-    header = f"{'query':<32} " + " ".join(f"{r:>10}" for r in rankers) + "  notes"
+    header = (
+        f"{'query':<32} "
+        + " ".join(f"{r:>10}" for r in rankers)
+        + f"  {'action':<7} notes"
+    )
     print(header)
     print("-" * len(header))
     for i in range(n):
@@ -133,7 +138,16 @@ def print_per_query(results_by_ranker: dict[str, list[metrics.QueryResult]]) -> 
         miss = ""
         if row.missing_relevant:
             miss = f"  ({len(row.missing_relevant)} not retrieved)"
-        print(f"{row.query[:32]:<32} " + " ".join(cells) + miss)
+        preferred_action = getattr(row, "preferred_action", "enter")
+        note = getattr(row, "note", "") or ""
+        note_suffix = f"  {note}" if note else ""
+        print(
+            f"{row.query[:32]:<32} "
+            + " ".join(cells)
+            + f"  {preferred_action:<7}"
+            + miss
+            + note_suffix
+        )
 
 
 def print_aggregate(results_by_ranker: dict[str, list[metrics.QueryResult]]) -> None:

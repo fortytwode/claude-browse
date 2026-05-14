@@ -250,6 +250,56 @@ def _suggested_next_prompt(
     )
 
 
+def _iso_preview(ts: object) -> str:
+    text = str(ts or "").strip()
+    if not text:
+        return ""
+    return text[:19].replace("T", " ")
+
+
+def _recommended_action(
+    selection_query: str,
+    current_task: str,
+    latest_assistant: str,
+    likely_open_question: str,
+    matched_exchange: list[tuple[str, str]],
+    *,
+    thread_continued_after_match: bool,
+    topic_shifted: bool,
+) -> tuple[str, str]:
+    if not selection_query.strip() or not matched_exchange:
+        return (
+            "Enter",
+            "Resume the full thread from its latest state.",
+        )
+
+    if not thread_continued_after_match:
+        return (
+            "Enter",
+            "Resume the full thread; the matched topic is still the latest state.",
+        )
+
+    plan = build_query_plan(selection_query)
+    current_blob = " ".join(
+        part for part in (current_task, latest_assistant, likely_open_question) if part
+    ).lower()
+    matched_blob = " ".join(text for _role, text in matched_exchange).lower()
+    anchors = [str(term).strip(".*").lower() for term in plan.anchor_terms if term]
+    current_anchor_hits = sum(1 for anchor in anchors if anchor and anchor in current_blob)
+    matched_anchor_hits = sum(1 for anchor in anchors if anchor and anchor in matched_blob)
+
+    if plan.descriptive or topic_shifted or matched_anchor_hits > current_anchor_hits:
+        return (
+            "Ctrl-T",
+            "Re-enter the earlier matched topic; the thread later moved to newer work.",
+        )
+
+    return (
+        "Enter",
+        "Resume the full thread; the latest state still appears aligned with your query.",
+    )
+
+
 def build_work_state(
     session: dict[str, object],
     selection_query: str = "",
@@ -271,30 +321,46 @@ def build_work_state(
     latest_match_index = _latest_match_index(turns, selection_query)
     matched_exchange = _matched_exchange(turns, latest_match_index, selection_query)
     likely_open_question = _likely_open_question(turns)
+    thread_continued_after_match = bool(
+        latest_match_index is not None and latest_match_index < len(turns) - 1
+    )
+    topic_shifted = bool(
+        current_task and first_msg and _word_overlap(current_task, first_msg) <= 1
+    )
+    recommended_action, recommended_action_reason = _recommended_action(
+        selection_query,
+        current_task,
+        latest_assistant,
+        likely_open_question,
+        matched_exchange,
+        thread_continued_after_match=thread_continued_after_match,
+        topic_shifted=topic_shifted,
+    )
 
     return {
         "provider": provider,
         "provider_name": spec.display_name,
         "session_title": title,
         "opening_topic": first_msg,
+        "match_label": str(session.get("match_label") or ""),
+        "match_timestamp": str(session.get("match_timestamp") or ""),
+        "match_confidence": str(session.get("match_confidence") or ""),
         "current_task": current_task,
         "last_meaningful_user": last_meaningful_user,
         "latest_assistant": latest_assistant,
         "likely_open_question": likely_open_question,
         "matching_turns": _matching_turns(turns, selection_query, match_limit),
         "matched_exchange": matched_exchange,
-        "thread_continued_after_match": bool(
-            latest_match_index is not None and latest_match_index < len(turns) - 1
-        ),
+        "thread_continued_after_match": thread_continued_after_match,
         "post_match_recent_turns": _post_match_recent_turns(
             turns, latest_match_index, recent_limit
         ),
         "recent_turns": _recent_turns(turns, recent_limit),
         "assistant_turns_available": spec.assistant_turns_available,
         "repo_state": inspect_repo_state(session.get("cwd")),
-        "topic_shifted": bool(
-            current_task and first_msg and _word_overlap(current_task, first_msg) <= 1
-        ),
+        "topic_shifted": topic_shifted,
+        "recommended_action": recommended_action,
+        "recommended_action_reason": recommended_action_reason,
         "suggested_next_prompt": _suggested_next_prompt(
             session.get("cwd"),
             current_task,
@@ -306,6 +372,25 @@ def build_work_state(
 
 def render_restart_card_terminal(state: dict[str, object]) -> str:
     lines: list[str] = ["Restart Card", ""]
+
+    match_label = str(state.get("match_label") or "")
+    match_timestamp = _iso_preview(state.get("match_timestamp"))
+    match_confidence = str(state.get("match_confidence") or "")
+    recommended_action = str(state.get("recommended_action") or "")
+    recommended_action_reason = str(state.get("recommended_action_reason") or "")
+    if match_label or match_timestamp or match_confidence or recommended_action:
+        lines.extend(["Why this surfaced:", ""])
+        if match_label:
+            lines.append(f"  Match type: {match_label}")
+        if match_timestamp:
+            lines.append(f"  Matched on: {match_timestamp}")
+        if match_confidence:
+            lines.append(f"  Match confidence: {match_confidence}")
+        if recommended_action:
+            lines.append(
+                f"  Best action: {recommended_action} — {recommended_action_reason}"
+            )
+        lines.append("")
 
     matched_exchange = state.get("matched_exchange") or []
     if matched_exchange:
@@ -371,6 +456,25 @@ def render_restart_card_terminal(state: dict[str, object]) -> str:
 
 def render_restart_card_markdown(state: dict[str, object]) -> list[str]:
     lines = ["## Restart Card", ""]
+
+    match_label = str(state.get("match_label") or "")
+    match_timestamp = _iso_preview(state.get("match_timestamp"))
+    match_confidence = str(state.get("match_confidence") or "")
+    recommended_action = str(state.get("recommended_action") or "")
+    recommended_action_reason = str(state.get("recommended_action_reason") or "")
+    if match_label or match_timestamp or match_confidence or recommended_action:
+        lines.extend(["", "### Why This Surfaced", ""])
+        if match_label:
+            lines.append(f"- Match type: {match_label}")
+        if match_timestamp:
+            lines.append(f"- Matched on: {match_timestamp}")
+        if match_confidence:
+            lines.append(f"- Match confidence: {match_confidence}")
+        if recommended_action:
+            lines.append(
+                f"- Best action: `{recommended_action}` — {recommended_action_reason}"
+            )
+        lines.append("")
 
     matched_exchange = state.get("matched_exchange") or []
     if matched_exchange:
