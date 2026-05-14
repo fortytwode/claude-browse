@@ -222,19 +222,47 @@ def test_write_preview_script_reads_query_from_fzf_env(tmp_path):
 
 
 def test_build_fzf_cmd_avoids_raw_query_placeholder_in_shell_commands():
-    cmd = browse._build_fzf_cmd("Claude", "/tmp/search.py", "/tmp/preview.py")
-    bind = next(part for part in cmd if part.startswith("--bind=change:reload"))
+    cmd = browse._build_fzf_cmd(
+        "Claude",
+        "/tmp/search.py",
+        "/tmp/preview.py",
+        "/tmp/enter_guard.py",
+    )
+    bind = next(part for part in cmd if part.startswith("--bind=change:"))
     preview = next(part for part in cmd if part.startswith("--preview="))
-    assert bind == "--bind=change:reload(python3 /tmp/search.py)"
+    assert bind == (
+        "--bind=change:execute-silent(python3 /tmp/enter_guard.py note-change)"
+        "+reload(python3 /tmp/search.py)"
+    )
     assert preview == "--preview=python3 /tmp/preview.py {}"
     assert "{q}" not in bind
     assert "{q}" not in preview
 
 
-def test_build_fzf_cmd_moves_open_to_ctrl_o_and_ignores_enter():
-    cmd = browse._build_fzf_cmd("Claude", "/tmp/search.py", "/tmp/preview.py")
-    assert "--bind=enter:ignore" in cmd
+def test_build_fzf_cmd_keeps_enter_open_with_multiline_paste_guard():
+    cmd = browse._build_fzf_cmd(
+        "Claude",
+        "/tmp/search.py",
+        "/tmp/preview.py",
+        "/tmp/enter_guard.py",
+    )
+    assert (
+        "--bind=enter:transform(python3 /tmp/enter_guard.py maybe-accept)"
+        in cmd
+    )
     assert "--bind=ctrl-o:accept" in cmd
+
+
+def test_write_enter_guard_script_records_changes_and_gates_accept(tmp_path):
+    script_path = tmp_path / "guard.py"
+    state_path = tmp_path / "guard_state.txt"
+    browse._write_enter_guard_script(str(script_path), str(state_path))
+    text = script_path.read_text()
+    assert "THRESHOLD_MS = 250" in text
+    assert 'if mode == "note-change":' in text
+    assert 'if mode == "maybe-accept":' in text
+    assert "print(\"accept\")" in text
+    assert "change-header(" in text
 
 
 def test_default_target_provider_follows_entrypoint_name():

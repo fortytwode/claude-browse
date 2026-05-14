@@ -91,14 +91,14 @@ While the TUI is up:
 | Type             | Write a short sentence about the thread you want, or use exact names / phrases |
 | ↑ ↓              | Move between sessions                                            |
 | Shift-↑ Shift-↓  | Scroll the preview pane                                          |
-| Ctrl-O           | Resume the selected thread in the app you launched (`claude-browse`, `codex-browse`, `gemini-browse`, `copilot-browse`, or `cursor-browse`) in yolo mode |
+| Enter            | Resume the selected thread in the app you launched (`claude-browse`, `codex-browse`, `gemini-browse`, `copilot-browse`, or `cursor-browse`) in yolo mode |
+| Ctrl-O           | Resume immediately, bypassing the multiline-paste safety guard   |
 | Ctrl-T           | Re-enter the matched topic in a fresh session in that app        |
 | Ctrl-S           | Open in that same app in safe mode                               |
 | Ctrl-Y           | Print the suggested next prompt for the selected thread          |
 | Ctrl-B           | Print the restart card for the selected thread                   |
 | Ctrl-H           | Print a reusable handoff brief                                   |
 | Ctrl-U           | Print a concise status update                                    |
-| Enter            | Ignore, so multiline paste does not accidentally launch a result |
 | Esc              | Quit                                                             |
 
 Examples:
@@ -115,7 +115,7 @@ Examples:
 - In `copilot-browse`, a Copilot thread resumes natively in Copilot and Claude, CodeX, or Gemini threads start fresh Copilot sessions with imported context.
 - In `cursor-browse`, Claude, CodeX, and Gemini threads start fresh Cursor sessions with imported context.
 - The UI is meant to encourage sentence-style recall, not one- or two-word pecking. You should feel comfortable typing a short description like `where i was asking nevena about feedback`.
-- `Ctrl-O` is the explicit open key. `Enter` is intentionally inert so a pasted multi-line quote does not auto-open the current top result.
+- `Enter` is the normal open key again. There is now a short paste guard: if a multiline paste just changed the query, the first immediate Enter is ignored so the picker does not auto-launch the top result. `Ctrl-O` still opens immediately.
 - The picker now shows an interpreted-query tip row at the top, for example `Looking for: musopia + closeout` or `Looking for threads about: pokpok`.
 - If your query is too vague, the picker tells you to add one anchor like a person, client, brand, or folder instead of pretending the search is confident.
 - Result rows now show short why-this-matched tags like `folder match`, `title match`, `opening match`, `mentioned in thread`, `feedback`, `critique`, `closeout`, or `older topic` so you can trust a hit faster before opening preview.

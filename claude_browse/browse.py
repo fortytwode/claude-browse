@@ -502,10 +502,65 @@ for r in results:
     os.chmod(script_path, 0o755)
 
 
+def _write_enter_guard_script(script_path: str, state_path: str) -> None:
+    """Write a helper that guards Enter right after a query-changing paste.
+
+    fzf treats carriage return as accept. Multi-line terminal pastes can
+    therefore auto-open the current top result before the user has a chance
+    to inspect the list. We record the last query-change timestamp and only
+    allow Enter to accept once the query has been stable for a short window.
+    """
+    script = f"""#!/usr/bin/env python3
+import os
+import sys
+import time
+
+STATE_PATH = {state_path!r}
+THRESHOLD_MS = 250
+
+
+def _read_last_change_ms():
+    try:
+        with open(STATE_PATH) as f:
+            return int(f.read().strip() or "0")
+    except Exception:
+        return 0
+
+
+def _write_last_change_ms():
+    os.makedirs(os.path.dirname(STATE_PATH) or ".", exist_ok=True)
+    with open(STATE_PATH, "w") as f:
+        f.write(str(int(time.time() * 1000)))
+
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    if mode == "note-change":
+        _write_last_change_ms()
+        return
+    if mode == "maybe-accept":
+        age_ms = int(time.time() * 1000) - _read_last_change_ms()
+        if age_ms >= THRESHOLD_MS:
+            print("accept")
+        else:
+            print(
+                "ignore+change-header(Type or paste your query, review the list, then press Enter to open. Ctrl-O opens immediately.)"
+            )
+
+
+if __name__ == "__main__":
+    main()
+"""
+    with open(script_path, "w") as f:
+        f.write(script)
+    os.chmod(script_path, 0o755)
+
+
 def _build_fzf_cmd(
     target_name: str,
     search_script_path: str,
     preview_script_path: str,
+    enter_guard_script_path: str,
 ) -> list[str]:
     return [
         "fzf",
@@ -520,12 +575,12 @@ def _build_fzf_cmd(
             'Type a sentence, not just keywords. Try: "where i was asking nevena about feedback" | '
             '"last closeout session for musopia" | '
             '"pokpok brief where we questioned the opportunities". '
-            f"Ctrl-O: resume in {target_name} (yolo) | "
+            f"Enter: resume in {target_name} (yolo) | "
+            f"Ctrl-O: resume in {target_name} immediately | "
             f"Ctrl-T: re-enter matched topic in {target_name} | "
             f"Ctrl-S: open in {target_name} (safe) | "
             "Ctrl-Y: next prompt | Ctrl-B: restart card | "
             "Ctrl-H: handoff brief | Ctrl-U: status update | "
-            "Enter: ignore (safe for multiline paste) | "
             "Esc: quit | Shift-Up/Down: scroll preview"
         ),
         "--header-first",
@@ -533,11 +588,11 @@ def _build_fzf_cmd(
         "--with-nth=1",
         "--print-query",
         "--disabled",
-        f"--bind=change:reload(python3 {search_script_path})",
+        f"--bind=change:execute-silent(python3 {enter_guard_script_path} note-change)+reload(python3 {search_script_path})",
         f"--preview=python3 {preview_script_path} {{}}",
         "--preview-window=right:45%:wrap",
         "--bind=shift-up:preview-up,shift-down:preview-down",
-        "--bind=enter:ignore",
+        f"--bind=enter:transform(python3 {enter_guard_script_path} maybe-accept)",
         "--bind=ctrl-o:accept",
         "--bind=ctrl-s:print(SAFE:)+accept",
         "--bind=ctrl-t:print(TOPIC:)+accept",
@@ -628,14 +683,14 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         "  Longer descriptive queries are reduced to the most specific anchors.\n"
         "\n"
         "Keys while browsing:\n"
-        f"  Ctrl-O                Resume the selected thread in {target_name} (yolo)\n"
+        f"  Enter                 Resume the selected thread in {target_name} (yolo)\n"
+        f"  Ctrl-O                Resume immediately in {target_name} (bypasses paste guard)\n"
         f"  Ctrl-T                Re-enter the matched topic in a new {target_name} session (yolo)\n"
         f"  Ctrl-S                Open in {target_name} (safe)\n"
         "  Ctrl-Y                Print the suggested next prompt for the selection\n"
         "  Ctrl-B                Print the restart card for the selection\n"
         "  Ctrl-H                Print a reusable handoff brief\n"
         "  Ctrl-U                Print a concise status update\n"
-        "  Enter                 Ignore (prevents multiline paste from auto-opening a result)\n"
         "  Shift-Up / Shift-Down Scroll the preview pane\n"
         "  Esc                   Quit\n"
         "\n"
@@ -980,6 +1035,18 @@ def main() -> None:
     _write_search_script(
         search_script.name, fts.DB_PATH, package_dir, cwd_filter, limit
     )
+    enter_guard_script = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".py", delete=False, prefix="claude_browse_enter_guard_"
+    )
+    enter_guard_script.close()
+    enter_guard_state = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, prefix="claude_browse_enter_state_"
+    )
+    enter_guard_state.close()
+    _write_enter_guard_script(
+        enter_guard_script.name,
+        enter_guard_state.name,
+    )
 
     try:
         target_name = provider_display_name(target_provider)
@@ -987,6 +1054,7 @@ def main() -> None:
             target_name,
             search_script.name,
             preview_script.name,
+            enter_guard_script.name,
         )
 
         result = subprocess.run(
@@ -1075,7 +1143,12 @@ def main() -> None:
         )
 
     finally:
-        for path in (preview_script.name, search_script.name):
+        for path in (
+            preview_script.name,
+            search_script.name,
+            enter_guard_script.name,
+            enter_guard_state.name,
+        ):
             try:
                 os.unlink(path)
             except OSError:
