@@ -197,6 +197,7 @@ def test_claude_handoff_cmd_matches_current_shape():
         "--dangerously-skip-permissions",
         "--add-dir",
         "/tmp",
+        "--",
         "continue",
     ]
 

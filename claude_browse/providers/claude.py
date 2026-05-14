@@ -264,6 +264,7 @@ PROVIDER = ProviderSpec(
     session_files_reader=list_session_files,
     native_yolo_flag="--dangerously-skip-permissions",
     handoff_yolo_flag="--dangerously-skip-permissions",
+    handoff_prompt_prefix=("--",),
     can_native_resume=True,
     assistant_turns_available=True,
 )

@@ -689,6 +689,7 @@ def test_continue_in_provider_from_gemini_execs_claude_with_add_dir(
         "--dangerously-skip-permissions",
         "--add-dir",
         "/tmp",
+        "--",
         (
             "Continue the imported Gemini session context from "
             "/tmp/codex_browse_import.md. Treat it as prior conversation "

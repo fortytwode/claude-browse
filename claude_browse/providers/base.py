@@ -38,6 +38,7 @@ class ProviderSpec:
     handoff_yolo_flag: str | None = None
     add_dir_flag: str | None = "--add-dir"
     handoff_prompt_flag: str | None = None
+    handoff_prompt_prefix: tuple[str, ...] = ()
     handoff_via_file: bool = True
     can_native_resume: bool = True
     assistant_turns_available: bool = True
@@ -67,6 +68,7 @@ class ProviderSpec:
         if self.handoff_prompt_flag:
             cmd.extend([self.handoff_prompt_flag, prompt])
         else:
+            cmd.extend(self.handoff_prompt_prefix)
             cmd.append(prompt)
         return cmd
 
