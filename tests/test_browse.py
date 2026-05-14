@@ -8,6 +8,11 @@ row into multiple visual rows in the picker.
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+
 import pytest
 
 from claude_browse import browse
@@ -259,10 +264,62 @@ def test_write_enter_guard_script_records_changes_and_gates_accept(tmp_path):
     browse._write_enter_guard_script(str(script_path), str(state_path))
     text = script_path.read_text()
     assert "THRESHOLD_MS = 250" in text
+    assert "PASTE_JUMP_CHARS = 16" in text
+    assert "PASTE_GUARD_MS = 1500" in text
     assert 'if mode == "note-change":' in text
     assert 'if mode == "maybe-accept":' in text
     assert "print(\"accept\")" in text
     assert "change-header(" in text
+
+
+def test_enter_guard_detects_large_paste_and_blocks_immediate_accept(tmp_path):
+    script_path = tmp_path / "guard.py"
+    state_path = tmp_path / "guard_state.txt"
+    browse._write_enter_guard_script(str(script_path), str(state_path))
+
+    env = dict(os.environ, FZF_QUERY="Pricing should feel modular and frugal: likely $4K-$6K depending on mix. Keep the big retainer")
+    subprocess.run(
+        [sys.executable, str(script_path), "note-change"],
+        check=True,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    state = json.loads(state_path.read_text())
+    assert state["last_query"].startswith("Pricing should feel modular and frugal")
+    assert state["paste_guard_until_ms"] > state["last_change_ms"]
+
+    result = subprocess.run(
+        [sys.executable, str(script_path), "maybe-accept"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.startswith("ignore+change-header(Pasted query detected.")
+
+
+def test_enter_guard_accepts_when_query_is_stable_and_not_paste_guarded(tmp_path):
+    script_path = tmp_path / "guard.py"
+    state_path = tmp_path / "guard_state.txt"
+    browse._write_enter_guard_script(str(script_path), str(state_path))
+    state_path.write_text(
+        json.dumps(
+            {
+                "last_change_ms": 0,
+                "last_query": "doug",
+                "paste_guard_until_ms": 0,
+            }
+        )
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(script_path), "maybe-accept"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == "accept"
 
 
 def test_default_target_provider_follows_entrypoint_name():
