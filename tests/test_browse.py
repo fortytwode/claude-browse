@@ -231,6 +231,12 @@ def test_build_fzf_cmd_avoids_raw_query_placeholder_in_shell_commands():
     assert "{q}" not in preview
 
 
+def test_build_fzf_cmd_moves_open_to_ctrl_o_and_ignores_enter():
+    cmd = browse._build_fzf_cmd("Claude", "/tmp/search.py", "/tmp/preview.py")
+    assert "--bind=enter:ignore" in cmd
+    assert "--bind=ctrl-o:accept" in cmd
+
+
 def test_default_target_provider_follows_entrypoint_name():
     assert browse._default_target_provider("claude-browse") == "claude"
     assert browse._default_target_provider("/tmp/codex-browse") == "codex"

@@ -520,11 +520,12 @@ def _build_fzf_cmd(
             'Type a sentence, not just keywords. Try: "where i was asking nevena about feedback" | '
             '"last closeout session for musopia" | '
             '"pokpok brief where we questioned the opportunities". '
-            f"Enter: resume in {target_name} (yolo) | "
+            f"Ctrl-O: resume in {target_name} (yolo) | "
             f"Ctrl-T: re-enter matched topic in {target_name} | "
             f"Ctrl-S: open in {target_name} (safe) | "
             "Ctrl-Y: next prompt | Ctrl-B: restart card | "
             "Ctrl-H: handoff brief | Ctrl-U: status update | "
+            "Enter: ignore (safe for multiline paste) | "
             "Esc: quit | Shift-Up/Down: scroll preview"
         ),
         "--header-first",
@@ -536,6 +537,8 @@ def _build_fzf_cmd(
         f"--preview=python3 {preview_script_path} {{}}",
         "--preview-window=right:45%:wrap",
         "--bind=shift-up:preview-up,shift-down:preview-down",
+        "--bind=enter:ignore",
+        "--bind=ctrl-o:accept",
         "--bind=ctrl-s:print(SAFE:)+accept",
         "--bind=ctrl-t:print(TOPIC:)+accept",
         "--bind=ctrl-y:print(PROMPT:)+accept",
@@ -625,13 +628,14 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         "  Longer descriptive queries are reduced to the most specific anchors.\n"
         "\n"
         "Keys while browsing:\n"
-        f"  Enter                 Resume the selected thread in {target_name} (yolo)\n"
+        f"  Ctrl-O                Resume the selected thread in {target_name} (yolo)\n"
         f"  Ctrl-T                Re-enter the matched topic in a new {target_name} session (yolo)\n"
         f"  Ctrl-S                Open in {target_name} (safe)\n"
         "  Ctrl-Y                Print the suggested next prompt for the selection\n"
         "  Ctrl-B                Print the restart card for the selection\n"
         "  Ctrl-H                Print a reusable handoff brief\n"
         "  Ctrl-U                Print a concise status update\n"
+        "  Enter                 Ignore (prevents multiline paste from auto-opening a result)\n"
         "  Shift-Up / Shift-Down Scroll the preview pane\n"
         "  Esc                   Quit\n"
         "\n"

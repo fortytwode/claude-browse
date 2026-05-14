@@ -26,6 +26,7 @@ def test_readme_documents_target_app_browsers():
     assert "restart card" in text.lower()
     assert "Ctrl-Y" in text
     assert "Ctrl-B" in text
+    assert "Ctrl-O" in text
     assert "Ctrl-T" in text
     assert "Ctrl-H" in text
     assert "Ctrl-U" in text
