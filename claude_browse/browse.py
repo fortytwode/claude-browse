@@ -15,7 +15,7 @@ import sys
 import tempfile
 from collections.abc import Mapping
 
-from . import fts
+from . import fts, search_log
 from .core import (
     build_handoff_markdown,
     build_import_markdown,
@@ -590,9 +590,10 @@ def _write_search_script(
     script = f"""#!/usr/bin/env python3
 import os
 import sys
+import time
 sys.path.insert(0, {package_dir!r})
 
-from claude_browse import fts
+from claude_browse import fts, search_log
 from claude_browse.browse import format_query_coach_row, format_row
 
 DB_PATH = {db_path!r}
@@ -601,19 +602,32 @@ LIMIT = {limit}
 
 q = os.environ.get("FZF_QUERY", "")
 conn = fts.open_db(DB_PATH)
+ranker = "recent"
+start = time.perf_counter()
 if q.strip():
     # ranker_v1: multi-column BM25 + exp-decay recency. See fts.search_ranked.
     # Set CLAUDE_BROWSE_RANKER=current to fall back to recency-only.
     import os as _os
     if _os.environ.get("CLAUDE_BROWSE_RANKER") == "current":
+        ranker = "current"
         results = fts.search(conn, q, limit=LIMIT)
     else:
+        ranker = "v1"
         results = fts.search_ranked(conn, q, limit=LIMIT)
 else:
     results = fts.list_recent(conn, limit=LIMIT)
 
 if CWD_FILTER:
     results = [r for r in results if (r.get("cwd") or "").startswith(CWD_FILTER)]
+
+search_log.log_search(
+    q,
+    results,
+    ranker=ranker,
+    cwd_filter=CWD_FILTER,
+    limit=LIMIT,
+    elapsed_ms=(time.perf_counter() - start) * 1000,
+)
 
 coach_row = format_query_coach_row(q)
 if coach_row:
@@ -1279,6 +1293,12 @@ def main() -> None:
             "match_timestamp": row_meta.get("match_timestamp", ""),
             "match_confidence": row_meta.get("match_confidence", ""),
         }
+        search_log.log_selection(
+            selection_query,
+            action=action,
+            target_provider=selected_target,
+            session=session,
+        )
 
         state = None
         if action in {"print_prompt", "print_brief", "print_status", "reenter_topic"}:

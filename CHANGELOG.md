@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Local JSONL search diagnostics now write to
+  `~/.claude/cache/claude-browse-search.log.jsonl`, recording query
+  interpretation, ranker, result counts, top visible matches, and selection
+  events for future troubleshooting.
 - The provider registry now understands source-vs-target capability and can
   load **experimental** external provider modules from
   `CLAUDE_BROWSE_PROVIDER_MODULES`. This is the first public-ish extension seam

@@ -246,6 +246,8 @@ def test_write_search_script_reads_query_from_fzf_env(tmp_path):
     )
     text = script_path.read_text()
     assert 'q = os.environ.get("FZF_QUERY", "")' in text
+    assert "search_log.log_search(" in text
+    assert "elapsed_ms=(time.perf_counter() - start) * 1000" in text
     assert 'sys.argv[1]' not in text
 
 

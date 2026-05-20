@@ -248,6 +248,18 @@ availability, experimental status, and auth state when a provider reports one.
 
 ## Troubleshooting
 
+Search diagnostics are written locally to:
+
+```bash
+~/.claude/cache/claude-browse-search.log.jsonl
+```
+
+Each line records the query, ranker, elapsed time, result count, and top result
+metadata/snippets. This is the closest equivalent to a server log for the local
+fzf workflow. Set `CLAUDE_BROWSE_LOG=0` to disable it, or
+`CLAUDE_BROWSE_LOG_PATH=/path/to/log.jsonl` to move it. The log rotates at
+5 MB by default; override with `CLAUDE_BROWSE_LOG_MAX_BYTES`.
+
 **`fzf: command not found`**
 Install fzf via your package manager (see Install section above).
 
