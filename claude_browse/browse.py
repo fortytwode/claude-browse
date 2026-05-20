@@ -381,9 +381,8 @@ def format_row(
     """
     query_active = bool(query.strip())
     thread_date = format_date(info.get("last_timestamp") or info.get("timestamp"))
+    match_date = format_date(info.get("match_timestamp"))
     date = thread_date
-    if query_active and info.get("match_timestamp"):
-        date = format_date(info.get("match_timestamp"))
     provider = (info.get("provider") or "claude").lower()
     cwd = info.get("cwd")
     fname = folder_name(cwd, prefixes)
@@ -398,7 +397,7 @@ def format_row(
 
     suffix_parts: list[str] = []
     if query_active and _is_drifted_match(info):
-        suffix_parts.append(f"\033[2mactive {thread_date}\033[0m")
+        suffix_parts.append(f"\033[2mmatched {match_date}\033[0m")
 
     if query_active and info.get("context"):
         # FTS5 snippet: \x01 wraps matched terms, \x02 ends the wrap. Render
@@ -420,7 +419,7 @@ def format_row(
         if title:
             meta_parts.append(title[:30])
         if query_active and _is_drifted_match(info):
-            meta_parts.append(f"active {thread_date}")
+            meta_parts.append(f"matched {match_date}")
         meta = (
             f"  \033[2m[{ ' · '.join(meta_parts) }]\033[0m"
             if meta_parts

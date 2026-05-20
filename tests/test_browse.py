@@ -84,7 +84,8 @@ def test_format_row_shows_match_recency_and_thread_activity_when_query_active():
         match_timestamp="2026-05-02T10:00:00Z",
     )
     row = format_row(info, query="pokpok")
-    assert "active" in row
+    assert row.startswith("May 10")
+    assert "matched May 02" in row
 
 
 def test_format_row_shows_feedback_reason_tag_for_descriptive_query():
