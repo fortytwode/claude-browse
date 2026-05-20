@@ -478,6 +478,117 @@ def test_search_ranked_demotes_imported_session_artifacts(db):
     assert [r["session_id"] for r in results][:2] == ["real_thread", "imported_thread"]
 
 
+def test_search_ranked_does_not_demote_later_work_in_imported_continuation(db):
+    _seed(
+        db,
+        "older_thread",
+        "artem asc historical snapshot",
+        title="Historical snapshot check",
+        cwd="/Users/Shamanth/team-operations/clients/musopia",
+        first_msg="Check whether the snapshot was shared.",
+        timestamp="2026-04-20T08:00:00Z",
+        last_timestamp="2026-04-20T08:10:00Z",
+        segments=[
+            (
+                "assistant",
+                "Artem has not shared historical ASC snapshots yet.",
+                "2026-04-20T08:10:00Z",
+            ),
+        ],
+    )
+    _seed(
+        db,
+        "continued_thread",
+        "Artem ASC imported continuation with later real work",
+        title="Continue the imported Claude session context from /var/folders/.../claude_browse_import_123.md",
+        cwd="/Users/Shamanth/team-operations/clients/musopia",
+        first_msg="Continue the imported Claude session context from /var/folders/... Treat it as prior conversation state.",
+        timestamp="2026-05-20T07:00:00Z",
+        last_timestamp="2026-05-20T07:20:00Z",
+        segments=[
+            (
+                "user",
+                "Continue the imported Claude session context from /var/folders/... Treat it as prior conversation state.",
+                "2026-05-20T07:00:00Z",
+            ),
+            ("assistant", "I loaded the handoff.", "2026-05-20T07:01:00Z"),
+            (
+                "user",
+                "Please send the clarified note to Artem.",
+                "2026-05-20T07:18:00Z",
+            ),
+            (
+                "assistant",
+                "Sent the clarified reply to Artem in the ASA/ASC thread.",
+                "2026-05-20T07:20:00Z",
+            ),
+        ],
+    )
+
+    plan = build_query_plan("Artem ASC")
+    continued_row = next(
+        r
+        for r in fts.search_ranked(db, "Artem ASC")
+        if r["session_id"] == "continued_thread"
+    )
+    assert fts._artifact_penalty(continued_row, plan, "Artem ASC") == 0.0
+
+    results = fts.search_ranked(db, "Artem ASC")
+    assert [r["session_id"] for r in results][:2] == [
+        "continued_thread",
+        "older_thread",
+    ]
+
+
+def test_search_ranked_keeps_import_penalty_for_broad_single_acronym(db):
+    _seed(
+        db,
+        "real_thread",
+        "ASC source bucket analysis",
+        title="Source bucket analysis",
+        cwd="/Users/Shamanth/team-operations/clients/musopia",
+        first_msg="Review the source bucket analysis.",
+        timestamp="2026-05-19T08:00:00Z",
+        last_timestamp="2026-05-19T08:10:00Z",
+        segments=[
+            (
+                "assistant",
+                "The ASC source-bucket analysis is ready.",
+                "2026-05-19T08:10:00Z",
+            ),
+        ],
+    )
+    _seed(
+        db,
+        "continued_thread",
+        "ASC imported continuation with later work",
+        title="Continue the imported Claude session context from /var/folders/.../claude_browse_import_123.md",
+        cwd="/Users/Shamanth/team-operations/clients/musopia",
+        first_msg="Continue the imported Claude session context from /var/folders/... Treat it as prior conversation state.",
+        timestamp="2026-05-20T07:00:00Z",
+        last_timestamp="2026-05-20T07:20:00Z",
+        segments=[
+            (
+                "user",
+                "Continue the imported Claude session context from /var/folders/... Treat it as prior conversation state.",
+                "2026-05-20T07:00:00Z",
+            ),
+            ("assistant", "I loaded the handoff.", "2026-05-20T07:01:00Z"),
+            (
+                "assistant",
+                "Sent the reply in the ASA/ASC thread.",
+                "2026-05-20T07:20:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, "ASC")
+    assert [r["session_id"] for r in results][:2] == [
+        "real_thread",
+        "continued_thread",
+    ]
+
+
 def test_search_ranked_demotes_session_handover_artifacts(db):
     _seed(
         db,

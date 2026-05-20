@@ -920,6 +920,15 @@ def _is_plain_entity_query(plan: QueryPlan, query: str) -> bool:
     return bool(re.fullmatch(r"[a-z0-9']+", stripped))
 
 
+def _query_can_trust_imported_continuation(plan: QueryPlan) -> bool:
+    anchors = [term.strip(".*") for term in plan.anchor_terms if term.strip(".*")]
+    if len(anchors) >= 2:
+        return True
+    if len(anchors) == 1:
+        return len(anchors[0]) > 3
+    return False
+
+
 def _metadata_anchor_score(row: dict, plan: QueryPlan) -> float:
     anchors = [term for term in plan.anchor_terms if term]
     if not anchors:
@@ -970,20 +979,35 @@ def _workspace_anchor_score(row: dict, plan: QueryPlan) -> float:
 
 
 def _artifact_penalty(row: dict, plan: QueryPlan, query: str) -> float:
-    haystack = " ".join(
+    context_haystack = str(row.get("context") or "").lower()
+    metadata_haystack = " ".join(
         part
         for part in (
             row.get("name") or "",
             row.get("cwd") or "",
             row.get("first_msg") or "",
             row.get("last_msg") or "",
-            row.get("context") or "",
         )
         if part
     ).lower()
+    haystack = " ".join(
+        part for part in (metadata_haystack, context_haystack) if part
+    )
     penalty = 0.0
-    if _contains_any(haystack, _IMPORTED_SESSION_CUES):
+    if _contains_any(context_haystack, _IMPORTED_SESSION_CUES):
         penalty += 8.0
+    elif _contains_any(metadata_haystack, _IMPORTED_SESSION_CUES):
+        # Imported-session titles are boilerplate, but the continued thread can
+        # later contain real work. Only suppress the handoff/opening itself.
+        try:
+            match_segment_idx = int(row.get("match_segment_idx") or 0)
+        except (TypeError, ValueError):
+            match_segment_idx = 0
+        if (
+            match_segment_idx <= 2
+            or not _query_can_trust_imported_continuation(plan)
+        ):
+            penalty += 8.0
     if _contains_any(haystack, _SELF_REFERENTIAL_CUES) and not _query_mentions_search_system(query):
         penalty += 6.0
     if _contains_any(haystack, _AUTOMATION_CUES) and "automation" not in query.lower():
