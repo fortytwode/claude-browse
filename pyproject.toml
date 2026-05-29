@@ -52,6 +52,7 @@ codex-browse = "claude_browse.browse:main"
 gemini-browse = "claude_browse.browse:main"
 copilot-browse = "claude_browse.browse:main"
 cursor-browse = "claude_browse.browse:main"
+codex-mobile-json = "claude_browse.codex_mobile_json:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["claude_browse"]

@@ -14,7 +14,7 @@ BIN_DIR="$HOME/.local/bin"
 
 mkdir -p "$BIN_DIR"
 
-for tool in claude-browse codex-browse gemini-browse copilot-browse cursor-browse; do
+for tool in claude-browse codex-browse gemini-browse copilot-browse cursor-browse codex-mobile-json; do
     chmod +x "$SCRIPT_DIR/$tool"
     ln -sf "$SCRIPT_DIR/$tool" "$BIN_DIR/$tool"
     echo "  Installed $tool -> $BIN_DIR/$tool"
@@ -87,3 +87,4 @@ echo "  codex-browse     Interactive browser that opens everything in CodeX by d
 echo "  gemini-browse    Interactive browser that opens everything in Gemini by default"
 echo "  copilot-browse   Interactive browser that opens everything in Copilot by default"
 echo "  cursor-browse    Interactive browser that opens everything in Cursor by default"
+echo "  codex-mobile-json  Experimental mobile-safe Codex JSON transcript runner"
