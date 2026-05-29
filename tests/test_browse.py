@@ -230,6 +230,13 @@ def test_render_query_coach_preview_explains_descriptive_query_interpretation():
     assert "Sentence-style query detected." in preview
 
 
+def test_render_query_coach_preview_shows_exact_phrase_boost():
+    preview = browse.render_query_coach_preview("cfo update")
+
+    assert "Anchors: cfo, update" in preview
+    assert "Exact phrase boost: cfo update" in preview
+
+
 def test_render_query_coach_preview_handles_low_confidence_query():
     preview = browse.render_query_coach_preview("that we discussed, please?")
     assert "Add one concrete anchor" in preview

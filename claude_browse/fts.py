@@ -702,6 +702,13 @@ def _latest_segment_matches(
         compactness = term_count / max(span, 1)
         return (term_count, density, compactness)
 
+    def _phrase_score(text: str) -> float:
+        score = 0.0
+        for phrase in plan.exact_phrase_terms:
+            if phrase and term_spans(text, phrase):
+                score += 1.0 + min(len(phrase.split()), 6) * 0.25
+        return score
+
     def _closeout_score(text: str) -> float:
         if not plan.wants_closeout:
             return 0.0
@@ -813,6 +820,7 @@ def _latest_segment_matches(
         term_count, density, compactness = _match_stats(combined)
         if term_count < required_term_count:
             continue
+        phrase_score = _phrase_score(combined)
         intent_score = _semantic_intent_score(combined, plan)
         mismatch_penalty = _semantic_mismatch_penalty(combined, plan)
         ranked.append(
@@ -823,6 +831,7 @@ def _latest_segment_matches(
                     "match_timestamp": match_timestamp,
                     "match_context": _context_from_exchange(combined) or context,
                     "match_term_count": term_count,
+                    "match_phrase_score": phrase_score,
                     "match_density": density,
                     "match_compactness": compactness,
                     "match_conversation_score": _conversation_score(combined),
@@ -866,13 +875,14 @@ def _latest_segment_matches(
     else:
         ranked.sort(
             key=lambda item: (
+                item[1]["match_phrase_score"],
                 item[1]["match_term_count"],
                 item[1]["match_intent_score"] - item[1]["match_mismatch_penalty"],
+                _timestamp_sort_key(item[1]["match_timestamp"]),
                 item[1]["match_conversation_score"],
                 item[1]["match_density"],
                 item[1]["match_compactness"],
                 item[1]["_assistant_bonus"],
-                _timestamp_sort_key(item[1]["match_timestamp"]),
                 item[1]["_match_bm25"],
                 item[1]["match_segment_idx"],
             ),
@@ -961,6 +971,29 @@ def _metadata_anchor_score(row: dict, plan: QueryPlan) -> float:
                 score += weight * 0.75 * _position_bonus(pos)
                 matched_anchors.add(anchor)
     return score + (1.5 * len(matched_anchors))
+
+
+def _exact_phrase_score(row: dict, plan: QueryPlan) -> float:
+    if not plan.exact_phrase_terms:
+        return 0.0
+
+    weighted_fields = (
+        (str(row.get("name") or ""), 3.0),
+        (str(row.get("first_msg") or ""), 2.5),
+        (str(row.get("context") or ""), 2.0),
+        (str(row.get("last_msg") or ""), 1.5),
+        (str(row.get("cwd") or ""), 1.0),
+    )
+    score = float(row.get("match_phrase_score") or 0.0)
+    for phrase in plan.exact_phrase_terms:
+        if not phrase:
+            continue
+        phrase_weight = 1.0 + min(len(phrase.split()), 6) * 0.25
+        for text, field_weight in weighted_fields:
+            if term_spans(text, phrase):
+                score += phrase_weight * field_weight
+                break
+    return score
 
 
 def _workspace_anchor_score(row: dict, plan: QueryPlan) -> float:
@@ -1106,8 +1139,11 @@ def search(
     if not results:
         return []
     decorated = _decorate_match_metadata(results, match_map)
+    for row in decorated:
+        row["_exact_phrase_score"] = _exact_phrase_score(row, plan)
     decorated.sort(
         key=lambda row: (
+            1 if row.get("_exact_phrase_score") else 0,
             int(row.get("match_term_count") or 0),
             1 if row.get("match_timestamp") else 0,
             _timestamp_sort_key(
@@ -1129,6 +1165,7 @@ def search(
         clean = dict(row)
         clean.pop("_match_bm25", None)
         clean.pop("_assistant_bonus", None)
+        clean.pop("_exact_phrase_score", None)
         trimmed.append(clean)
     return trimmed
 
@@ -1236,6 +1273,7 @@ def search_ranked(
         )
         age = _age_days(relevant_ts, now)
         recency = math.exp(-age / half_life_days) if age >= 0 else 0.0
+        row["_exact_phrase_score"] = _exact_phrase_score(row, plan)
         row["_metadata_anchor_score"] = _metadata_anchor_score(row, plan)
         row["_workspace_match_score"] = _workspace_anchor_score(row, plan)
         row["_artifact_penalty"] = _artifact_penalty(row, plan, query)
@@ -1243,7 +1281,8 @@ def search_ranked(
             row.get("match_intent_score") or 0.0
         ) - float(row.get("match_mismatch_penalty") or 0.0)
         row["_quality_score"] = (
-            float(row.get("_workspace_match_score") or 0.0)
+            float(row.get("_exact_phrase_score") or 0.0)
+            + float(row.get("_workspace_match_score") or 0.0)
             + float(row.get("_metadata_anchor_score") or 0.0)
             + float(row.get("_semantic_intent_score") or 0.0)
             - float(row.get("_artifact_penalty") or 0.0)
@@ -1310,9 +1349,32 @@ def search_ranked(
             ),
             reverse=True,
         )
+    elif not plan.descriptive:
+        decorated.sort(
+            key=lambda row: (
+                1 if row.get("_exact_phrase_score") else 0,
+                int(row.get("match_term_count") or 0),
+                _timestamp_sort_key(
+                    row.get("match_timestamp")
+                    or row.get("last_timestamp")
+                    or row.get("timestamp")
+                ),
+                float(row.get("_quality_score") or 0.0),
+                float(row.get("_score") or 0.0),
+                float(row.get("match_conversation_score") or 0.0),
+                float(row.get("match_density") or 0.0),
+                float(row.get("match_compactness") or 0.0),
+                1 if row.get("_assistant_bonus") else 0,
+                float(row.get("_match_bm25") or 0.0),
+                _timestamp_sort_key(row.get("last_timestamp") or row.get("timestamp")),
+                float(row.get("mtime") or 0.0),
+            ),
+            reverse=True,
+        )
     else:
         decorated.sort(
             key=lambda row: (
+                float(row.get("_exact_phrase_score") or 0.0),
                 int(row.get("match_term_count") or 0),
                 float(row.get("_quality_score") or 0.0),
                 float(row.get("match_intent_score") or 0.0)
@@ -1342,6 +1404,7 @@ def search_ranked(
         clean.pop("_assistant_bonus", None)
         clean.pop("_closeout_score", None)
         clean.pop("_metadata_anchor_score", None)
+        clean.pop("_exact_phrase_score", None)
         clean.pop("_workspace_match_score", None)
         clean.pop("_artifact_penalty", None)
         clean.pop("_quality_score", None)

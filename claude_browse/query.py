@@ -145,6 +145,7 @@ class QueryPlan:
     normalized_terms: tuple[str, ...]
     fts_terms: tuple[str, ...]
     anchor_terms: tuple[str, ...]
+    exact_phrase_terms: tuple[str, ...]
     highlight_terms: tuple[str, ...]
     descriptive: bool
     wants_recent: bool
@@ -248,12 +249,23 @@ def build_query_plan(query: str, max_terms: int = 5) -> QueryPlan:
         word_terms = [term for term in word_terms if term in keep]
 
     fts_terms = _dedupe_preserve_order([*phrase_terms, *word_terms])
+    descriptive = len(raw_terms) > 2 and normalized_terms != fts_terms
+
+    exact_phrase_terms: list[str] = list(phrase_terms)
+    if not descriptive and len(fts_terms) >= 2:
+        implicit_phrase = " ".join(
+            term for term in fts_terms if " " not in term and not term.endswith("*")
+        ).strip()
+        if implicit_phrase and len(implicit_phrase.split()) >= 2:
+            exact_phrase_terms.append(implicit_phrase)
+
     normalized_query_phrase = " ".join(normalized_terms).strip()
     phrase_highlights = []
     if len(raw_terms) >= 4 and normalized_query_phrase:
         phrase_highlights.append(normalized_query_phrase)
     highlight_terms = _dedupe_preserve_order(
         [
+            *_dedupe_preserve_order(exact_phrase_terms),
             *phrase_highlights,
             *fts_terms,
             *[
@@ -263,7 +275,6 @@ def build_query_plan(query: str, max_terms: int = 5) -> QueryPlan:
             ],
         ]
     )
-    descriptive = len(raw_terms) > 2 and normalized_terms != fts_terms
     low_confidence = bool(raw_terms) and not fts_terms
 
     return QueryPlan(
@@ -271,6 +282,7 @@ def build_query_plan(query: str, max_terms: int = 5) -> QueryPlan:
         normalized_terms=normalized_terms,
         fts_terms=fts_terms,
         anchor_terms=fts_terms,
+        exact_phrase_terms=_dedupe_preserve_order(exact_phrase_terms),
         highlight_terms=highlight_terms,
         descriptive=descriptive,
         wants_recent=wants_recent,

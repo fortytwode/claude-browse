@@ -25,9 +25,19 @@ def test_query_plan_keeps_specific_people_and_topic_words():
     plan = build_query_plan("where i was asking Nevena about feedback")
 
     assert plan.anchor_terms == ("nevena", "feedback")
+    assert plan.exact_phrase_terms == ()
     assert plan.wants_recent is False
     assert plan.wants_closeout is False
     assert plan.descriptive is True
+
+
+def test_query_plan_tracks_implicit_phrase_for_short_anchor_search():
+    plan = build_query_plan("cfo update")
+
+    assert plan.anchor_terms == ("cfo", "update")
+    assert plan.exact_phrase_terms == ("cfo update",)
+    assert plan.highlight_terms[0] == "cfo update"
+    assert plan.descriptive is False
 
 
 def test_query_plan_normalizes_possessives_and_hyphens():

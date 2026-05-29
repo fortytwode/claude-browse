@@ -282,6 +282,8 @@ def render_query_coach_preview(query: str) -> str:
     if plan.anchor_terms:
         lines.append("")
         lines.append(f"Anchors: {', '.join(plan.anchor_terms)}")
+    if plan.exact_phrase_terms and not plan.descriptive:
+        lines.append(f"Exact phrase boost: {', '.join(plan.exact_phrase_terms)}")
 
     intents: list[str] = []
     if plan.wants_recent:

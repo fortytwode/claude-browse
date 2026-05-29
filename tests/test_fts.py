@@ -182,6 +182,73 @@ def test_search_phrase_requires_adjacency(db):
     assert sids == ["s1"]
 
 
+def test_search_ranked_unquoted_short_phrase_prefers_exact_phrase(db):
+    _seed(
+        db,
+        "separate_words",
+        "CFO planning and update notes",
+        timestamp="2026-05-12T00:00:00Z",
+        last_timestamp="2026-05-12T01:00:00Z",
+        segments=[
+            ("user", "Can you review CFO planning?", "2026-05-12T00:00:00Z"),
+            ("assistant", "The update notes are later in the file.", "2026-05-12T01:00:00Z"),
+        ],
+    )
+    _seed(
+        db,
+        "exact_phrase",
+        "CFO update notes",
+        timestamp="2026-05-11T00:00:00Z",
+        last_timestamp="2026-05-11T01:00:00Z",
+        segments=[
+            ("user", "Please find the CFO update.", "2026-05-11T00:00:00Z"),
+            ("assistant", "The CFO update is ready.", "2026-05-11T01:00:00Z"),
+        ],
+    )
+
+    results = fts.search_ranked(db, "cfo update")
+    assert [r["session_id"] for r in results][:2] == [
+        "exact_phrase",
+        "separate_words",
+    ]
+    assert "CFO update" in results[0]["context"]
+
+
+def test_search_ranked_short_anchor_search_sorts_phrase_hits_by_match_recency(db):
+    _seed(
+        db,
+        "older_title_match",
+        "CFO update historical",
+        title="CFO Update",
+        first_msg="CFO Update kickoff",
+        timestamp="2026-05-20T00:00:00Z",
+        last_timestamp="2026-05-20T01:00:00Z",
+        segments=[
+            ("user", "Let's do the CFO update.", "2026-05-20T00:00:00Z"),
+            ("assistant", "CFO update notes are drafted.", "2026-05-20T01:00:00Z"),
+        ],
+    )
+    _seed(
+        db,
+        "newer_phrase_match",
+        "CFO update recent",
+        title="Finance check",
+        first_msg="Quick finance check",
+        timestamp="2026-05-28T00:00:00Z",
+        last_timestamp="2026-05-28T01:00:00Z",
+        segments=[
+            ("user", "Can you pull the CFO update?", "2026-05-28T00:00:00Z"),
+            ("assistant", "Here is the CFO update.", "2026-05-28T01:00:00Z"),
+        ],
+    )
+
+    results = fts.search_ranked(db, "cfo update")
+    assert [r["session_id"] for r in results][:2] == [
+        "newer_phrase_match",
+        "older_title_match",
+    ]
+
+
 def test_search_short_query_no_fuzzy_flood(db):
     """The original bug: fzf fuzzy-matched 'sca2' against 99/100 sessions."""
     _seed(db, "s1", "the SCA2 deck shipped")
