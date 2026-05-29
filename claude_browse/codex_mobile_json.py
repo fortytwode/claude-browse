@@ -186,7 +186,12 @@ def _render_event(event: dict[str, Any]) -> str | None:
     return None
 
 
-def run_turn(prompt: str, *, session_id: str | None = None) -> str | None:
+def run_turn(
+    prompt: str,
+    *,
+    session_id: str | None = None,
+    show_user_block: bool = True,
+) -> str | None:
     """Run one Codex turn and render JSON events as normal stdout."""
     global _current_session_id, _last_exit_code, _last_prompt, _last_raw_path, _last_stderr_path
 
@@ -202,7 +207,8 @@ def run_turn(prompt: str, *, session_id: str | None = None) -> str | None:
     _last_stderr_path = stderr_path
 
     cmd = _build_cmd(prompt, last_message_path, session_id=session_id)
-    _print_user(prompt)
+    if show_user_block:
+        _print_user(prompt)
 
     start = time.time()
     try:
@@ -476,7 +482,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not prompt:
             continue
-        session_id = run_turn(prompt, session_id=session_id) or session_id
+        session_id = run_turn(prompt, session_id=session_id, show_user_block=False) or session_id
 
 
 if __name__ == "__main__":

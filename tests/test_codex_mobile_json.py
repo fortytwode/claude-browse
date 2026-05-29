@@ -176,6 +176,29 @@ def test_main_reads_piped_prompt_when_no_arg(monkeypatch):
     assert calls == [("from pipe", None)]
 
 
+def test_main_repl_turn_does_not_reprint_user_block(monkeypatch, capsys):
+    class Tty:
+        def isatty(self) -> bool:
+            return True
+
+    prompts = iter(["hello", None])
+    calls = []
+    monkeypatch.setattr(mobile.sys, "stdin", Tty())
+    monkeypatch.setattr(mobile, "read_prompt", lambda: next(prompts))
+    monkeypatch.setattr(
+        mobile,
+        "run_turn",
+        lambda prompt, session_id=None, show_user_block=True: (
+            calls.append((prompt, session_id, show_user_block)) or "new-id"
+        ),
+    )
+
+    assert mobile.main([]) == 0
+
+    assert calls == [("hello", None, False)]
+    assert "USER" not in capsys.readouterr().out
+
+
 def test_main_one_shot_returns_codex_exit_code(monkeypatch):
     class NonTty:
         def isatty(self) -> bool:
@@ -184,7 +207,7 @@ def test_main_one_shot_returns_codex_exit_code(monkeypatch):
         def read(self) -> str:
             return ""
 
-    def fake_run_turn(prompt, session_id=None):
+    def fake_run_turn(prompt, session_id=None, show_user_block=True):
         mobile._last_exit_code = 7
         return session_id
 
