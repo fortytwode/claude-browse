@@ -182,6 +182,64 @@ def test_search_phrase_requires_adjacency(db):
     assert sids == ["s1"]
 
 
+def test_search_ranked_quoted_phrase_no_hit_falls_back_to_meaningful_terms(db):
+    _seed(
+        db,
+        "near_phrase",
+        "I built the MaxRewards list for Morgan yesterday.",
+        timestamp="2026-05-20T00:00:00Z",
+        last_timestamp="2026-05-20T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                "I built the MaxRewards list for Morgan yesterday.",
+                "2026-05-20T01:00:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, '"MaxRewards built me a list"')
+
+    assert [r["session_id"] for r in results] == ["near_phrase"]
+    assert results[0]["phrase_fallback"] is True
+    assert results[0]["phrase_fallback_from"] == "maxrewards built me a list"
+    assert results[0]["phrase_fallback_terms"] == "maxrewards, list"
+
+
+def test_search_ranked_phrase_fallback_prefers_compact_phrase_match(db):
+    _seed(
+        db,
+        "scattered_recent",
+        "MaxRewards notes. Later, a generic cleanup list.",
+        timestamp="2026-05-21T00:00:00Z",
+        last_timestamp="2026-05-21T01:00:00Z",
+    )
+    _seed(
+        db,
+        "compact_older",
+        "Created tasks in the MaxRewards list.",
+        timestamp="2026-05-20T00:00:00Z",
+        last_timestamp="2026-05-20T01:00:00Z",
+    )
+
+    results = fts.search_ranked(db, '"MaxRewards built me a list"')
+
+    assert [r["session_id"] for r in results][:2] == [
+        "compact_older",
+        "scattered_recent",
+    ]
+
+
+def test_search_ranked_quoted_phrase_hit_stays_strict(db):
+    _seed(db, "exact", "the runna sca2 deck is ready")
+    _seed(db, "near", "runna and sca2 mentioned with gap")
+
+    results = fts.search_ranked(db, '"runna sca2"')
+
+    assert [r["session_id"] for r in results] == ["exact"]
+    assert "phrase_fallback" not in results[0]
+
+
 def test_search_ranked_unquoted_short_phrase_prefers_exact_phrase(db):
     _seed(
         db,

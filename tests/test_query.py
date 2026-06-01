@@ -36,7 +36,17 @@ def test_query_plan_tracks_implicit_phrase_for_short_anchor_search():
 
     assert plan.anchor_terms == ("cfo", "update")
     assert plan.exact_phrase_terms == ("cfo update",)
+    assert plan.phrase_fallback_terms == ()
     assert plan.highlight_terms[0] == "cfo update"
+    assert plan.descriptive is False
+
+
+def test_query_plan_tracks_phrase_fallback_terms_for_quoted_sentence():
+    plan = build_query_plan('"MaxRewards built me a list"')
+
+    assert plan.anchor_terms == ("maxrewards built me a list",)
+    assert plan.exact_phrase_terms == ("maxrewards built me a list",)
+    assert plan.phrase_fallback_terms == ("maxrewards", "list")
     assert plan.descriptive is False
 
 

@@ -15,6 +15,7 @@ import os
 import re
 import sqlite3
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from .core import list_index_records
@@ -508,6 +509,51 @@ def _terms_to_fts_query(
             escaped = text.replace('"', '""')
             parts.append(f'"{escaped}"')
     return joiner.join(parts)
+
+
+def _unique_terms(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for group in groups:
+        for term in group:
+            if not term or term in seen:
+                continue
+            seen.add(term)
+            ordered.append(term)
+    return tuple(ordered)
+
+
+def _phrase_fallback_plan(plan: QueryPlan) -> QueryPlan | None:
+    """Relax a strict quoted phrase into its meaningful words after zero hits."""
+    if len(plan.phrase_fallback_terms) < 2:
+        return None
+    if plan.phrase_fallback_terms == plan.fts_terms:
+        return None
+    fallback_phrase = " ".join(plan.phrase_fallback_terms)
+    return replace(
+        plan,
+        fts_terms=plan.phrase_fallback_terms,
+        anchor_terms=plan.phrase_fallback_terms,
+        exact_phrase_terms=(fallback_phrase,),
+        highlight_terms=_unique_terms(
+            plan.exact_phrase_terms,
+            (fallback_phrase,),
+            plan.phrase_fallback_terms,
+            plan.highlight_terms,
+        ),
+    )
+
+
+def _mark_phrase_fallback(rows: list[dict], plan: QueryPlan) -> list[dict]:
+    if not rows:
+        return rows
+    phrase = ", ".join(plan.exact_phrase_terms)
+    terms = ", ".join(plan.phrase_fallback_terms)
+    for row in rows:
+        row["phrase_fallback"] = True
+        row["phrase_fallback_from"] = phrase
+        row["phrase_fallback_terms"] = terms
+    return rows
 
 
 def _parse_iso_timestamp(ts_str: str | None) -> datetime | None:
@@ -1102,6 +1148,7 @@ def search(
     plan = build_query_plan(query)
     if plan.low_confidence:
         return list_recent(conn, limit)
+    strict_plan = plan
     fts_query = normalize_query(query)
     if not fts_query:
         return list_recent(conn, limit)
@@ -1125,7 +1172,23 @@ def search(
     except sqlite3.OperationalError:
         return []
 
+    fallback_plan = None
+    if not rows:
+        fallback_plan = _phrase_fallback_plan(plan)
+        if fallback_plan:
+            fallback_query = _terms_to_fts_query(list(fallback_plan.fts_terms))
+            if fallback_query:
+                try:
+                    rows = conn.execute(sql, (fallback_query, limit)).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                if rows:
+                    plan = fallback_plan
+                    descriptive = plan.descriptive
+
     results = [_row_to_dict(r) for r in rows]
+    if fallback_plan and results:
+        results = _mark_phrase_fallback(results, strict_plan)
     existing_ids = [str(r["session_id"]) for r in results]
     match_map = _latest_segment_matches(
         conn,
@@ -1214,6 +1277,7 @@ def search_ranked(
     plan = build_query_plan(query)
     if plan.low_confidence:
         return list_recent(conn, limit)
+    strict_plan = plan
     fts_query = normalize_query(query)
     if not fts_query:
         return list_recent(conn, limit)
@@ -1244,7 +1308,24 @@ def search_ranked(
     except sqlite3.OperationalError:
         return []
 
+    fallback_plan = None
+    if not rows:
+        fallback_plan = _phrase_fallback_plan(plan)
+        if fallback_plan:
+            fallback_query = _terms_to_fts_query(list(fallback_plan.fts_terms))
+            if fallback_query:
+                try:
+                    rows = conn.execute(sql, (fallback_query, candidate_pool)).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                if rows:
+                    plan = fallback_plan
+                    descriptive = plan.descriptive
+                    terms = list(plan.fts_terms)
+
     results = [_row_to_dict(r[:12]) | {"_bm25": -float(r[12] or 0.0)} for r in rows]
+    if fallback_plan and results:
+        results = _mark_phrase_fallback(results, strict_plan)
     existing_ids = {str(r["session_id"]) for r in results}
     match_map = _latest_segment_matches(
         conn,

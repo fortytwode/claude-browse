@@ -178,6 +178,12 @@ def _match_provenance(info: Mapping[str, object], query: str) -> dict[str, str]:
     match_label = ""
     match_confidence = "medium"
 
+    if info.get("phrase_fallback"):
+        return {
+            "match_label": "near phrase",
+            "match_confidence": "medium",
+        }
+
     if len(anchor_terms) == 1:
         anchor = anchor_terms[0]
         if anchor and anchor == (cwd_segments[-1] if cwd_segments else None):
@@ -284,6 +290,11 @@ def render_query_coach_preview(query: str) -> str:
         lines.append(f"Anchors: {', '.join(plan.anchor_terms)}")
     if plan.exact_phrase_terms and not plan.descriptive:
         lines.append(f"Exact phrase boost: {', '.join(plan.exact_phrase_terms)}")
+    if plan.phrase_fallback_terms and not plan.descriptive:
+        lines.append(
+            "No-hit fallback: "
+            f"{' + '.join(plan.phrase_fallback_terms)}"
+        )
 
     intents: list[str] = []
     if plan.wants_recent:

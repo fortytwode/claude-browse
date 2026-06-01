@@ -106,6 +106,17 @@ def test_format_row_shows_folder_match_for_single_anchor_workspace_query():
     assert "folder match" in row
 
 
+def test_format_row_labels_phrase_fallback_results():
+    info = _info(
+        context="I built the MaxRewards list for Morgan.",
+        phrase_fallback=True,
+    )
+
+    row = format_row(info, query='"MaxRewards built me a list"')
+
+    assert "near phrase" in row
+
+
 def test_format_row_shows_opening_match_when_anchor_is_in_first_message():
     info = _info(
         cwd="/Users/Shamanth/team-operations",
@@ -235,6 +246,13 @@ def test_render_query_coach_preview_shows_exact_phrase_boost():
 
     assert "Anchors: cfo, update" in preview
     assert "Exact phrase boost: cfo update" in preview
+
+
+def test_render_query_coach_preview_shows_phrase_no_hit_fallback():
+    preview = browse.render_query_coach_preview('"MaxRewards built me a list"')
+
+    assert "Exact phrase boost: maxrewards built me a list" in preview
+    assert "No-hit fallback: maxrewards + list" in preview
 
 
 def test_render_query_coach_preview_handles_low_confidence_query():
