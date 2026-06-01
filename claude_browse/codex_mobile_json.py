@@ -23,6 +23,7 @@ from typing import Any
 
 DEFAULT_REAL_CODEX = "/Users/Shamanth/.npm-global/bin/codex"
 DEFAULT_TOOL_OUTPUT_LIMIT = 6000
+YOLO_FLAG = "--dangerously-bypass-approvals-and-sandbox"
 
 USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 RESET = "\033[0m" if USE_COLOR else ""
@@ -88,6 +89,7 @@ def _build_cmd(
     *,
     session_id: str | None = None,
     real_codex: str | None = None,
+    yolo: bool = False,
 ) -> list[str]:
     binary = real_codex or _real_codex_binary()
     common = [
@@ -99,6 +101,8 @@ def _build_cmd(
         "-o",
         str(last_message_path),
     ]
+    if yolo:
+        common.append(YOLO_FLAG)
     if session_id:
         return [binary, "exec", "resume", *common, session_id, "-"]
     return [binary, "exec", *common, "--color", "never", "-"]
@@ -191,6 +195,7 @@ def run_turn(
     *,
     session_id: str | None = None,
     show_user_block: bool = True,
+    yolo: bool = False,
 ) -> str | None:
     """Run one Codex turn and render JSON events as normal stdout."""
     global _current_session_id, _last_exit_code, _last_prompt, _last_raw_path, _last_stderr_path
@@ -206,7 +211,7 @@ def run_turn(
     _last_raw_path = raw_path
     _last_stderr_path = stderr_path
 
-    cmd = _build_cmd(prompt, last_message_path, session_id=session_id)
+    cmd = _build_cmd(prompt, last_message_path, session_id=session_id, yolo=yolo)
     if show_user_block:
         _print_user(prompt)
 
@@ -434,10 +439,15 @@ def read_prompt() -> str | None:
     return line.strip()
 
 
-def _parse_args(argv: list[str]) -> tuple[str | None, str]:
+def _parse_args(argv: list[str]) -> tuple[str | None, str, bool]:
     parser = argparse.ArgumentParser(
         prog="codex-mobile-json",
         description="Run Codex in mobile-safe JSON transcript mode.",
+    )
+    parser.add_argument(
+        "--yolo",
+        action="store_true",
+        help="Pass Codex's dangerous no-approval/no-sandbox flag to codex exec.",
     )
     parser.add_argument("args", nargs="*", help="'resume SESSION_ID [PROMPT]' or prompt text")
     ns = parser.parse_args(argv)
@@ -445,15 +455,15 @@ def _parse_args(argv: list[str]) -> tuple[str | None, str]:
     if args and args[0] == "resume":
         if len(args) < 2:
             parser.error("resume requires SESSION_ID")
-        return args[1], " ".join(args[2:]).strip()
+        return args[1], " ".join(args[2:]).strip(), bool(ns.yolo)
     if args and args[0] == "start":
-        return None, " ".join(args[1:]).strip()
-    return None, " ".join(args).strip()
+        return None, " ".join(args[1:]).strip(), bool(ns.yolo)
+    return None, " ".join(args).strip(), bool(ns.yolo)
 
 
 def main(argv: list[str] | None = None) -> int:
     global _current_session_id
-    session_id, initial_prompt = _parse_args(list(sys.argv[1:] if argv is None else argv))
+    session_id, initial_prompt, yolo = _parse_args(list(sys.argv[1:] if argv is None else argv))
     _current_session_id = session_id
 
     print("═" * _term_width(), flush=True)
@@ -466,13 +476,13 @@ def main(argv: list[str] | None = None) -> int:
     print("═" * _term_width(), flush=True)
 
     if initial_prompt:
-        session_id = run_turn(initial_prompt, session_id=session_id) or session_id
+        session_id = run_turn(initial_prompt, session_id=session_id, yolo=yolo) or session_id
         if not sys.stdin.isatty():
             return _last_exit_code
     elif not sys.stdin.isatty():
         piped_prompt = sys.stdin.read().strip()
         if piped_prompt:
-            run_turn(piped_prompt, session_id=session_id)
+            run_turn(piped_prompt, session_id=session_id, yolo=yolo)
             return _last_exit_code
         return 0
 
@@ -482,7 +492,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not prompt:
             continue
-        session_id = run_turn(prompt, session_id=session_id, show_user_block=False) or session_id
+        session_id = (
+            run_turn(prompt, session_id=session_id, show_user_block=False, yolo=yolo)
+            or session_id
+        )
 
 
 if __name__ == "__main__":

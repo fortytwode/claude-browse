@@ -911,11 +911,38 @@ def _join_with_or(values: list[str]) -> str:
 
 
 def _require_binary(provider: str) -> None:
+    if _use_codex_mobile_mode(provider):
+        return
     binary = get_provider(provider).binary
     if shutil.which(binary):
         return
     print(f"Target app not found on PATH: {binary}", file=sys.stderr)
     sys.exit(1)
+
+
+def _codex_mobile_binary() -> str:
+    return shutil.which("codexmobile") or os.path.expanduser("~/.local/bin/codexmobile")
+
+
+def _use_codex_mobile_mode(provider: str) -> bool:
+    binary = _codex_mobile_binary()
+    return (
+        provider == "codex"
+        and bool(os.environ.get("SSH_CONNECTION"))
+        and not os.environ.get("CODEX_BROWSE_MOBILE_DISABLE")
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+        and os.path.exists(binary)
+        and os.access(binary, os.X_OK)
+    )
+
+
+def _codex_mobile_cmd(*args: str, yolo: bool) -> list[str]:
+    cmd = [_codex_mobile_binary()]
+    if yolo:
+        cmd.append("--yolo")
+    cmd.extend(args)
+    return cmd
 
 
 def _native_resume(
@@ -928,6 +955,16 @@ def _native_resume(
 ) -> None:
     _require_binary(provider)
     spec = get_provider(provider)
+    if _use_codex_mobile_mode(provider):
+        cmd = _codex_mobile_cmd("resume", session_id, yolo=yolo)
+        mode = " (yolo)" if yolo else ""
+        print(
+            f"Resuming{mode} in {spec.display_name} mobile mode "
+            f"({folder_name(cwd, prefixes)})..."
+        )
+        os.execvp(cmd[0], cmd)
+        return
+
     cmd = spec.native_resume_cmd(session_id, yolo)
     mode = " (yolo)" if yolo else ""
     print(f"Resuming{mode} in {spec.display_name} ({folder_name(cwd, prefixes)})...")
@@ -1009,11 +1046,15 @@ def _continue_in_provider(
                 "the original opening prompt, then continue the work in this "
                 f"directory.\n\n{import_markdown}"
             )
-    cmd = target_spec.handoff_cmd(import_dir, prompt, yolo)
+    if _use_codex_mobile_mode(target_provider):
+        cmd = _codex_mobile_cmd("start", prompt, yolo=yolo)
+    else:
+        cmd = target_spec.handoff_cmd(import_dir, prompt, yolo)
     mode = " (yolo)" if yolo else ""
     action = "Re-entering topic" if reenter_topic else "Continuing"
     print(f"{action}{mode} in {target_name} from {folder_name(cwd, prefixes)}...")
-    os.execvp(target_spec.binary, cmd)
+    exec_binary = cmd[0] if _use_codex_mobile_mode(target_provider) else target_spec.binary
+    os.execvp(exec_binary, cmd)
 
 
 def _open_in_target_provider(

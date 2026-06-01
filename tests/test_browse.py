@@ -401,6 +401,68 @@ def test_default_target_provider_supports_dynamic_plugin_shims(monkeypatch):
     assert browse._default_target_provider("/tmp/mystery-browse") == "mystery"
 
 
+def test_native_resume_uses_codexmobile_on_mobile_ssh(monkeypatch, tmp_path):
+    class Tty:
+        def isatty(self) -> bool:
+            return True
+
+        def write(self, text: str) -> int:
+            return len(text)
+
+        def flush(self) -> None:
+            return None
+
+    codexmobile = tmp_path / "codexmobile"
+    codexmobile.write_text("#!/bin/sh\n", encoding="utf-8")
+    codexmobile.chmod(0o755)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setenv("SSH_CONNECTION", "1 2 3 4")
+    monkeypatch.delenv("CODEX_BROWSE_MOBILE_DISABLE", raising=False)
+    monkeypatch.setattr(browse.sys, "stdin", Tty())
+    monkeypatch.setattr(browse.sys, "stdout", Tty())
+    monkeypatch.setattr(browse, "_codex_mobile_binary", lambda: str(codexmobile))
+
+    def fake_execvp(binary: str, cmd: list[str]) -> None:
+        captured["binary"] = binary
+        captured["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(browse.os, "execvp", fake_execvp)
+
+    with pytest.raises(SystemExit):
+        browse._native_resume(_info(provider="codex"), "codex", "abc-123", "/tmp/proj", (), True)
+
+    assert captured["binary"] == str(codexmobile)
+    assert captured["cmd"] == [str(codexmobile), "--yolo", "resume", "abc-123"]
+
+
+def test_native_resume_keeps_codex_native_when_mobile_disabled(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setenv("SSH_CONNECTION", "1 2 3 4")
+    monkeypatch.setenv("CODEX_BROWSE_MOBILE_DISABLE", "1")
+    monkeypatch.setattr(browse.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def fake_execvp(binary: str, cmd: list[str]) -> None:
+        captured["binary"] = binary
+        captured["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(browse.os, "execvp", fake_execvp)
+
+    with pytest.raises(SystemExit):
+        browse._native_resume(_info(provider="codex"), "codex", "abc-123", "/tmp/proj", (), True)
+
+    assert captured["binary"] == "codex"
+    assert captured["cmd"] == [
+        "codex",
+        "resume",
+        "abc-123",
+        "--dangerously-bypass-approvals-and-sandbox",
+    ]
+
+
 def test_parse_target_provider_allows_override():
     target, remaining = browse._parse_target_provider(
         ["--target", "codex", "--all"],
@@ -934,6 +996,62 @@ def test_continue_in_provider_from_claude_execs_cursor_with_inline_context(
     assert captured["cmd"][0:2] == ["cursor-agent", "--force"]
     assert "# Imported Session Context" in captured["cmd"][2]
     assert "Continue the imported Claude session context below." in captured["cmd"][2]
+
+
+def test_continue_in_provider_to_codex_uses_codexmobile_on_mobile_ssh(
+    monkeypatch,
+    tmp_path,
+):
+    class Tty:
+        def isatty(self) -> bool:
+            return True
+
+        def write(self, text: str) -> int:
+            return len(text)
+
+        def flush(self) -> None:
+            return None
+
+    session = _info(path="/tmp/session.jsonl")
+    codexmobile = tmp_path / "codexmobile"
+    codexmobile.write_text("#!/bin/sh\n", encoding="utf-8")
+    codexmobile.chmod(0o755)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setenv("SSH_CONNECTION", "1 2 3 4")
+    monkeypatch.delenv("CODEX_BROWSE_MOBILE_DISABLE", raising=False)
+    monkeypatch.setattr(browse.sys, "stdin", Tty())
+    monkeypatch.setattr(browse.sys, "stdout", Tty())
+    monkeypatch.setattr(browse, "_codex_mobile_binary", lambda: str(codexmobile))
+    monkeypatch.setattr(
+        browse,
+        "write_import_file",
+        lambda _session, target_provider, selection_query="", reenter_topic=False: (
+            "/tmp/claude_browse_import.md"
+        ),
+    )
+
+    def fake_execvp(binary: str, cmd: list[str]) -> None:
+        captured["binary"] = binary
+        captured["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(browse.os, "execvp", fake_execvp)
+
+    with pytest.raises(SystemExit):
+        browse._continue_in_provider(
+            session,
+            "claude",
+            "codex",
+            "/home/alice/proj",
+            (),
+            True,
+            "",
+        )
+
+    assert captured["binary"] == str(codexmobile)
+    assert captured["cmd"][:3] == [str(codexmobile), "--yolo", "start"]
+    assert "Continue the imported Claude session context from" in captured["cmd"][3]
 
 
 def test_continue_in_provider_errors_when_target_binary_missing(monkeypatch):

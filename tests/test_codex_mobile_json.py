@@ -47,6 +47,14 @@ def test_build_cmd_resumes_with_stdin_prompt(tmp_path):
     ]
 
 
+def test_build_cmd_adds_yolo_flag(tmp_path):
+    last = tmp_path / "last.txt"
+
+    cmd = mobile._build_cmd("hello", last, real_codex="/bin/codex", yolo=True)
+
+    assert mobile.YOLO_FLAG in cmd
+
+
 def test_render_event_handles_thread_and_agent_message(capsys):
     thread_id = mobile._render_event(
         {"type": "thread.started", "thread_id": "019e-test"}
@@ -126,9 +134,15 @@ def test_parse_args_supports_resume_and_start():
     assert mobile._parse_args(["resume", "abc", "hello", "there"]) == (
         "abc",
         "hello there",
+        False,
     )
-    assert mobile._parse_args(["start", "hello"]) == (None, "hello")
-    assert mobile._parse_args(["hello"]) == (None, "hello")
+    assert mobile._parse_args(["start", "hello"]) == (None, "hello", False)
+    assert mobile._parse_args(["hello"]) == (None, "hello", False)
+    assert mobile._parse_args(["--yolo", "resume", "abc", "hello"]) == (
+        "abc",
+        "hello",
+        True,
+    )
 
 
 def test_main_one_shot_non_tty_does_not_enter_repl(monkeypatch, capsys):
@@ -144,13 +158,15 @@ def test_main_one_shot_non_tty_does_not_enter_repl(monkeypatch, capsys):
     monkeypatch.setattr(
         mobile,
         "run_turn",
-        lambda prompt, session_id=None: calls.append((prompt, session_id)) or "new-id",
+        lambda prompt, session_id=None, yolo=False: (
+            calls.append((prompt, session_id, yolo)) or "new-id"
+        ),
     )
     monkeypatch.setattr(mobile, "_last_exit_code", 0)
 
     assert mobile.main(["hello"]) == 0
 
-    assert calls == [("hello", None)]
+    assert calls == [("hello", None, False)]
     assert "you>" not in capsys.readouterr().out
 
 
@@ -167,13 +183,15 @@ def test_main_reads_piped_prompt_when_no_arg(monkeypatch):
     monkeypatch.setattr(
         mobile,
         "run_turn",
-        lambda prompt, session_id=None: calls.append((prompt, session_id)) or "new-id",
+        lambda prompt, session_id=None, yolo=False: (
+            calls.append((prompt, session_id, yolo)) or "new-id"
+        ),
     )
     monkeypatch.setattr(mobile, "_last_exit_code", 0)
 
     assert mobile.main([]) == 0
 
-    assert calls == [("from pipe", None)]
+    assert calls == [("from pipe", None, False)]
 
 
 def test_main_repl_turn_does_not_reprint_user_block(monkeypatch, capsys):
@@ -188,14 +206,14 @@ def test_main_repl_turn_does_not_reprint_user_block(monkeypatch, capsys):
     monkeypatch.setattr(
         mobile,
         "run_turn",
-        lambda prompt, session_id=None, show_user_block=True: (
-            calls.append((prompt, session_id, show_user_block)) or "new-id"
+        lambda prompt, session_id=None, show_user_block=True, yolo=False: (
+            calls.append((prompt, session_id, show_user_block, yolo)) or "new-id"
         ),
     )
 
     assert mobile.main([]) == 0
 
-    assert calls == [("hello", None, False)]
+    assert calls == [("hello", None, False, False)]
     assert "USER" not in capsys.readouterr().out
 
 
@@ -207,7 +225,7 @@ def test_main_one_shot_returns_codex_exit_code(monkeypatch):
         def read(self) -> str:
             return ""
 
-    def fake_run_turn(prompt, session_id=None, show_user_block=True):
+    def fake_run_turn(prompt, session_id=None, show_user_block=True, yolo=False):
         mobile._last_exit_code = 7
         return session_id
 
