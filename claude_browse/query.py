@@ -259,7 +259,7 @@ def build_query_plan(query: str, max_terms: int = 5) -> QueryPlan:
     descriptive = len(raw_terms) > 2 and normalized_terms != fts_terms
 
     exact_phrase_terms: list[str] = list(phrase_terms)
-    if not descriptive and len(fts_terms) >= 2:
+    if len(fts_terms) >= 2 and (not descriptive or len(fts_terms) == 2):
         implicit_phrase = " ".join(
             term for term in fts_terms if " " not in term and not term.endswith("*")
         ).strip()

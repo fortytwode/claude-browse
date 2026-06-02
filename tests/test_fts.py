@@ -230,6 +230,75 @@ def test_search_ranked_phrase_fallback_prefers_compact_phrase_match(db):
     ]
 
 
+def test_search_ranked_descriptive_phrase_like_query_prefers_compact_phrase_match(db):
+    _seed(
+        db,
+        "field_collision_recent",
+        "Task details. List: MaxRewards. Description: just the title.",
+        timestamp="2026-05-21T00:00:00Z",
+        last_timestamp="2026-05-21T01:00:00Z",
+    )
+    _seed(
+        db,
+        "compact_older",
+        "Created tasks in the MaxRewards list.",
+        timestamp="2026-05-20T00:00:00Z",
+        last_timestamp="2026-05-20T01:00:00Z",
+    )
+
+    results = fts.search_ranked(db, "MaxRewards built me a list")
+
+    assert [r["session_id"] for r in results][:2] == [
+        "compact_older",
+        "field_collision_recent",
+    ]
+    assert results[0]["match_phrase_score"] > 0
+
+
+def test_search_ranked_descriptive_phrase_hits_sort_by_match_recency(db):
+    _seed(
+        db,
+        "older_metadata_heavy",
+        "Created tasks in the MaxRewards list.",
+        cwd="/Users/Shamanth/team-operations/clients/maxrewards",
+        title="MaxRewards list planning",
+        first_msg="MaxRewards list planning",
+        timestamp="2026-05-20T00:00:00Z",
+        last_timestamp="2026-05-20T01:00:00Z",
+        fts_cwd="/Users/Shamanth/team-operations/clients/maxrewards",
+        fts_title="MaxRewards list planning",
+        fts_first_msg="MaxRewards list planning",
+        segments=[
+            (
+                "assistant",
+                "Created tasks in the MaxRewards list.",
+                "2026-05-20T01:00:00Z",
+            ),
+        ],
+    )
+    _seed(
+        db,
+        "newer_plain_phrase",
+        "Created tasks in the MaxRewards list.",
+        timestamp="2026-05-21T00:00:00Z",
+        last_timestamp="2026-05-21T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                "Created tasks in the MaxRewards list.",
+                "2026-05-21T01:00:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, "MaxRewards built me a list")
+
+    assert [r["session_id"] for r in results][:2] == [
+        "newer_plain_phrase",
+        "older_metadata_heavy",
+    ]
+
+
 def test_search_ranked_quoted_phrase_hit_stays_strict(db):
     _seed(db, "exact", "the runna sca2 deck is ready")
     _seed(db, "near", "runna and sca2 mentioned with gap")
@@ -442,6 +511,26 @@ def test_search_uses_latest_matching_segment_as_context(db):
     assert [r["session_id"] for r in results] == ["s1"]
     assert "Nevena" in results[0]["context"] or "feedback" in results[0]["context"]
     assert results[0]["match_timestamp"] == "2026-05-09T00:05:00Z"
+
+
+def test_search_ranked_descriptive_phrase_boost_is_not_required_for_recall(db):
+    _seed(
+        db,
+        "spaced_terms",
+        "Nevena reviewed the ClickUp task and later sent detailed feedback.",
+        segments=[
+            (
+                "assistant",
+                "Nevena reviewed the ClickUp task and later sent detailed feedback.",
+                "2026-05-09T00:05:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, "where i was asking Nevena about feedback")
+
+    assert [r["session_id"] for r in results] == ["spaced_terms"]
+    assert results[0]["match_phrase_score"] == 0.0
 
 
 def test_search_ranked_context_uses_combined_exchange_window(db):
@@ -956,6 +1045,56 @@ def test_search_ranked_single_anchor_workspace_match_beats_incidental_mention(db
 
     results = fts.search_ranked(db, "tiktoker")
     assert results[0]["session_id"] == "workspace_thread"
+
+
+def test_search_ranked_single_anchor_sorts_workspace_matches_by_match_recency(db):
+    _seed(
+        db,
+        "older_workspace",
+        "MaxRewards older work.",
+        cwd="/Users/Shamanth/team-operations/clients/maxrewards",
+        timestamp="2026-05-10T00:00:00Z",
+        last_timestamp="2026-05-10T01:00:00Z",
+        fts_cwd="/Users/Shamanth/team-operations/clients/maxrewards",
+        segments=[
+            ("assistant", "MaxRewards older work.", "2026-05-10T01:00:00Z"),
+        ],
+    )
+    _seed(
+        db,
+        "newer_workspace",
+        "MaxRewards newer work.",
+        cwd="/Users/Shamanth/team-operations/clients/maxrewards",
+        timestamp="2026-05-11T00:00:00Z",
+        last_timestamp="2026-05-11T01:00:00Z",
+        fts_cwd="/Users/Shamanth/team-operations/clients/maxrewards",
+        segments=[
+            ("assistant", "MaxRewards newer work.", "2026-05-11T01:00:00Z"),
+        ],
+    )
+    _seed(
+        db,
+        "newest_incidental",
+        "MaxRewards appears in an unrelated planning note.",
+        cwd="/Users/Shamanth/team-operations",
+        timestamp="2026-05-12T00:00:00Z",
+        last_timestamp="2026-05-12T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                "MaxRewards appears in an unrelated planning note.",
+                "2026-05-12T01:00:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, "maxrewards")
+
+    assert [r["session_id"] for r in results][:3] == [
+        "newer_workspace",
+        "older_workspace",
+        "newest_incidental",
+    ]
 
 
 def test_search_ranked_descriptive_single_anchor_query_demotes_code_reference_mentions(db):

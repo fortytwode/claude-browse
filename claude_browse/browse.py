@@ -288,8 +288,11 @@ def render_query_coach_preview(query: str) -> str:
     if plan.anchor_terms:
         lines.append("")
         lines.append(f"Anchors: {', '.join(plan.anchor_terms)}")
-    if plan.exact_phrase_terms and not plan.descriptive:
-        lines.append(f"Exact phrase boost: {', '.join(plan.exact_phrase_terms)}")
+    if plan.exact_phrase_terms:
+        if plan.descriptive:
+            lines.append(f"Phrase boost: {', '.join(plan.exact_phrase_terms)}")
+        else:
+            lines.append(f"Exact phrase boost: {', '.join(plan.exact_phrase_terms)}")
     if plan.phrase_fallback_terms and not plan.descriptive:
         lines.append(
             "No-hit fallback: "

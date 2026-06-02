@@ -238,6 +238,7 @@ def test_render_query_coach_preview_explains_descriptive_query_interpretation():
     )
     assert "Looking for: nevena + feedback" in preview
     assert "Anchors: nevena, feedback" in preview
+    assert "Phrase boost: nevena feedback" in preview
     assert "Sentence-style query detected." in preview
 
 

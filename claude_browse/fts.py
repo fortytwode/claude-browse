@@ -1057,6 +1057,59 @@ def _workspace_anchor_score(row: dict, plan: QueryPlan) -> float:
     return 0.0
 
 
+def _single_anchor_evidence_tier(row: dict) -> int:
+    """Bucket single-anchor matches before recency sorts within the bucket."""
+    if float(row.get("_artifact_penalty") or 0.0) >= 5.0:
+        return 0
+    if float(row.get("_workspace_match_score") or 0.0) > 0.0:
+        return 4
+    if float(row.get("_metadata_anchor_score") or 0.0) >= 4.5:
+        return 3
+    if int(row.get("match_term_count") or 0) > 0:
+        return 2
+    return 1
+
+
+def _descriptive_sort_key(row: dict) -> tuple:
+    match_ts = _timestamp_sort_key(
+        row.get("match_timestamp")
+        or row.get("last_timestamp")
+        or row.get("timestamp")
+    )
+    intent_score = float(row.get("match_intent_score") or 0.0) - float(
+        row.get("match_mismatch_penalty") or 0.0
+    )
+    common_tail = (
+        float(row.get("match_density") or 0.0),
+        float(row.get("match_compactness") or 0.0),
+        1 if row.get("_assistant_bonus") else 0,
+        float(row.get("_score") or 0.0),
+        float(row.get("_match_bm25") or 0.0),
+        _timestamp_sort_key(row.get("last_timestamp") or row.get("timestamp")),
+        float(row.get("mtime") or 0.0),
+    )
+    if row.get("_exact_phrase_score"):
+        return (
+            1,
+            int(row.get("match_term_count") or 0),
+            match_ts,
+            float(row.get("_exact_phrase_score") or 0.0),
+            float(row.get("_quality_score") or 0.0),
+            intent_score,
+            float(row.get("match_conversation_score") or 0.0),
+            *common_tail,
+        )
+    return (
+        0,
+        int(row.get("match_term_count") or 0),
+        float(row.get("_quality_score") or 0.0),
+        intent_score,
+        float(row.get("match_conversation_score") or 0.0),
+        match_ts,
+        *common_tail,
+    )
+
+
 def _artifact_penalty(row: dict, plan: QueryPlan, query: str) -> float:
     context_haystack = str(row.get("context") or "").lower()
     metadata_haystack = " ".join(
@@ -1411,15 +1464,15 @@ def search_ranked(
     elif len(terms) == 1:
         decorated.sort(
             key=lambda row: (
-                float(row.get("_workspace_match_score") or 0.0),
-                int(row.get("match_term_count") or 0),
-                float(row.get("_quality_score") or 0.0),
-                1 if row.get("_assistant_bonus") else 0,
+                _single_anchor_evidence_tier(row),
                 _timestamp_sort_key(
                     row.get("match_timestamp")
                     or row.get("last_timestamp")
                     or row.get("timestamp")
                 ),
+                float(row.get("_quality_score") or 0.0),
+                int(row.get("match_term_count") or 0),
+                1 if row.get("_assistant_bonus") else 0,
                 float(row.get("_score") or 0.0),
                 float(row.get("match_conversation_score") or 0.0),
                 float(row.get("match_density") or 0.0),
@@ -1454,26 +1507,7 @@ def search_ranked(
         )
     else:
         decorated.sort(
-            key=lambda row: (
-                float(row.get("_exact_phrase_score") or 0.0),
-                int(row.get("match_term_count") or 0),
-                float(row.get("_quality_score") or 0.0),
-                float(row.get("match_intent_score") or 0.0)
-                - float(row.get("match_mismatch_penalty") or 0.0),
-                float(row.get("match_conversation_score") or 0.0),
-                _timestamp_sort_key(
-                    row.get("match_timestamp")
-                    or row.get("last_timestamp")
-                    or row.get("timestamp")
-                ),
-                float(row.get("match_density") or 0.0),
-                float(row.get("match_compactness") or 0.0),
-                1 if row.get("_assistant_bonus") else 0,
-                float(row.get("_score") or 0.0),
-                float(row.get("_match_bm25") or 0.0),
-                _timestamp_sort_key(row.get("last_timestamp") or row.get("timestamp")),
-                float(row.get("mtime") or 0.0),
-            ),
+            key=_descriptive_sort_key,
             reverse=True,
         )
     trimmed = []
