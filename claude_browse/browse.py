@@ -418,8 +418,16 @@ def format_row(
     if query_active and info.get("context"):
         # FTS5 snippet: \x01 wraps matched terms, \x02 ends the wrap. Render
         # them as bold yellow inside dim grey text so matched terms pop.
+        raw_context = info["context"]
+        # FTS5 centers the snippet on the match (~12 tokens of lead), so in a
+        # narrow list pane the highlighted term is truncated off-screen and the
+        # row shows only leading filler. Trim the lead so the first matched term
+        # leads the snippet and stays visible while scanning.
+        first_hit = raw_context.find("\x01")
+        if first_hit > 8:
+            raw_context = "…" + raw_context[first_hit:]
         snippet = (
-            info["context"]
+            raw_context
             .replace("\x01", "\033[0m\033[1;33m")
             .replace("\x02", "\033[0m\033[2m")
             .replace("\n", " ")
@@ -564,6 +572,32 @@ def get_preview(row_meta, query=""):
     def hl(text):
         return highlight_terms(text, terms) if terms else text
 
+    # Lead with the matched snippet so scanning results shows WHERE the query
+    # hit before the metadata/restart-card header pushes it below the fold.
+    lead = state.get("matched_exchange") or state.get("matching_turns") or []
+    if query.strip() and lead:
+        conf = str(state.get("match_confidence") or "")
+        bits = [
+            b
+            for b in (
+                str(state.get("match_label") or ""),
+                (conf + " confidence") if conf else "",
+            )
+            if b
+        ]
+        suffix = (" (" + " · ".join(bits) + ")") if bits else ""
+        print(hl('Matches "' + query + '"' + suffix + ":"))
+        print()
+        for role, text in lead:
+            label = "User" if role == "user" else "Assistant"
+            print(hl("  " + label + ": " + text))
+        if state.get("thread_continued_after_match"):
+            print()
+            print("  ↪ Thread moved on afterward; newer turns are further down.")
+        print()
+        print("─" * 40)
+        print()
+
     print(f"Source:  {{provider_display_name(provider)}}")
     if name:
         print(f"Session: {{hl(name)}}")
@@ -578,7 +612,7 @@ def get_preview(row_meta, query=""):
         print(f"Last activity: {{last_timestamp[:19].replace('T', ' ')}}")
     print(f"Messages: {{msg_count or 0}}")
     print()
-    print(hl(render_restart_card_terminal(state)))
+    print(hl(render_restart_card_terminal(state, show_match_block=not (query.strip() and lead))))
 
 
 if __name__ == "__main__":

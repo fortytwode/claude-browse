@@ -187,6 +187,27 @@ def test_render_restart_card_terminal_surfaces_repo_state_and_matches():
     assert "Recent turns (latest first):" in text
 
 
+def test_render_restart_card_terminal_can_suppress_match_block():
+    # The interactive preview hoists the matched snippet to the top of the pane,
+    # so it asks the card to skip re-printing it (no duplicate snippet).
+    card = {
+        "match_label": "mentioned later",
+        "current_task": "Q3 platform hiring plan",
+        "matched_exchange": [("assistant", "Lisa carries the Bible Chat load.")],
+        "matching_turns": [("assistant", "I checked the Sherlock output.")],
+        "recent_turns": [("user", "Draft the hiring plan")],
+    }
+    full = work_state.render_restart_card_terminal(card, show_match_block=True)
+    hoisted = work_state.render_restart_card_terminal(card, show_match_block=False)
+
+    assert "Last matching exchange:" in full
+    assert "Last matching exchange:" not in hoisted
+    assert "Why this likely matched your search:" not in hoisted
+    # Everything that is not the match snippet still renders.
+    assert "Current task: Q3 platform hiring plan" in hoisted
+    assert "Recent turns (latest first):" in hoisted
+
+
 def test_build_work_state_recommends_reenter_when_query_matches_older_topic(monkeypatch):
     turns = [
         ("user", "what wins the deal"),

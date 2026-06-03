@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -178,6 +179,17 @@ def test_format_row_prioritizes_match_context_when_query_active():
     )
     row = format_row(info, query="nevena feedback")
     assert row.index("Nevena feedback summary") < row.index("Weekly Creator Briefs")
+
+
+def test_format_row_trims_snippet_lead_so_match_term_is_visible():
+    # FTS5 centers the snippet on the match; the leading filler pushes the
+    # highlighted term off-screen in a narrow pane. Trim it so the term leads.
+    info = _info(context="…or reporting. Let me verify the \x01Bible\x02 assignment")
+    row = format_row(info, query="bible")
+    visible = re.sub(r"\x1b\[[0-9;]*m", "", browse._split_row_metadata(row)[0])
+    assert "…Bible assignment" in visible
+    # The leading filler is gone: nothing of "or reporting" survives the trim.
+    assert "or reporting" not in visible
 
 
 def test_format_row_allows_visible_triple_hash_without_breaking_metadata():

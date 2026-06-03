@@ -370,7 +370,11 @@ def build_work_state(
     }
 
 
-def render_restart_card_terminal(state: dict[str, object]) -> str:
+def render_restart_card_terminal(
+    state: dict[str, object], show_match_block: bool = True
+) -> str:
+    # show_match_block=False lets the interactive preview hoist the matched
+    # snippet to the very top of the pane and skip re-printing it here.
     lines: list[str] = ["Restart Card", ""]
 
     match_label = str(state.get("match_label") or "")
@@ -393,7 +397,7 @@ def render_restart_card_terminal(state: dict[str, object]) -> str:
         lines.append("")
 
     matched_exchange = state.get("matched_exchange") or []
-    if matched_exchange:
+    if matched_exchange and show_match_block:
         lines.extend(["Last matching exchange:", ""])
         for role, text in matched_exchange:
             label = "User" if role == "user" else "Assistant"
@@ -431,7 +435,7 @@ def render_restart_card_terminal(state: dict[str, object]) -> str:
         lines.append(f"Suggested next prompt: {state['suggested_next_prompt']}")
 
     matching_turns = state.get("matching_turns") or []
-    if matching_turns and not matched_exchange:
+    if matching_turns and not matched_exchange and show_match_block:
         lines.extend(["", "Why this likely matched your search:", ""])
         for role, text in matching_turns:
             label = "User" if role == "user" else "Assistant"
