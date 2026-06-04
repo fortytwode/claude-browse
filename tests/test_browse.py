@@ -118,6 +118,17 @@ def test_format_row_labels_phrase_fallback_results():
     assert "near phrase" in row
 
 
+def test_format_row_labels_prefix_fallback_results():
+    info = _info(
+        context="Ayan Kartik Tanushree assignment review.",
+        prefix_fallback=True,
+    )
+
+    row = format_row(info, query="ayan kar")
+
+    assert "prefix match" in row
+
+
 def test_format_row_shows_opening_match_when_anchor_is_in_first_message():
     info = _info(
         cwd="/Users/Shamanth/team-operations",
@@ -281,10 +292,13 @@ def test_write_search_script_reads_query_from_fzf_env(tmp_path):
         "/tmp/test.db",
         "/tmp/pkg",
         None,
+        "/tmp/current",
         25,
     )
     text = script_path.read_text()
     assert 'q = os.environ.get("FZF_QUERY", "")' in text
+    assert "CURRENT_CWD = '/tmp/current'" in text
+    assert "current_cwd=CURRENT_CWD" in text
     assert "search_log.log_search(" in text
     assert "elapsed_ms=(time.perf_counter() - start) * 1000" in text
     assert 'sys.argv[1]' not in text

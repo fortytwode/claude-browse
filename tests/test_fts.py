@@ -206,6 +206,30 @@ def test_search_ranked_quoted_phrase_no_hit_falls_back_to_meaningful_terms(db):
     assert results[0]["phrase_fallback_terms"] == "maxrewards, list"
 
 
+def test_search_ranked_no_hit_falls_back_to_last_token_prefix(db):
+    _seed(
+        db,
+        "candidate_review",
+        "Ayan Kartik Tanushree assignment review notes.",
+        timestamp="2026-06-02T00:00:00Z",
+        last_timestamp="2026-06-02T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                "Ayan Kartik Tanushree assignment review notes.",
+                "2026-06-02T01:00:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, "ayan kar")
+
+    assert [r["session_id"] for r in results] == ["candidate_review"]
+    assert results[0]["prefix_fallback"] is True
+    assert results[0]["prefix_fallback_from"] == "ayan, kar"
+    assert results[0]["prefix_fallback_terms"] == "ayan, kar*"
+
+
 def test_search_ranked_phrase_fallback_prefers_compact_phrase_match(db):
     _seed(
         db,
@@ -1095,6 +1119,51 @@ def test_search_ranked_single_anchor_sorts_workspace_matches_by_match_recency(db
         "older_workspace",
         "newest_incidental",
     ]
+
+
+def test_search_ranked_softly_prefers_current_cwd_matches(db):
+    _seed(
+        db,
+        "root_recap",
+        "Ayan Kartik Tanushree assignment review recap.",
+        cwd="/Users/Shamanth/team-operations",
+        timestamp="2026-06-02T00:00:00Z",
+        last_timestamp="2026-06-02T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                "Ayan Kartik Tanushree assignment review recap.",
+                "2026-06-02T01:00:00Z",
+            ),
+        ],
+    )
+    _seed(
+        db,
+        "hiring_thread",
+        "Ayan Kartik Tanushree assignment review notes.",
+        cwd="/Users/Shamanth/team-operations/team-management/hiring",
+        timestamp="2026-06-01T00:00:00Z",
+        last_timestamp="2026-06-01T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                "Ayan Kartik Tanushree assignment review notes.",
+                "2026-06-01T01:00:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(
+        db,
+        "ayan kartik tanushree",
+        current_cwd="/Users/Shamanth/team-operations/team-management/hiring",
+    )
+
+    assert [r["session_id"] for r in results][:2] == [
+        "hiring_thread",
+        "root_recap",
+    ]
+    assert results[0]["current_cwd_score"] == 3.0
 
 
 def test_search_ranked_descriptive_single_anchor_query_demotes_code_reference_mentions(db):

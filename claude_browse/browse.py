@@ -183,6 +183,11 @@ def _match_provenance(info: Mapping[str, object], query: str) -> dict[str, str]:
             "match_label": "near phrase",
             "match_confidence": "medium",
         }
+    if info.get("prefix_fallback"):
+        return {
+            "match_label": "prefix match",
+            "match_confidence": "medium",
+        }
 
     if len(anchor_terms) == 1:
         anchor = anchor_terms[0]
@@ -633,6 +638,7 @@ def _write_search_script(
     db_path: str,
     package_dir: str,
     cwd_filter: str | None,
+    current_cwd: str | None,
     limit: int,
 ) -> None:
     """Write the keystroke-driven search helper invoked by fzf change:reload."""
@@ -647,6 +653,7 @@ from claude_browse.browse import format_query_coach_row, format_row
 
 DB_PATH = {db_path!r}
 CWD_FILTER = {cwd_filter!r}
+CURRENT_CWD = {current_cwd!r}
 LIMIT = {limit}
 
 q = os.environ.get("FZF_QUERY", "")
@@ -662,7 +669,7 @@ if q.strip():
         results = fts.search(conn, q, limit=LIMIT)
     else:
         ranker = "v1"
-        results = fts.search_ranked(conn, q, limit=LIMIT)
+        results = fts.search_ranked(conn, q, limit=LIMIT, current_cwd=CURRENT_CWD)
 else:
     results = fts.list_recent(conn, limit=LIMIT)
 
@@ -674,6 +681,7 @@ search_log.log_search(
     results,
     ranker=ranker,
     cwd_filter=CWD_FILTER,
+    current_cwd=CURRENT_CWD,
     limit=LIMIT,
     elapsed_ms=(time.perf_counter() - start) * 1000,
 )
@@ -1322,7 +1330,7 @@ def main() -> None:
     )
     search_script.close()
     _write_search_script(
-        search_script.name, fts.DB_PATH, package_dir, cwd_filter, limit
+        search_script.name, fts.DB_PATH, package_dir, cwd_filter, os.getcwd(), limit
     )
     enter_guard_script = tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", delete=False, prefix="claude_browse_enter_guard_"

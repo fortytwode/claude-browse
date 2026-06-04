@@ -556,6 +556,43 @@ def _mark_phrase_fallback(rows: list[dict], plan: QueryPlan) -> list[dict]:
     return rows
 
 
+def _prefix_fallback_plan(plan: QueryPlan) -> QueryPlan | None:
+    """Relax the last concrete token to a prefix after strict zero hits."""
+    terms = list(plan.fts_terms)
+    if not terms:
+        return None
+    for idx in range(len(terms) - 1, -1, -1):
+        term = terms[idx]
+        if " " in term or term.endswith("*"):
+            continue
+        if len(term.strip(".*")) < 3:
+            continue
+        prefix_terms = terms.copy()
+        prefix_terms[idx] = f"{term}*"
+        return replace(
+            plan,
+            fts_terms=tuple(prefix_terms),
+            anchor_terms=tuple(prefix_terms),
+            exact_phrase_terms=(),
+            highlight_terms=_unique_terms(tuple(prefix_terms), plan.highlight_terms),
+        )
+    return None
+
+
+def _mark_prefix_fallback(
+    rows: list[dict],
+    strict_plan: QueryPlan,
+    fallback_plan: QueryPlan,
+) -> list[dict]:
+    if not rows:
+        return rows
+    for row in rows:
+        row["prefix_fallback"] = True
+        row["prefix_fallback_from"] = ", ".join(strict_plan.fts_terms)
+        row["prefix_fallback_terms"] = ", ".join(fallback_plan.fts_terms)
+    return rows
+
+
 def _parse_iso_timestamp(ts_str: str | None) -> datetime | None:
     if not ts_str:
         return None
@@ -1057,6 +1094,27 @@ def _workspace_anchor_score(row: dict, plan: QueryPlan) -> float:
     return 0.0
 
 
+def _current_cwd_score(row: dict, current_cwd: str | None) -> float:
+    """Softly prefer sessions from the folder where browse was launched."""
+    row_cwd = str(row.get("cwd") or "").strip()
+    if not row_cwd or not current_cwd:
+        return 0.0
+    row_path = os.path.normpath(os.path.expanduser(row_cwd))
+    current_path = os.path.normpath(os.path.expanduser(str(current_cwd)))
+    if row_path == current_path:
+        return 3.0
+    if row_path.startswith(current_path + os.sep):
+        return 2.5
+    if current_path.startswith(row_path + os.sep):
+        remainder = current_path[len(row_path) :].strip(os.sep)
+        distance = len([part for part in remainder.split(os.sep) if part])
+        if distance == 1:
+            return 1.5
+        if distance == 2:
+            return 0.75
+    return 0.0
+
+
 def _single_anchor_evidence_tier(row: dict) -> int:
     """Bucket single-anchor matches before recency sorts within the bucket."""
     if float(row.get("_artifact_penalty") or 0.0) >= 5.0:
@@ -1092,6 +1150,7 @@ def _descriptive_sort_key(row: dict) -> tuple:
         return (
             1,
             int(row.get("match_term_count") or 0),
+            float(row.get("_current_cwd_score") or 0.0),
             match_ts,
             float(row.get("_exact_phrase_score") or 0.0),
             float(row.get("_quality_score") or 0.0),
@@ -1102,6 +1161,7 @@ def _descriptive_sort_key(row: dict) -> tuple:
     return (
         0,
         int(row.get("match_term_count") or 0),
+        float(row.get("_current_cwd_score") or 0.0),
         float(row.get("_quality_score") or 0.0),
         intent_score,
         float(row.get("match_conversation_score") or 0.0),
@@ -1226,6 +1286,7 @@ def search(
         return []
 
     fallback_plan = None
+    prefix_fallback_plan = None
     if not rows:
         fallback_plan = _phrase_fallback_plan(plan)
         if fallback_plan:
@@ -1238,10 +1299,24 @@ def search(
                 if rows:
                     plan = fallback_plan
                     descriptive = plan.descriptive
+    if not rows:
+        prefix_fallback_plan = _prefix_fallback_plan(plan)
+        if prefix_fallback_plan:
+            prefix_query = _terms_to_fts_query(list(prefix_fallback_plan.fts_terms))
+            if prefix_query:
+                try:
+                    rows = conn.execute(sql, (prefix_query, limit)).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                if rows:
+                    plan = prefix_fallback_plan
+                    descriptive = plan.descriptive
 
     results = [_row_to_dict(r) for r in rows]
     if fallback_plan and results:
         results = _mark_phrase_fallback(results, strict_plan)
+    if prefix_fallback_plan and results:
+        results = _mark_prefix_fallback(results, strict_plan, prefix_fallback_plan)
     existing_ids = [str(r["session_id"]) for r in results]
     match_map = _latest_segment_matches(
         conn,
@@ -1313,6 +1388,7 @@ def search_ranked(
     weights: tuple[float, ...] = _DEFAULT_BM25_WEIGHTS,
     recency_alpha: float = _DEFAULT_RECENCY_ALPHA,
     half_life_days: float = _DEFAULT_HALF_LIFE_DAYS,
+    current_cwd: str | None = None,
 ) -> list[dict]:
     """Multi-column BM25 + exponential recency decay reranker.
 
@@ -1362,6 +1438,7 @@ def search_ranked(
         return []
 
     fallback_plan = None
+    prefix_fallback_plan = None
     if not rows:
         fallback_plan = _phrase_fallback_plan(plan)
         if fallback_plan:
@@ -1375,10 +1452,25 @@ def search_ranked(
                     plan = fallback_plan
                     descriptive = plan.descriptive
                     terms = list(plan.fts_terms)
+    if not rows:
+        prefix_fallback_plan = _prefix_fallback_plan(plan)
+        if prefix_fallback_plan:
+            prefix_query = _terms_to_fts_query(list(prefix_fallback_plan.fts_terms))
+            if prefix_query:
+                try:
+                    rows = conn.execute(sql, (prefix_query, candidate_pool)).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                if rows:
+                    plan = prefix_fallback_plan
+                    descriptive = plan.descriptive
+                    terms = list(plan.fts_terms)
 
     results = [_row_to_dict(r[:12]) | {"_bm25": -float(r[12] or 0.0)} for r in rows]
     if fallback_plan and results:
         results = _mark_phrase_fallback(results, strict_plan)
+    if prefix_fallback_plan and results:
+        results = _mark_prefix_fallback(results, strict_plan, prefix_fallback_plan)
     existing_ids = {str(r["session_id"]) for r in results}
     match_map = _latest_segment_matches(
         conn,
@@ -1410,6 +1502,9 @@ def search_ranked(
         row["_exact_phrase_score"] = _exact_phrase_score(row, plan)
         row["_metadata_anchor_score"] = _metadata_anchor_score(row, plan)
         row["_workspace_match_score"] = _workspace_anchor_score(row, plan)
+        row["_current_cwd_score"] = _current_cwd_score(row, current_cwd)
+        if row["_current_cwd_score"]:
+            row["current_cwd_score"] = row["_current_cwd_score"]
         row["_artifact_penalty"] = _artifact_penalty(row, plan, query)
         row["_semantic_intent_score"] = float(
             row.get("match_intent_score") or 0.0
@@ -1417,6 +1512,7 @@ def search_ranked(
         row["_quality_score"] = (
             float(row.get("_exact_phrase_score") or 0.0)
             + float(row.get("_workspace_match_score") or 0.0)
+            + float(row.get("_current_cwd_score") or 0.0)
             + float(row.get("_metadata_anchor_score") or 0.0)
             + float(row.get("_semantic_intent_score") or 0.0)
             - float(row.get("_artifact_penalty") or 0.0)
@@ -1452,6 +1548,7 @@ def search_ranked(
                     or row.get("last_timestamp")
                     or row.get("timestamp")
                 ),
+                float(row.get("_current_cwd_score") or 0.0),
                 float(row.get("match_conversation_score") or 0.0),
                 float(row.get("_score") or 0.0),
                 float(row.get("match_density") or 0.0),
@@ -1465,6 +1562,7 @@ def search_ranked(
         decorated.sort(
             key=lambda row: (
                 _single_anchor_evidence_tier(row),
+                float(row.get("_current_cwd_score") or 0.0),
                 _timestamp_sort_key(
                     row.get("match_timestamp")
                     or row.get("last_timestamp")
@@ -1488,6 +1586,7 @@ def search_ranked(
             key=lambda row: (
                 1 if row.get("_exact_phrase_score") else 0,
                 int(row.get("match_term_count") or 0),
+                float(row.get("_current_cwd_score") or 0.0),
                 _timestamp_sort_key(
                     row.get("match_timestamp")
                     or row.get("last_timestamp")
@@ -1521,6 +1620,7 @@ def search_ranked(
         clean.pop("_metadata_anchor_score", None)
         clean.pop("_exact_phrase_score", None)
         clean.pop("_workspace_match_score", None)
+        clean.pop("_current_cwd_score", None)
         clean.pop("_artifact_penalty", None)
         clean.pop("_quality_score", None)
         trimmed.append(clean)

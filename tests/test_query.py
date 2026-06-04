@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from claude_browse.query import build_query_plan
+from claude_browse.query import build_query_plan, term_spans
 
 
 def test_query_plan_extracts_anchor_and_closeout_intent():
@@ -72,3 +72,7 @@ def test_query_plan_keeps_full_sentence_as_highlight_for_descriptive_queries():
 
     assert plan.anchor_terms == ("pokpok", "does", "not", "need", "reinvention")
     assert plan.highlight_terms[0] == "pokpok does not need a reinvention"
+
+
+def test_term_spans_supports_prefix_terms():
+    assert term_spans("Ayan and Kartik are in the review", "kar*") == [(9, 15)]

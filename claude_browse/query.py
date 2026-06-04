@@ -130,6 +130,10 @@ def term_spans(text: str, term: str) -> list[tuple[int, int]]:
                 return spans
             spans.append((idx, idx + len(term)))
             start = idx + 1
+    if term.endswith("*") and term.count("*") == 1 and len(term) > 1:
+        prefix = term[:-1]
+        pattern = re.compile(rf"(?<!\w){re.escape(prefix)}\w*")
+        return [(match.start(), match.end()) for match in pattern.finditer(lowered)]
     pattern = re.compile(rf"(?<!\w){re.escape(term)}(?!\w)")
     return [(match.start(), match.end()) for match in pattern.finditer(lowered)]
 

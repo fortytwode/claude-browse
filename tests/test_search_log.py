@@ -21,11 +21,14 @@ def test_log_search_writes_jsonl_with_top_results(tmp_path, monkeypatch):
                 "context": "Sent the clarified reply to \x01Artem\x02 in the ASA/\x01ASC\x02 thread.",
                 "match_timestamp": "2026-05-20T07:20:00Z",
                 "match_segment_idx": 42,
+                "current_cwd_score": 3.0,
+                "prefix_fallback": True,
                 "msg_count": 99,
             }
         ],
         ranker="v1",
         cwd_filter=None,
+        current_cwd="/tmp/musopia",
         limit=10,
         elapsed_ms=12.345,
     )
@@ -35,7 +38,10 @@ def test_log_search_writes_jsonl_with_top_results(tmp_path, monkeypatch):
     assert event["query"] == "ARTEM ASC"
     assert event["anchor_terms"] == ["artem", "asc"]
     assert event["ranker"] == "v1"
+    assert event["current_cwd"] == "/tmp/musopia"
     assert event["top"][0]["session_id"] == "abc-123"
+    assert event["top"][0]["current_cwd_score"] == 3.0
+    assert event["top"][0]["prefix_fallback"] is True
     assert event["top"][0]["context"] == (
         "Sent the clarified reply to Artem in the ASA/ASC thread."
     )

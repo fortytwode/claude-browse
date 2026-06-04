@@ -111,6 +111,9 @@ def _summarize_result(row: dict[str, Any], rank: int) -> dict[str, Any]:
         "match_confidence": _safe_text(row.get("match_confidence"), 32),
         "match_timestamp": _safe_text(row.get("match_timestamp"), 40),
         "match_segment_idx": row.get("match_segment_idx"),
+        "current_cwd_score": row.get("current_cwd_score"),
+        "prefix_fallback": bool(row.get("prefix_fallback")),
+        "phrase_fallback": bool(row.get("phrase_fallback")),
         "message_count": row.get("msg_count"),
     }
 
@@ -123,6 +126,7 @@ def log_search(
     cwd_filter: str | None,
     limit: int,
     elapsed_ms: float,
+    current_cwd: str | None = None,
 ) -> None:
     try:
         plan = build_query_plan(query)
@@ -130,6 +134,7 @@ def log_search(
             "query": _safe_text(query, 500),
             "ranker": ranker,
             "cwd_filter": _safe_text(cwd_filter, 240),
+            "current_cwd": _safe_text(current_cwd, 240),
             "limit": limit,
             "result_count": len(results),
             "elapsed_ms": round(elapsed_ms, 2),
