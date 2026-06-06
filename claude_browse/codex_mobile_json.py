@@ -127,22 +127,94 @@ def _truncate_middle(text: str, limit: int) -> tuple[str, bool]:
     return text[:keep].rstrip() + "\n[tool output truncated; use :full for raw event log]", True
 
 
+# Two-line tool condensing (Claude-Code style). A tool call renders as a
+# compact command line plus a one-line result summary (exit + line count). The
+# full output is never dumped inline; it is always one `:full` keystroke away
+# (the raw JSONL event log is tee'd to disk every turn). Failures stay loud: we
+# keep the "tool failed" label and surface a short tail so the error is visible
+# without `:full`. Set CODEX_MOBILE_TOOL_VERBOSE=1 to restore the old behavior
+# of dumping aggregated output inline.
+_FAIL_TAIL_LINES = 8
+_BASH_WRAP_RE = re.compile(
+    r"^\s*(?:/[\w./-]*/)?(?:bash|sh|zsh)\s+-[A-Za-z]*c\s+(['\"])(.*)\1\s*$",
+    re.DOTALL,
+)
+
+
+def _tool_verbose() -> bool:
+    return os.environ.get("CODEX_MOBILE_TOOL_VERBOSE", "").strip() not in ("", "0", "false", "False")
+
+
+def _compact_command(command: Any) -> str:
+    """Collapse a tool command to a single readable line.
+
+    Strips the `bash -lc '…'` (or sh/zsh) wrapper Codex adds so the inner
+    command shows directly, then flattens newlines and runs of whitespace.
+    """
+    if isinstance(command, list):
+        command = " ".join(str(part) for part in command)
+    command = str(command or "").strip()
+    match = _BASH_WRAP_RE.match(command)
+    if match:
+        command = match.group(2).strip()
+    return re.sub(r"\s+", " ", command)
+
+
+def _one_line(text: str, width: int) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    if width > 1 and len(text) > width:
+        return text[: width - 1].rstrip() + "…"
+    return text
+
+
+def _truncate_width(text: str, width: int) -> str:
+    text = text.rstrip("\n")
+    if width > 1 and len(text) > width:
+        return text[: width - 1].rstrip() + "…"
+    return text
+
+
+def _line_count(output: str) -> int:
+    output = output.rstrip("\n")
+    if not output:
+        return 0
+    return output.count("\n") + 1
+
+
 def _render_command_started(item: dict[str, Any]) -> None:
-    command = str(item.get("command") or "").strip()
+    command = _compact_command(item.get("command"))
     print()
-    print(_rule("TOOL", DIM), flush=True)
-    print(f"{DIM}$ {command}{RESET}", flush=True)
+    if _tool_verbose():
+        print(_rule("TOOL", DIM), flush=True)
+    print(f"{DIM}$ {_one_line(command, _term_width() - 2)}{RESET}", flush=True)
 
 
 def _render_command_completed(item: dict[str, Any]) -> None:
     status = str(item.get("status") or "")
     exit_code = item.get("exit_code")
     output = str(item.get("aggregated_output") or "")
-    color = RED if status == "failed" or exit_code not in (0, None) else DIM
-    print(f"{color}[tool {status or 'done'} · exit {exit_code}]{RESET}", flush=True)
-    if output:
-        rendered, _truncated = _truncate_middle(output.rstrip(), _tool_output_limit())
-        print(rendered, flush=True)
+    failed = status == "failed" or exit_code not in (0, None)
+    color = RED if failed else DIM
+    n = _line_count(output)
+
+    if _tool_verbose():
+        print(f"{color}[tool {status or 'done'} · exit {exit_code}]{RESET}", flush=True)
+        if output:
+            rendered, _truncated = _truncate_middle(output.rstrip(), _tool_output_limit())
+            print(rendered, flush=True)
+        return
+
+    code_label = exit_code if exit_code is not None else "?"
+    count_label = f" · {n} line{'s' if n != 1 else ''}" if n else ""
+    if failed:
+        print(f"{color}  ⎿ tool failed · exit {code_label}{count_label}{RESET}", flush=True)
+        if output:
+            width = _term_width()
+            for line in output.rstrip("\n").splitlines()[-_FAIL_TAIL_LINES:]:
+                print(f"{RED}  {_truncate_width(line, width)}{RESET}", flush=True)
+    else:
+        hint = " · :full" if n else ""
+        print(f"{color}  ⎿ exit {code_label}{count_label}{hint}{RESET}", flush=True)
 
 
 def _render_event(event: dict[str, Any]) -> str | None:
