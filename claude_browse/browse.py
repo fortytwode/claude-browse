@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Mapping
+from datetime import datetime
 
 from . import fts, search_log
 from .core import (
@@ -493,6 +494,32 @@ def format_row(
     )
 
 
+def _format_thread_span(
+    start_ts: str | None, last_ts: str | None, min_drift_days: int = 2
+) -> str:
+    """One-line 'this thread is older than its displayed date' banner.
+
+    The list column shows last-activity, so a long-running or resumed thread
+    that began weeks earlier reads as recent. When start and last activity
+    drift by more than a couple of days, surface the true start date at the top
+    of the preview so the displayed date isn't mistaken for when it began.
+    Returns "" when there's no meaningful drift (same-session threads).
+    """
+    if not start_ts or not last_ts:
+        return ""
+    try:
+        start = datetime.fromisoformat(start_ts.replace("Z", "+00:00"))
+        last = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    drift = (last - start).days
+    if drift < min_drift_days:
+        return ""
+    began = start.strftime("%b %-d, %Y")
+    last_str = last.strftime("%b %-d")
+    return f"Began {began} ({drift}d before last activity, {last_str})"
+
+
 def _write_preview_script(
     script_path: str, db_path: str, package_dir: str
 ) -> None:
@@ -509,7 +536,7 @@ from claude_browse.core import (
     highlight_terms,
     provider_display_name,
 )
-from claude_browse.browse import COACH_SESSION_ID, _decode_row_metadata, render_query_coach_preview
+from claude_browse.browse import COACH_SESSION_ID, _decode_row_metadata, render_query_coach_preview, _format_thread_span
 from claude_browse.work_state import build_work_state, render_restart_card_terminal
 
 DB_PATH = {db_path!r}
@@ -576,6 +603,13 @@ def get_preview(row_meta, query=""):
 
     def hl(text):
         return highlight_terms(text, terms) if terms else text
+
+    # Surface the true start date first: the list column shows last-activity,
+    # so an old-but-resumed thread reads as recent. Only prints on real drift.
+    span_line = _format_thread_span(timestamp, last_timestamp)
+    if span_line:
+        print(span_line)
+        print()
 
     # Lead with the matched snippet so scanning results shows WHERE the query
     # hit before the metadata/restart-card header pushes it below the fold.

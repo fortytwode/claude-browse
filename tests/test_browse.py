@@ -1115,3 +1115,37 @@ def test_continue_in_provider_errors_when_target_binary_missing(monkeypatch):
         )
 
     assert exc.value.code == 1
+
+
+class TestFormatThreadSpan:
+    """`_format_thread_span` surfaces a thread's true start when the list
+    column (last-activity) makes an old, resumed thread read as recent."""
+
+    def test_shows_banner_on_meaningful_drift(self):
+        line = browse._format_thread_span(
+            "2026-04-16T17:09:30Z", "2026-05-27T07:44:19Z"
+        )
+        assert line == "Began Apr 16, 2026 (40d before last activity, May 27)"
+
+    def test_no_banner_same_day(self):
+        assert (
+            browse._format_thread_span(
+                "2026-06-04T09:00:00Z", "2026-06-04T18:00:00Z"
+            )
+            == ""
+        )
+
+    def test_no_banner_under_threshold(self):
+        assert (
+            browse._format_thread_span(
+                "2026-05-20T09:00:00Z", "2026-05-21T10:00:00Z"
+            )
+            == ""
+        )
+
+    def test_empty_on_missing_timestamp(self):
+        assert browse._format_thread_span(None, "2026-05-27T07:44:19Z") == ""
+        assert browse._format_thread_span("2026-04-16T17:09:30Z", None) == ""
+
+    def test_empty_on_malformed_timestamp(self):
+        assert browse._format_thread_span("not-a-date", "also-bad") == ""
