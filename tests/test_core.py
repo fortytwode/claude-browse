@@ -899,3 +899,89 @@ def test_highlight_terms_regex_chars_escaped():
         "use a.b? and c+d", ["a.b?"], open_marker="[", close_marker="]"
     )
     assert out == "use [a.b?] and c+d"
+
+
+# --- build_import_markdown: relocate provenance block (U1) -------------------
+
+_RELO_WS = {
+    "current_task": "Auth follow-up",
+    "topic_shifted": False,
+    "opening_topic": "Please fix the onboarding flow",
+    "session_title": "Auth follow-up",
+    "repo_state": {"summary": "Branch `main` with a clean working tree."},
+    "last_meaningful_user": "Ship it after the auth fix.",
+    "latest_assistant": "I found the regression in auth.",
+    "likely_open_question": "",
+    "suggested_next_prompt": "Continue the work in proj.",
+    "matching_turns": [],
+    "recent_turns": [
+        ("user", "Ship it after the auth fix."),
+        ("assistant", "I found the regression in auth."),
+    ],
+}
+
+_RELO_SESSION = {
+    "provider": "claude",
+    "session_id": "abc-123",
+    "cwd": "/home/alice/proj",
+    "timestamp": "2026-05-12T07:00:00Z",
+    "last_timestamp": "2026-05-12T07:30:00Z",
+    "name": "Auth follow-up",
+    "first_msg": "Please fix the onboarding flow",
+    "last_msg": "Ship it after the auth fix.",
+    "path": "/home/alice/.claude/projects/-home-alice-proj/abc-123.jsonl",
+}
+
+
+def _patch_relo(monkeypatch, capture=None):
+    def fake_ws(session, selection_query="", recent_limit=10, match_limit=6):
+        if capture is not None:
+            capture["recent_limit"] = recent_limit
+        return _RELO_WS
+
+    monkeypatch.setattr(core, "build_work_state", fake_ws)
+    monkeypatch.setattr(
+        core,
+        "get_provider",
+        lambda provider: SimpleNamespace(
+            display_name="Claude", assistant_turns_available=True
+        ),
+    )
+
+
+def test_build_import_markdown_relocate_adds_provenance_block(monkeypatch):
+    _patch_relo(monkeypatch)
+    text = core.build_import_markdown(_RELO_SESSION, "claude", relocate=True)
+    assert "## Resuming Here (relocated)" in text
+    assert "- Previous folder: `/home/alice/proj`" in text
+    assert (
+        "- Full original transcript: "
+        "`/home/alice/.claude/projects/-home-alice-proj/abc-123.jsonl`"
+    ) in text
+    assert "read it if you" in text
+
+
+def test_build_import_markdown_default_has_no_provenance_block(monkeypatch):
+    _patch_relo(monkeypatch)
+    text = core.build_import_markdown(_RELO_SESSION, "claude")
+    assert "Resuming Here (relocated)" not in text
+    assert "Full original transcript" not in text
+
+
+def test_build_import_markdown_relocate_widens_recent_window(monkeypatch):
+    capture = {}
+    _patch_relo(monkeypatch, capture)
+    core.build_import_markdown(_RELO_SESSION, "claude", relocate=True)
+    assert capture["recent_limit"] == 25
+    core.build_import_markdown(_RELO_SESSION, "claude")
+    assert capture["recent_limit"] == 10
+
+
+def test_build_import_markdown_relocate_without_path_omits_transcript_line(monkeypatch):
+    _patch_relo(monkeypatch)
+    session = {k: v for k, v in _RELO_SESSION.items() if k != "path"}
+    text = core.build_import_markdown(session, "claude", relocate=True)
+    # Provenance block still present (previous folder), transcript line omitted.
+    assert "## Resuming Here (relocated)" in text
+    assert "- Previous folder: `/home/alice/proj`" in text
+    assert "Full original transcript" not in text

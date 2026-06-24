@@ -367,6 +367,9 @@ def test_write_search_script_reads_query_from_fzf_env(tmp_path):
     assert "search_log.log_search(" in text
     assert "elapsed_ms=(time.perf_counter() - start) * 1000" in text
     assert 'sys.argv[1]' not in text
+    # Empty-query reload must also float current-folder threads, matching the
+    # initial paint (folder-first must not vanish after type-then-clear).
+    assert "_folder_first_order" in text
 
 
 def test_write_preview_script_reads_query_from_row_metadata_with_fzf_env_fallback(tmp_path):
@@ -969,7 +972,7 @@ def test_continue_in_provider_from_claude_execs_gemini_with_include_directories(
     monkeypatch.setattr(
         browse,
         "write_import_file",
-        lambda _session, target_provider, selection_query="", reenter_topic=False: (
+        lambda _session, target_provider, selection_query="", reenter_topic=False, relocate=False: (
             "/tmp/claude_browse_import.md"
             if target_provider == "gemini" and not reenter_topic
             else "/tmp/unexpected.md"
@@ -1020,7 +1023,7 @@ def test_continue_in_provider_reenter_topic_updates_prompt(monkeypatch):
     monkeypatch.setattr(
         browse,
         "write_import_file",
-        lambda _session, target_provider, selection_query="", reenter_topic=False: (
+        lambda _session, target_provider, selection_query="", reenter_topic=False, relocate=False: (
             "/tmp/claude_browse_import.md"
             if target_provider == "gemini" and reenter_topic
             else "/tmp/unexpected.md"
@@ -1059,7 +1062,7 @@ def test_continue_in_provider_from_gemini_execs_claude_with_add_dir(
     monkeypatch.setattr(
         browse,
         "write_import_file",
-        lambda _session, target_provider, selection_query="", reenter_topic=False: (
+        lambda _session, target_provider, selection_query="", reenter_topic=False, relocate=False: (
             "/tmp/codex_browse_import.md"
             if target_provider == "claude" and not reenter_topic
             else "/tmp/unexpected.md"
@@ -1112,7 +1115,7 @@ def test_continue_in_provider_from_claude_execs_cursor_with_inline_context(
     monkeypatch.setattr(
         browse,
         "build_import_markdown",
-        lambda _session, _target_provider, _selection_query="", reenter_topic=False: (
+        lambda _session, _target_provider, _selection_query="", reenter_topic=False, relocate=False: (
             "# Imported Session Context\n\n## Reopen Intent\n\n- pokpok\n"
         ),
     )
@@ -1177,7 +1180,7 @@ def test_continue_in_provider_to_codex_uses_codexmobile_on_mobile_ssh(
     monkeypatch.setattr(
         browse,
         "write_import_file",
-        lambda _session, target_provider, selection_query="", reenter_topic=False: (
+        lambda _session, target_provider, selection_query="", reenter_topic=False, relocate=False: (
             "/tmp/claude_browse_import.md"
         ),
     )
@@ -1255,3 +1258,177 @@ class TestFormatThreadSpan:
 
     def test_empty_on_malformed_timestamp(self):
         assert browse._format_thread_span("not-a-date", "also-bad") == ""
+
+
+def test_continue_in_provider_relocate_adds_transcript_dir_not_cwd(monkeypatch):
+    # Same-provider relocate must hand off (not native resume) and grant read
+    # access to the transcript's directory, never the source/project cwd.
+    session = _info(
+        provider="claude",
+        path="/home/alice/.claude/projects/-home-alice-proj/abc-123.jsonl",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        browse,
+        "write_import_file",
+        lambda _session, target_provider, selection_query="", reenter_topic=False, relocate=False: (
+            "/tmp/claude_browse_import.md"
+        ),
+    )
+    monkeypatch.setattr(browse.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def fake_execvp(binary: str, cmd: list[str]) -> None:
+        captured["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(browse.os, "execvp", fake_execvp)
+
+    with pytest.raises(SystemExit):
+        browse._continue_in_provider(
+            session,
+            "claude",
+            "claude",
+            "/home/alice/proj",
+            (),
+            True,
+            "",
+            relocate=True,
+        )
+
+    cmd = captured["cmd"]
+    # Transcript directory is granted as an --add-dir...
+    assert "/home/alice/.claude/projects/-home-alice-proj" in cmd
+    # ...but the source/project folder is NOT.
+    assert "/home/alice/proj" not in cmd
+
+
+def test_continue_in_provider_relocate_without_path_adds_no_extra_dir(monkeypatch):
+    # Routing-layer guard: relocate=True but the session has no transcript path
+    # -> no transcript --add-dir, and never the source cwd.
+    session = _info(provider="claude")
+    session.pop("path", None)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        browse,
+        "write_import_file",
+        lambda _session, target_provider, selection_query="", reenter_topic=False, relocate=False: (
+            "/tmp/claude_browse_import.md"
+        ),
+    )
+    monkeypatch.setattr(browse.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def fake_execvp(binary: str, cmd: list[str]) -> None:
+        captured["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(browse.os, "execvp", fake_execvp)
+
+    with pytest.raises(SystemExit):
+        browse._continue_in_provider(
+            session, "claude", "claude", "/home/alice/proj", (), True, "", relocate=True
+        )
+
+    cmd = captured["cmd"]
+    # Only the import dir is added; no source cwd leaks in.
+    assert cmd.count("--add-dir") == 1
+    assert "/home/alice/proj" not in cmd
+
+
+def test_continue_in_provider_no_relocate_adds_no_transcript_dir(monkeypatch):
+    session = _info(
+        provider="claude",
+        path="/home/alice/.claude/projects/-home-alice-proj/abc-123.jsonl",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        browse,
+        "write_import_file",
+        lambda _session, target_provider, selection_query="", reenter_topic=False, relocate=False: (
+            "/tmp/claude_browse_import.md"
+        ),
+    )
+    monkeypatch.setattr(browse.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def fake_execvp(binary: str, cmd: list[str]) -> None:
+        captured["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(browse.os, "execvp", fake_execvp)
+
+    with pytest.raises(SystemExit):
+        browse._continue_in_provider(
+            session, "claude", "gemini", "/home/alice/proj", (), True, ""
+        )
+
+    # Only the import dir is added; no transcript projects dir leaks in.
+    assert "/home/alice/.claude/projects/-home-alice-proj" not in captured["cmd"]
+
+
+# --- folder-first default ordering (U3) -------------------------------------
+
+
+def test_folder_first_order_floats_current_folder_and_subdirs():
+    sessions = [
+        {"cwd": "/w/other", "session_id": "o1"},
+        {"cwd": "/w/family", "session_id": "f1"},
+        {"cwd": "/w/family/sub", "session_id": "f2"},
+        {"cwd": "/w/other2", "session_id": "o2"},
+    ]
+    out = browse._folder_first_order(sessions, "/w/family")
+    ids = [s["session_id"] for s in out]
+    # family + family/sub float up, preserving their input (recency) order.
+    assert ids[:2] == ["f1", "f2"]
+    # everything else follows, also order-preserved.
+    assert ids[2:] == ["o1", "o2"]
+
+
+def test_folder_first_order_preserves_all_sessions():
+    sessions = [
+        {"cwd": "/w/family", "session_id": "f1"},
+        {"cwd": "/w/other", "session_id": "o1"},
+    ]
+    out = browse._folder_first_order(sessions, "/w/family")
+    assert len(out) == len(sessions)
+    assert {s["session_id"] for s in out} == {"f1", "o1"}
+
+
+def test_folder_first_order_sibling_prefix_does_not_match():
+    # "/w/family-archive" must NOT be treated as under "/w/family".
+    sessions = [
+        {"cwd": "/w/family-archive", "session_id": "arch"},
+        {"cwd": "/w/family", "session_id": "fam"},
+    ]
+    out = browse._folder_first_order(sessions, "/w/family")
+    assert [s["session_id"] for s in out] == ["fam", "arch"]
+
+
+def test_folder_first_order_handles_missing_cwd():
+    sessions = [
+        {"cwd": "", "session_id": "blank"},
+        {"cwd": "/w/family", "session_id": "fam"},
+    ]
+    out = browse._folder_first_order(sessions, "/w/family")
+    assert [s["session_id"] for s in out] == ["fam", "blank"]
+
+
+def test_folder_first_order_empty_current_cwd_returns_unchanged():
+    sessions = [{"cwd": "/w/a", "session_id": "a"}, {"cwd": "/w/b", "session_id": "b"}]
+    assert browse._folder_first_order(sessions, "") == sessions
+    assert browse._folder_first_order(sessions, None) == sessions
+
+
+def test_folder_first_order_canonicalizes_both_sides(monkeypatch):
+    # Prove both stored cwd and current cwd go through canonicalize_path, so a
+    # casing difference still groups together. Stub lowercases.
+    monkeypatch.setattr(
+        browse, "canonicalize_path", lambda p: (p or "").lower() or None
+    )
+    sessions = [
+        {"cwd": "/Users/Shamanth/team-operations", "session_id": "team"},
+        {"cwd": "/Users/Shamanth/personal-ops/family", "session_id": "fam"},
+    ]
+    out = browse._folder_first_order(sessions, "/users/shamanth/personal-ops/family")
+    assert out[0]["session_id"] == "fam"

@@ -59,12 +59,17 @@ class ProviderSpec:
         import_dir: str | None,
         prompt: str,
         yolo: bool,
+        extra_dirs: tuple[str, ...] = (),
     ) -> list[str]:
         cmd = [self.binary]
         if yolo and self.handoff_yolo_flag:
             cmd.append(self.handoff_yolo_flag)
-        if self.add_dir_flag and import_dir:
-            cmd.extend([self.add_dir_flag, import_dir])
+        if self.add_dir_flag:
+            seen: set[str] = set()
+            for directory in (import_dir, *extra_dirs):
+                if directory and directory not in seen:
+                    seen.add(directory)
+                    cmd.extend([self.add_dir_flag, directory])
         if self.handoff_prompt_flag:
             cmd.extend([self.handoff_prompt_flag, prompt])
         else:

@@ -114,17 +114,32 @@ def _codex_transcript_turns(session_id: str) -> list[tuple[str, str]]:
     return get_provider("codex").transcript_turns("", session_id)
 
 
+# Recent-turns window for the handoff brief. Relocate widens it because a
+# relocated session starts fresh with no native transcript to fall back on, so
+# more of the conversation should ride inline (the full transcript is also
+# linked for on-demand reads).
+_DEFAULT_RECENT_LIMIT = 10
+_RELOCATE_RECENT_LIMIT = 25
+
+
 def build_import_markdown(
     session: dict,
     target_provider: str,
     selection_query: str | None = None,
     *,
     reenter_topic: bool = False,
+    relocate: bool = False,
 ) -> str:
-    """Create a compact Markdown brief so another app can continue a thread."""
+    """Create a compact Markdown brief so another app can continue a thread.
+
+    When ``relocate`` is set, the brief also points the new session at the full
+    original transcript on disk (so it can pull deeper history on demand) and
+    widens the inline recent-turns window.
+    """
     provider = session.get("provider") or "claude"
     session_id = session.get("session_id") or "?"
     cwd = session.get("cwd") or ""
+    transcript_path = session.get("path") or ""
     started = session.get("timestamp") or "unknown"
     last_activity = session.get("last_timestamp") or started
     target_name = provider_display_name(target_provider)
@@ -132,7 +147,7 @@ def build_import_markdown(
     work_state = build_work_state(
         session,
         selection_query or "",
-        recent_limit=10,
+        recent_limit=_RELOCATE_RECENT_LIMIT if relocate else _DEFAULT_RECENT_LIMIT,
         match_limit=6,
     )
     recent_excerpt = work_state["recent_turns"]
@@ -174,6 +189,22 @@ def build_import_markdown(
         f"- Started: {started}",
         f"- Last activity: {last_activity}",
     ])
+    if relocate:
+        lines.extend([
+            "",
+            "## Resuming Here (relocated)",
+            "",
+            (
+                f"- Previous folder: `{cwd}`"
+                if cwd
+                else "- Previous folder: unknown"
+            ),
+        ])
+        if transcript_path:
+            lines.append(
+                f"- Full original transcript: `{transcript_path}` — read it if you "
+                "need detail beyond the recent turns below."
+            )
     lines.extend([""] + render_restart_card_markdown(work_state))
 
     if selection_query and selection_query.strip():
@@ -328,6 +359,7 @@ def write_import_file(
     selection_query: str | None = None,
     *,
     reenter_topic: bool = False,
+    relocate: bool = False,
 ) -> str:
     """Write a temporary Markdown import brief and return its path."""
     tmp = tempfile.NamedTemporaryFile(
@@ -343,6 +375,7 @@ def write_import_file(
                 target_provider,
                 selection_query,
                 reenter_topic=reenter_topic,
+                relocate=relocate,
             )
         )
     finally:

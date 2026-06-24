@@ -27,6 +27,7 @@ from .core import (
     write_import_file,
 )
 from .providers import get_provider, provider_entries, provider_ids
+from .providers.common import canonicalize_path
 from .query import QueryPlan, build_query_plan
 from .work_state import (
     build_work_state,
@@ -744,7 +745,11 @@ import time
 sys.path.insert(0, {package_dir!r})
 
 from claude_browse import fts, search_log
-from claude_browse.browse import format_query_coach_row, format_row
+from claude_browse.browse import (
+    _folder_first_order,
+    format_query_coach_row,
+    format_row,
+)
 
 DB_PATH = {db_path!r}
 CWD_FILTER = {cwd_filter!r}
@@ -767,6 +772,10 @@ if q.strip():
         results = fts.search_ranked(conn, q, limit=LIMIT, current_cwd=CURRENT_CWD)
 else:
     results = fts.list_recent(conn, limit=LIMIT)
+    if not CWD_FILTER:
+        # Match the initial paint: float current-folder threads to the top when
+        # the query is empty (including after the user types then clears it).
+        results = _folder_first_order(results, CURRENT_CWD)
 
 if CWD_FILTER:
     results = [r for r in results if (r.get("cwd") or "").startswith(CWD_FILTER)]
@@ -1134,11 +1143,24 @@ def _continue_in_provider(
     selection_query: str = "",
     *,
     reenter_topic: bool = False,
+    relocate: bool = False,
 ) -> None:
     target_spec = get_provider(target_provider)
     target_name = target_spec.display_name
 
     _require_binary(target_provider)
+
+    # When relocating, grant the new session access to the directory holding the
+    # original transcript (--add-dir, a read+write working-dir grant) so it can
+    # pull the full history on demand. Scoped to the user's own ~/.claude history
+    # for this project. Never the source/project cwd -- that would re-attach the
+    # folder we are deliberately leaving.
+    extra_dirs: tuple[str, ...] = ()
+    if relocate:
+        transcript_path = session.get("path") or ""
+        transcript_dir = os.path.dirname(transcript_path) if transcript_path else ""
+        if transcript_dir:
+            extra_dirs = (transcript_dir,)
 
     if target_spec.handoff_via_file:
         try:
@@ -1147,6 +1169,7 @@ def _continue_in_provider(
                 target_provider,
                 selection_query,
                 reenter_topic=reenter_topic,
+                relocate=relocate,
             )
         except OSError as exc:
             print(f"Could not write import brief: {exc}", file=sys.stderr)
@@ -1179,6 +1202,7 @@ def _continue_in_provider(
             target_provider,
             selection_query,
             reenter_topic=reenter_topic,
+            relocate=relocate,
         )
         if reenter_topic:
             prompt = (
@@ -1202,7 +1226,7 @@ def _continue_in_provider(
     if _use_codex_mobile_mode(target_provider):
         cmd = _codex_mobile_cmd("start", prompt, yolo=yolo)
     else:
-        cmd = target_spec.handoff_cmd(import_dir, prompt, yolo)
+        cmd = target_spec.handoff_cmd(import_dir, prompt, yolo, extra_dirs=extra_dirs)
     mode = " (yolo)" if yolo else ""
     action = "Re-entering topic" if reenter_topic else "Continuing"
     print(f"{action}{mode} in {target_name} from {folder_name(cwd, prefixes)}...")
@@ -1235,6 +1259,7 @@ def _open_in_target_provider(
         yolo,
         selection_query,
         reenter_topic=reenter_topic,
+        relocate=relocate,
     )
 
 
@@ -1339,6 +1364,29 @@ def _print_provider_list() -> None:
             print(f"  origin: {entry.origin}")
 
 
+def _folder_first_order(sessions: list[dict], current_cwd: str | None) -> list[dict]:
+    """Float threads from the current directory (or a subdirectory) to the top.
+
+    Sessions are assumed already recency-ordered. Returns current-folder sessions
+    first (preserving recency), then everything else (preserving recency). Paths
+    are canonicalized on both sides so casing/host differences still match.
+    """
+    base = canonicalize_path(current_cwd)
+    if not base:
+        return sessions
+    base = base.rstrip("/")
+    base_prefix = base + "/"
+    under_cwd: list[dict] = []
+    rest: list[dict] = []
+    for session in sessions:
+        stored = canonicalize_path(session.get("cwd") or "")
+        if stored and (stored == base or stored.startswith(base_prefix)):
+            under_cwd.append(session)
+        else:
+            rest.append(session)
+    return under_cwd + rest
+
+
 def _load_session_by_id(session_id: str) -> dict | None:
     conn = fts.open_db()
     try:
@@ -1416,6 +1464,10 @@ def main() -> None:
     initial = fts.list_recent(conn, limit=limit)
     if cwd_filter:
         initial = [r for r in initial if (r.get("cwd") or "").startswith(cwd_filter)]
+    else:
+        # Pre-search: float current-folder threads to the top. Once a query is
+        # typed, fts.search_ranked governs ordering instead.
+        initial = _folder_first_order(initial, os.getcwd())
     conn.close()
 
     if not initial:

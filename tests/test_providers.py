@@ -203,6 +203,33 @@ def test_claude_handoff_cmd_matches_current_shape():
     ]
 
 
+def test_claude_handoff_cmd_with_extra_dirs_adds_them_after_import_dir():
+    spec = get_provider("claude")
+    cmd = spec.handoff_cmd(
+        "/tmp/import", "continue", False, extra_dirs=("/home/a/.claude/projects/bkt",)
+    )
+    assert cmd == [
+        "claude",
+        "--add-dir",
+        "/tmp/import",
+        "--add-dir",
+        "/home/a/.claude/projects/bkt",
+        "--",
+        "continue",
+    ]
+
+
+def test_handoff_cmd_dedups_and_skips_empty_extra_dirs():
+    spec = get_provider("claude")
+    cmd = spec.handoff_cmd(
+        "/tmp/import", "continue", False, extra_dirs=("", "/tmp/import", "/other")
+    )
+    # Empty skipped, duplicate of import_dir skipped, /other kept exactly once.
+    assert cmd.count("--add-dir") == 2
+    assert "/other" in cmd
+    assert "" not in cmd
+
+
 def test_codex_handoff_cmd_matches_current_shape():
     spec = get_provider("codex")
     assert spec.handoff_cmd("/tmp", "continue", True) == [
