@@ -22,7 +22,7 @@ Find thread where...
   ...
 ```
 
-No network. No accounts. No API calls. It reads local session history from
+By default: no network, no accounts, no API calls. It reads local session history from
 `~/.claude/projects/`, `~/.codex/`, `~/.gemini/tmp/`, and
 `~/.copilot/session-state/`, then reconstructs enough task state to help you
 keep moving instead of dropping you into a stale transcript. Cursor is
@@ -104,9 +104,9 @@ While the TUI is up:
 Examples:
 
 - Sentence-style query examples:
-  - `where i was asking nevena about feedback`
-  - `last closeout session for musopia`
-  - `pokpok brief where we questioned the opportunities`
+  - `where i was asking about teammate feedback`
+  - `last closeout session for client`
+  - `brand brief where we questioned the opportunities`
   - `"runna sca2"` when you know the exact phrase already
 
 - In `claude-browse`, a Claude thread resumes natively in Claude and CodeX or Gemini threads start fresh Claude sessions with imported context.
@@ -114,13 +114,13 @@ Examples:
 - In `gemini-browse`, a Gemini thread resumes natively in Gemini and Claude or CodeX threads start fresh Gemini sessions with imported context.
 - In `copilot-browse`, a Copilot thread resumes natively in Copilot and Claude, CodeX, or Gemini threads start fresh Copilot sessions with imported context.
 - In `cursor-browse`, Claude, CodeX, and Gemini threads start fresh Cursor sessions with imported context.
-- The UI is meant to encourage sentence-style recall, not one- or two-word pecking. You should feel comfortable typing a short description like `where i was asking nevena about feedback`.
+- The UI is meant to encourage sentence-style recall, not one- or two-word pecking. You should feel comfortable typing a short description like `where i was asking about teammate feedback`.
 - `Enter` is the normal open key again. There is now a short paste guard: if a pasted long or multiline quote just changed the query, the first Enter arms the selection and the second Enter opens it. `Ctrl-O` still opens immediately.
-- The picker now shows an interpreted-query tip row at the top, for example `Looking for: musopia + closeout` or `Looking for threads about: pokpok`.
+- The picker now shows an interpreted-query tip row at the top, for example `Looking for: client + closeout` or `Looking for threads about: brand`.
 - If your query is too vague, the picker tells you to add one anchor like a person, client, brand, or folder instead of pretending the search is confident.
 - Result rows now show trust/provenance tags like `primary subject`, `folder match`, `title match`, `opening match`, `mentioned later`, `feedback`, `critique`, `closeout`, or `drifted` so you can tell why a hit surfaced before opening preview.
-- Descriptive queries are reduced to the most specific anchors under the hood, so `find me the thread where i was asking about nevena feedback` behaves like a thread-recall query, not a hard AND over filler words.
-- Descriptive queries now separate anchor terms from intent words, so `last closeout session for musopia` treats `musopia` as the hard anchor and `last / closeout` as ranking signals instead of weighting every word equally.
+- Descriptive queries are reduced to the most specific anchors under the hood, so `find me the thread where i was asking about teammate feedback` behaves like a thread-recall query, not a hard AND over filler words.
+- Descriptive queries now separate anchor terms from intent words, so `last closeout session for client` treats `client` as the hard anchor and `last / closeout` as ranking signals instead of weighting every word equally.
 - Descriptive queries now use local concept cues for things like closeout, feedback, critique, and human-performance review, so the ranker can still prefer the right exchange when the exact wording differs.
 - Search now prioritizes the most recent relevant mention of your query, not only the thread's latest unrelated activity.
 - The preview pane now starts with a `Why this surfaced` block: match type, match time, match confidence, and best action (`Enter` vs `Ctrl-T`), then shows the last matching exchange and whether the thread later drifted to another topic.
@@ -129,6 +129,40 @@ Examples:
 - `Ctrl-H` prints a fuller handoff brief with restart state, reopen intent, and recent turns. `Ctrl-U` prints a shorter status update you can paste into Slack, notes, or a standup.
 - Cross-provider open is not a true native resume. It creates a new session seeded from the old thread.
 - Cursor is currently a **target-only** built-in provider. It opens everything in Cursor, but this tool does not yet claim to index Cursor-origin CLI sessions.
+
+---
+
+## Optional Dense Embeddings
+
+The default search stack is local only: exact URL/page ID matching, weighted
+FTS, segment windows, and a local TF-IDF-style semantic window index. If you
+want paraphrase-level recall, you can opt into dense embeddings while keeping
+storage and retrieval local:
+
+```bash
+export CLAUDE_BROWSE_DENSE_EMBEDDINGS=1
+export OPENAI_API_KEY=...
+```
+
+Optional knobs:
+
+```bash
+export CLAUDE_BROWSE_EMBEDDING_MODEL=text-embedding-3-small
+export CLAUDE_BROWSE_EMBEDDING_DIMENSIONS=256
+export CLAUDE_BROWSE_EMBEDDING_BATCH_SIZE=64
+export CLAUDE_BROWSE_DENSE_MIN_SCORE=0.25
+```
+
+When enabled, `claude-browse` embeds local transcript windows through the
+embeddings API and stores the resulting vectors in the same local SQLite
+cache. Query embeddings are cached locally too. It does not use a hosted vector
+store or File Search. Exact URL/page ID search still runs first.
+
+Privacy/cost boundary: transcript window text and search queries are sent to
+the embedding API only when `CLAUDE_BROWSE_DENSE_EMBEDDINGS=1` is set. With
+the default `text-embedding-3-small` model, the current local corpus measured
+around 10.75M overlapping-window tokens, which is roughly $0.21 to embed at
+$0.02 per 1M tokens.
 
 ---
 
@@ -266,8 +300,9 @@ Install fzf via your package manager (see Install section above).
 **`No sessions found`**
 You haven't run `claude`, `codex`, `gemini`, or `copilot` yet — or your sessions are in a
 non-standard location. The browsers read `~/.claude/projects/`,
-`~/.codex/state_5.sqlite`, `~/.codex/history.jsonl`, `~/.gemini/tmp/`, and
-`~/.copilot/session-state/`. If yours live elsewhere, file an issue.
+`~/.codex/sessions/`, `~/.codex/state_5.sqlite`, `~/.codex/history.jsonl`,
+`~/.gemini/tmp/`, and `~/.copilot/session-state/`. If yours live elsewhere,
+file an issue.
 
 **`Original folder no longer exists`**
 The directory you ran that session from has been deleted or moved. You can
@@ -285,21 +320,26 @@ proper fix is on the roadmap as part of the `claude-sync` companion tool.
 ## How it works
 
 Claude Code writes each session as a JSONL file under
-`~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`. CodeX stores thread metadata
-in `~/.codex/state_5.sqlite` and user-turn history in `~/.codex/history.jsonl`.
+`~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`. CodeX writes canonical
+session JSONL transcripts under `~/.codex/sessions/`, with thread metadata
+in `~/.codex/state_5.sqlite` and user-turn history fallback in
+`~/.codex/history.jsonl`.
 Gemini stores project-scoped chat JSON under
 `~/.gemini/tmp/<project>/chats/session-*.json` plus aliases in
 `~/.gemini/projects.json`. Copilot stores each session in
 `~/.copilot/session-state/<session-id>/` with an `events.jsonl` transcript and
 `workspace.yaml` metadata. The browsers normalize all four into one local
-SQLite index, then hand that to fzf. When you pick a thread, the tool `cd`s
-back to the original cwd, rebuilds a restart card from the local transcript
-plus current repo state, and then either launches the native resume command
-for the target app or creates a Markdown import brief and starts a fresh
-cross-provider handoff session.
+SQLite index, then hand that to fzf. Search combines exact identifier lookup
+for URLs/page IDs, weighted FTS, segment-window matching, a local
+TF-IDF-style semantic window index for natural-language recall, and optional
+local dense-vector retrieval when explicitly enabled. When you pick a thread,
+the tool `cd`s back to the original cwd, rebuilds a restart card from the
+local transcript plus current repo state, and then either launches the native
+resume command for the target app or creates a Markdown import brief and starts
+a fresh cross-provider handoff session.
 
-No data leaves your machine. No telemetry. No API calls. The whole thing is
-~500 lines of stdlib Python.
+Without optional dense embeddings, no data leaves your machine. No telemetry.
+No API calls. The core runtime remains stdlib Python.
 
 See [ROADMAP.md](ROADMAP.md) for what's planned, what's out of scope, and
 the direction for the paired `claude-sync` and `claude-browse-web` projects.
