@@ -328,7 +328,7 @@ def significant_query_terms(query: str, max_terms: int = 5) -> list[str]:
 def is_descriptive_query(query: str) -> bool:
     """Whether the user is describing a thread instead of typing anchor tokens.
 
-    Sentence-like queries such as "where I was asking Nevena about feedback"
+    Sentence-like queries such as "where I was asking someone about feedback"
     should keep the natural-language UX, but the backend needs to know these
     are descriptive lookups so it can relax strict AND-only retrieval and lean
     harder on matched exchanges. Short token searches like "pokpok" or
