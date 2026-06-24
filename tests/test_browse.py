@@ -576,6 +576,44 @@ def test_native_resume_keeps_codex_native_when_mobile_disabled(monkeypatch):
     ]
 
 
+def test_open_in_target_provider_default_uses_native_resume(monkeypatch):
+    # Same source/target, no relocate: must take the native --resume path,
+    # which is bound to the thread's original project directory.
+    calls: dict[str, bool] = {"native": False, "handoff": False}
+    monkeypatch.setattr(
+        browse, "_native_resume", lambda *a, **k: calls.__setitem__("native", True)
+    )
+    monkeypatch.setattr(
+        browse, "_continue_in_provider", lambda *a, **k: calls.__setitem__("handoff", True)
+    )
+
+    browse._open_in_target_provider(
+        _info(), "claude", "claude", "abc-123", "/home/alice/proj", (), True
+    )
+
+    assert calls == {"native": True, "handoff": False}
+
+
+def test_open_in_target_provider_relocate_forces_handoff(monkeypatch):
+    # With relocate=True, even a same-vendor resume must route through the
+    # handoff path (fresh session in the current dir) because native
+    # `claude --resume <id>` cannot find a session outside its origin folder.
+    calls: dict[str, bool] = {"native": False, "handoff": False}
+    monkeypatch.setattr(
+        browse, "_native_resume", lambda *a, **k: calls.__setitem__("native", True)
+    )
+    monkeypatch.setattr(
+        browse, "_continue_in_provider", lambda *a, **k: calls.__setitem__("handoff", True)
+    )
+
+    browse._open_in_target_provider(
+        _info(), "claude", "claude", "abc-123", "/home/alice/proj", (), True,
+        relocate=True,
+    )
+
+    assert calls == {"native": False, "handoff": True}
+
+
 def test_parse_target_provider_allows_override():
     target, remaining = browse._parse_target_provider(
         ["--target", "codex", "--all"],

@@ -1021,6 +1021,8 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         "Options:\n"
         "  --all                 Include every session, not just the most recent 100\n"
         "  --here                Only sessions started in the current directory\n"
+        "  --relocate            Resume the chosen thread HERE (current dir),\n"
+        "                        grafting its context into a fresh session\n"
         "  --list-providers      Show built-in and external provider availability\n"
         f"  --target PROVIDER     Override launch target (`{valid_targets}`)\n"
         "  -h, --help            Show this help\n"
@@ -1219,8 +1221,9 @@ def _open_in_target_provider(
     selection_query: str = "",
     *,
     reenter_topic: bool = False,
+    relocate: bool = False,
 ) -> None:
-    if source_provider == target_provider and not reenter_topic:
+    if source_provider == target_provider and not reenter_topic and not relocate:
         _native_resume(session, source_provider, session_id, cwd, prefixes, yolo)
         return
     _continue_in_provider(
@@ -1363,6 +1366,14 @@ def main() -> None:
     if "--here" in args:
         args.remove("--here")
         cwd_filter = os.getcwd()
+
+    # --relocate resumes the chosen thread in the CURRENT directory instead of
+    # returning to its original folder. Native `claude --resume <id>` is bound
+    # to the thread's original project dir, so this routes through the handoff
+    # path (grafts context into a fresh session that runs here).
+    relocate = "--relocate" in args
+    if relocate:
+        args.remove("--relocate")
 
     # --no-canonicalize is a legacy flag; canonicalization now happens at
     # index time, not at display time. Accept and ignore for compat.
@@ -1528,13 +1539,21 @@ def main() -> None:
                 sys.exit(1)
 
         cwd = session.get("cwd")
-        if not cwd or not os.path.isdir(cwd):
-            print(f"Original folder no longer exists: {cwd}", file=sys.stderr)
-            suggestion = get_provider(provider).native_resume_cmd(session_id, False)
-            print(f"Try: {' '.join(suggestion)}", file=sys.stderr)
-            sys.exit(1)
+        if relocate:
+            # Stay in the launch directory and graft context in via the handoff
+            # path. The original folder need not exist; we are not going there.
+            here = os.getcwd()
+            if not cwd:
+                cwd = here
+            os.chdir(here)
+        else:
+            if not cwd or not os.path.isdir(cwd):
+                print(f"Original folder no longer exists: {cwd}", file=sys.stderr)
+                suggestion = get_provider(provider).native_resume_cmd(session_id, False)
+                print(f"Try: {' '.join(suggestion)}", file=sys.stderr)
+                sys.exit(1)
+            os.chdir(cwd)
 
-        os.chdir(cwd)
         _open_in_target_provider(
             session,
             provider,
@@ -1545,6 +1564,7 @@ def main() -> None:
             action == "open_yolo",
             selection_query,
             reenter_topic=(action == "reenter_topic"),
+            relocate=relocate,
         )
 
     finally:
