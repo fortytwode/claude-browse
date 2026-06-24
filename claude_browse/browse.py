@@ -1030,8 +1030,10 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         "Options:\n"
         "  --all                 Include every session, not just the most recent 100\n"
         "  --here                Only sessions started in the current directory\n"
-        "  --relocate            Resume the chosen thread HERE (current dir),\n"
-        "                        grafting its context into a fresh session\n"
+        "  --relocate            Force relocate: resume the chosen thread HERE\n"
+        "                        (current dir) even when it is the thread's own\n"
+        "                        folder. Cross-folder threads already relocate\n"
+        "                        automatically; this flag forces it always.\n"
         "  --list-providers      Show built-in and external provider availability\n"
         f"  --target PROVIDER     Override launch target (`{valid_targets}`)\n"
         "  -h, --help            Show this help\n"
@@ -1387,6 +1389,23 @@ def _folder_first_order(sessions: list[dict], current_cwd: str | None) -> list[d
     return under_cwd + rest
 
 
+def _should_auto_relocate(origin_cwd: str | None, launch_cwd: str | None) -> bool:
+    """Decide whether Enter should relocate instead of resuming natively.
+
+    Native resume chdir's back to the thread's origin folder, which yanks the
+    user out of the directory they launched from (and fails outright when the
+    origin is gone or its transcript was pruned). So when the origin differs
+    from the launch dir -- or the origin is unknown -- relocate: graft context
+    into a fresh session here. Same-folder threads still resume natively.
+
+    Paths are canonicalized on both sides so the /Users vs /users casing split
+    still counts as the same folder.
+    """
+    origin = canonicalize_path(origin_cwd or "")
+    launch = canonicalize_path(launch_cwd or "")
+    return not origin or origin != launch
+
+
 def _load_session_by_id(session_id: str) -> dict | None:
     conn = fts.open_db()
     try:
@@ -1591,10 +1610,19 @@ def main() -> None:
                 sys.exit(1)
 
         cwd = session.get("cwd")
+        here = os.getcwd()
+        relocate_explicit = relocate
+        if not relocate and _should_auto_relocate(cwd, here):
+            relocate = True
         if relocate:
             # Stay in the launch directory and graft context in via the handoff
             # path. The original folder need not exist; we are not going there.
-            here = os.getcwd()
+            if not relocate_explicit and cwd:
+                print(
+                    f"Thread is from {folder_name(cwd, prefixes)}; relocating into "
+                    f"{folder_name(here, prefixes)} (current dir) instead of "
+                    "resuming there."
+                )
             if not cwd:
                 cwd = here
             os.chdir(here)

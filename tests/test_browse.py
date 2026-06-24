@@ -617,6 +617,35 @@ def test_open_in_target_provider_relocate_forces_handoff(monkeypatch):
     assert calls == {"native": False, "handoff": True}
 
 
+def test_should_auto_relocate_same_folder_resumes_natively():
+    # Launched from the thread's own folder: native resume, no relocate.
+    assert browse._should_auto_relocate("/work/proj", "/work/proj") is False
+
+
+def test_should_auto_relocate_cross_folder_relocates():
+    # Launched somewhere else than the thread's origin: relocate here.
+    assert browse._should_auto_relocate("/work/proj", "/work/other") is True
+
+
+def test_should_auto_relocate_missing_origin_relocates():
+    # No known origin folder (or pruned): nothing to chdir back to, relocate.
+    assert browse._should_auto_relocate(None, "/work/here") is True
+    assert browse._should_auto_relocate("", "/work/here") is True
+
+
+def test_should_auto_relocate_casing_split_counts_as_same_folder(monkeypatch):
+    # /Users vs /users for the same user canonicalizes to one path, so a
+    # casing-only difference must NOT trigger a relocate.
+    monkeypatch.setenv("USER", "Shamanth")
+    assert (
+        browse._should_auto_relocate(
+            "/Users/Shamanth/team-operations",
+            "/users/shamanth/team-operations",
+        )
+        is False
+    )
+
+
 def test_parse_target_provider_allows_override():
     target, remaining = browse._parse_target_provider(
         ["--target", "codex", "--all"],

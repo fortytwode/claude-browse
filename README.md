@@ -81,6 +81,7 @@ copilot-browse             # most recent 100 sessions, opens everything in Copil
 cursor-browse               # most recent 100 sessions, opens everything in Cursor
 claude-browse --all         # every session you've ever run
 codex-browse --here         # only sessions started in the current directory
+claude-browse --relocate    # force-resume the chosen thread in the current dir, even if it's the thread's own folder
 claude-browse --no-canonicalize   # accepted for compatibility; canonicalization still happens at index time
 ```
 
@@ -91,7 +92,7 @@ While the TUI is up:
 | Type             | Write a short sentence about the thread you want, or use exact names / phrases |
 | ↑ ↓              | Move between sessions                                            |
 | Shift-↑ Shift-↓  | Scroll the preview pane                                          |
-| Enter            | Resume the selected thread in the app you launched (`claude-browse`, `codex-browse`, `gemini-browse`, `copilot-browse`, or `cursor-browse`) in yolo mode |
+| Enter            | Resume the selected thread in the app you launched (`claude-browse`, `codex-browse`, `gemini-browse`, `copilot-browse`, or `cursor-browse`) in yolo mode. If the thread is from a **different folder** than where you launched, it relocates automatically — grafting its context into a fresh session in your current directory instead of yanking you back to the origin folder. |
 | Ctrl-O           | Resume immediately, bypassing the multiline-paste safety guard   |
 | Ctrl-T           | Re-enter the matched topic in a fresh session in that app        |
 | Ctrl-S           | Open in that same app in safe mode                               |
@@ -128,6 +129,7 @@ Examples:
 - `Ctrl-Y` lets you emit the suggested next prompt without launching anything. `Ctrl-B` prints the restart card itself for copy/paste or handoff.
 - `Ctrl-H` prints a fuller handoff brief with restart state, reopen intent, and recent turns. `Ctrl-U` prints a shorter status update you can paste into Slack, notes, or a standup.
 - Cross-provider open is not a true native resume. It creates a new session seeded from the old thread.
+- Cross-folder open auto-relocates: native `claude --resume <id>` only works from a thread's own project folder, so selecting a thread from a different directory now grafts its context into a fresh session in your current directory instead of chdir-ing you back (or failing with "No conversation found" when the origin is gone). Same-folder threads still resume natively. Use `--relocate` to force this even for a thread's own folder.
 - Cursor is currently a **target-only** built-in provider. It opens everything in Cursor, but this tool does not yet claim to index Cursor-origin CLI sessions.
 
 ---
