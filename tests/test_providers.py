@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from claude_browse.providers import claude as claude_provider
 from claude_browse.providers import codex as codex_provider
 from claude_browse.providers import copilot as copilot_provider
 from claude_browse.providers import gemini as gemini_provider
@@ -341,6 +342,71 @@ def test_claude_provider_exposes_file_backed_helpers():
     assert spec.session_files_reader is not None
 
 
+def test_claude_provider_recovers_history_sessions_missed_by_glob(
+    monkeypatch,
+    tmp_path,
+):
+    sessions_dir = tmp_path / "projects"
+    project_dir = sessions_dir / "-Users-alice-work"
+    project_dir.mkdir(parents=True)
+    session_path = project_dir / "hist-session.jsonl"
+    session_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "user",
+                        "sessionId": "hist-session",
+                        "cwd": "/Users/alice/work",
+                        "timestamp": "2026-06-22T08:00:00Z",
+                        "message": {
+                            "role": "user",
+                            "content": "Find the chess deck discussion",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "sessionId": "hist-session",
+                        "cwd": "/Users/alice/work",
+                        "timestamp": "2026-06-22T08:01:00Z",
+                        "message": {
+                            "role": "assistant",
+                            "content": "The deck discussion is in this thread.",
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    history_path = tmp_path / "history.jsonl"
+    history_path.write_text(
+        json.dumps(
+            {
+                "display": "Find the chess deck discussion",
+                "project": "/Users/alice/work",
+                "sessionId": "hist-session",
+            }
+        )
+        + "\n"
+    )
+
+    monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(sessions_dir))
+    monkeypatch.setattr(claude_provider, "HISTORY_PATH", str(history_path))
+    monkeypatch.setattr(claude_provider.glob, "glob", lambda _pattern: [])
+
+    files = claude_provider.list_session_files()
+    assert files == [str(session_path)]
+
+    records = claude_provider.list_index_records()
+    assert len(records) == 1
+    assert records[0]["session_id"] == "hist-session"
+    assert records[0]["first_msg"] == "Find the chess deck discussion"
+
+
 def test_codex_provider_lists_index_records(monkeypatch, tmp_path):
     state_path = tmp_path / "state.sqlite"
     history_path = tmp_path / "history.jsonl"
@@ -459,6 +525,82 @@ def test_codex_provider_lists_index_records(monkeypatch, tmp_path):
     assert records[0]["path"] == str(session_path)
     assert "paywall copy" in records[0]["last_msg"]
     assert "root cause in the signup gate" in records[0]["fields"]["asst_text"]
+
+
+def test_codex_provider_indexes_jsonl_session_without_state_row(monkeypatch, tmp_path):
+    sessions_dir = tmp_path / "sessions" / "2026" / "05" / "12"
+    sessions_dir.mkdir(parents=True)
+    session_path = sessions_dir / (
+        "rollout-2026-05-12T09-05-25-jsonl-only-session.jsonl"
+    )
+    subagent_path = sessions_dir / (
+        "rollout-2026-05-12T09-05-30-subagent-session.jsonl"
+    )
+    session_path.write_text(
+        "\n".join([
+            json.dumps({
+                "timestamp": "2026-05-12T08:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "jsonl-only-session",
+                    "cwd": "/Users/alice/code/codex-app",
+                    "thread_source": "user",
+                },
+            }),
+            json.dumps({
+                "timestamp": "2026-05-12T08:00:01.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "Find the Notion note about Neil's performance review.",
+                },
+            }),
+            json.dumps({
+                "timestamp": "2026-05-12T08:00:02.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "I found the matching Nevena strategy reset note.",
+                },
+            }),
+        ]) + "\n"
+    )
+    subagent_path.write_text(
+        "\n".join([
+            json.dumps({
+                "timestamp": "2026-05-12T08:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "subagent-session",
+                    "cwd": "/Users/alice/code/codex-app",
+                    "thread_source": "subagent",
+                },
+            }),
+            json.dumps({
+                "timestamp": "2026-05-12T08:00:01.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "This subagent transcript should stay hidden.",
+                },
+            }),
+        ]) + "\n"
+    )
+
+    monkeypatch.setattr(codex_provider, "CODEX_STATE_DB", str(tmp_path / "missing.sqlite"))
+    monkeypatch.setattr(codex_provider, "CODEX_HISTORY_PATH", str(tmp_path / "missing-history.jsonl"))
+    monkeypatch.setattr(codex_provider, "CODEX_SESSIONS_DIR", str(tmp_path / "sessions"))
+    codex_provider._CODEX_HISTORY_CACHE["mtime"] = None
+    codex_provider._CODEX_HISTORY_CACHE["entries"] = {}
+    codex_provider._CODEX_SESSION_TURNS_CACHE["entries"] = {}
+
+    records = codex_provider.list_index_records()
+
+    assert [record["session_id"] for record in records] == ["jsonl-only-session"]
+    assert records[0]["path"] == str(session_path)
+    assert records[0]["cwd"] == "/Users/alice/code/codex-app"
+    assert "Neil's performance review" in records[0]["first_msg"]
+    assert "nevena strategy reset note" in records[0]["fields"]["asst_text"]
 
 
 def test_codex_provider_transcript_turns_prefer_session_file(monkeypatch, tmp_path):

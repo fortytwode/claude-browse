@@ -316,10 +316,17 @@ def test_list_index_records_includes_codex(monkeypatch, tmp_path):
 
     empty_sessions_dir = tmp_path / "claude-projects"
     empty_sessions_dir.mkdir()
+    empty_codex_sessions_dir = tmp_path / "codex-sessions"
+    empty_codex_sessions_dir.mkdir()
 
     monkeypatch.setattr(core, "provider_ids", lambda **kwargs: ("codex",))
     monkeypatch.setattr(codex_provider, "CODEX_STATE_DB", str(state_path))
     monkeypatch.setattr(codex_provider, "CODEX_HISTORY_PATH", str(history_path))
+    monkeypatch.setattr(
+        codex_provider,
+        "CODEX_SESSIONS_DIR",
+        str(empty_codex_sessions_dir),
+    )
     monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(empty_sessions_dir))
     codex_provider._CODEX_HISTORY_CACHE["mtime"] = None
     codex_provider._CODEX_HISTORY_CACHE["entries"] = {}

@@ -145,6 +145,95 @@ def test_build_work_state_centers_matched_exchange_on_long_query_span(monkeypatc
     assert "This is not a blank-slate brief." not in assistant_excerpt
 
 
+def test_build_work_state_refines_unquoted_contiguous_phrase_to_exact_match(monkeypatch):
+    turns = [
+        ("user", "Can you compare the deck to Pok Pok?"),
+        (
+            "assistant",
+            'The call gives us their own words ("Guitar Hero for chess," '
+            '"skill floor"). This matches the open-on-call rule.',
+        ),
+        ("user", "Now add those changes to the deck."),
+    ]
+    monkeypatch.setattr(
+        work_state,
+        "get_provider",
+        lambda provider: SimpleNamespace(
+            display_name="Claude",
+            assistant_turns_available=True,
+            transcript_turns=lambda path, session_id: turns,
+        ),
+    )
+    monkeypatch.setattr(
+        work_state,
+        "inspect_repo_state",
+        lambda cwd: {"summary": "Branch `main` clean."},
+    )
+
+    state = work_state.build_work_state(
+        {
+            "provider": "claude",
+            "path": "/tmp/session.jsonl",
+            "session_id": "abc-123",
+            "cwd": "/home/alice/team-operations",
+            "name": "Triage ClickUp urgent review tasks",
+            "first_msg": "Can you compare the deck to Pok Pok?",
+            "match_label": "mentioned later",
+            "match_confidence": "low",
+        },
+        "Guitar Hero for chess",
+    )
+
+    assert state["match_label"] == "exact phrase"
+    assert state["match_confidence"] == "medium"
+
+
+def test_build_work_state_uses_backend_match_segment_idx_for_preview(monkeypatch):
+    turns = [
+        ("user", "Can you compare the deck?"),
+        ("assistant", "There is a bare Guitar Hero note here."),
+        ("user", "Now use the exact call language."),
+        (
+            "assistant",
+            'The call gives us their own words ("Guitar Hero for chess," '
+            '"skill floor").',
+        ),
+        ("user", "After that, update the appendix."),
+    ]
+    monkeypatch.setattr(
+        work_state,
+        "get_provider",
+        lambda provider: SimpleNamespace(
+            display_name="Claude",
+            assistant_turns_available=True,
+            transcript_turns=lambda path, session_id: turns,
+        ),
+    )
+    monkeypatch.setattr(
+        work_state,
+        "inspect_repo_state",
+        lambda cwd: {"summary": "Branch `main` clean."},
+    )
+
+    state = work_state.build_work_state(
+        {
+            "provider": "claude",
+            "path": "/tmp/session.jsonl",
+            "session_id": "abc-123",
+            "cwd": "/home/alice/team-operations",
+            "name": "Deck comparison",
+            "first_msg": "Can you compare the deck?",
+            "match_segment_idx": "4",
+        },
+        "guitar hero",
+    )
+
+    assistant_excerpt = state["matched_exchange"][1][1]
+    assert "Guitar Hero for chess" in assistant_excerpt
+    assert "bare Guitar Hero" not in assistant_excerpt
+    assert state["thread_continued_after_match"] is True
+
+
 def test_render_restart_card_terminal_surfaces_repo_state_and_matches():
     text = work_state.render_restart_card_terminal(
         {
