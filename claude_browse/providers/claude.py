@@ -17,6 +17,7 @@ from .common import (
 )
 
 SESSIONS_DIR = os.path.expanduser("~/.claude/projects")
+HISTORY_PATH = os.path.expanduser("~/.claude/history.jsonl")
 
 
 def has_local_state() -> bool:
@@ -174,7 +175,36 @@ def extract_search_corpus(jsonl_path: str) -> str:
 
 def list_session_files() -> list[str]:
     pattern = os.path.join(SESSIONS_DIR, "*", "*.jsonl")
-    return [path for path in glob.glob(pattern) if "/subagents/" not in path]
+    paths = set(glob.glob(pattern))
+    paths.update(_list_history_session_files())
+    return sorted(path for path in paths if "/subagents/" not in path)
+
+
+def _list_history_session_files() -> list[str]:
+    """Recover Claude sessions known to history but missed by directory walks."""
+    files: list[str] = []
+    if not os.path.exists(HISTORY_PATH):
+        return files
+
+    try:
+        with open(HISTORY_PATH) as f:
+            for line in f:
+                try:
+                    data = json.loads(line.strip())
+                except json.JSONDecodeError:
+                    continue
+                session_id = data.get("sessionId")
+                project = data.get("project")
+                if not session_id or not project:
+                    continue
+                project_dir = str(project).replace("/", "-")
+                path = os.path.join(SESSIONS_DIR, project_dir, f"{session_id}.jsonl")
+                if os.path.isfile(path):
+                    files.append(path)
+    except OSError:
+        return files
+
+    return files
 
 
 def list_index_records() -> list[dict[str, object]]:

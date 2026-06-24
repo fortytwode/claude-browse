@@ -31,6 +31,16 @@ def db():
         os.unlink(path)
 
 
+@pytest.fixture(autouse=True)
+def _dense_embeddings_off_by_default(monkeypatch):
+    monkeypatch.delenv("CLAUDE_BROWSE_DENSE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_BROWSE_EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("CLAUDE_BROWSE_EMBEDDING_DIMENSIONS", raising=False)
+    monkeypatch.delenv("CLAUDE_BROWSE_EMBEDDING_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("CLAUDE_BROWSE_DENSE_MIN_SCORE", raising=False)
+
+
 def _seed(conn, sid: str, corpus: str, **meta) -> None:
     """Insert one session with a synthetic corpus, bypassing the file walk.
 
@@ -102,6 +112,20 @@ def _seed(conn, sid: str, corpus: str, **meta) -> None:
             (cur.lastrowid, sid, role, idx, segment_ts, text),
         )
     conn.commit()
+
+
+def _refresh_semantic(conn) -> None:
+    for (sid,) in conn.execute("SELECT sid FROM sessions").fetchall():
+        fts._reindex_semantic_windows_from_segments(conn, sid)
+    fts._refresh_semantic_index(conn)
+    conn.commit()
+
+
+def _dense_vector_for_text(text: str) -> list[float]:
+    lowered = text.lower()
+    if "ravi" in lowered or "performance review" in lowered:
+        return [1.0, 0.0]
+    return [0.0, 1.0]
 
 
 # --- normalize_query -------------------------------------------------------
@@ -226,8 +250,114 @@ def test_search_ranked_no_hit_falls_back_to_last_token_prefix(db):
 
     assert [r["session_id"] for r in results] == ["candidate_review"]
     assert results[0]["prefix_fallback"] is True
+    assert "phrase_fallback" not in results[0]
     assert results[0]["prefix_fallback_from"] == "ayan, kar"
     assert results[0]["prefix_fallback_terms"] == "ayan, kar*"
+
+
+def test_search_ranked_unfinished_quoted_phrase_falls_back_to_last_word_prefix(db):
+    _seed(
+        db,
+        "chess_pitch",
+        'The call described the game as "Guitar Hero for chess" and named the skill floor.',
+        timestamp="2026-06-02T00:00:00Z",
+        last_timestamp="2026-06-02T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                'The call described the game as "Guitar Hero for chess" and named the skill floor.',
+                "2026-06-02T01:00:00Z",
+            ),
+        ],
+    )
+    _seed(
+        db,
+        "noise_che",
+        "The unrelated training thread mentioned Guitar Hero for CHE certification. Checklist follows.",
+        timestamp="2026-06-03T00:00:00Z",
+        last_timestamp="2026-06-03T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                "The unrelated training thread mentioned Guitar Hero for CHE certification. Checklist follows.",
+                "2026-06-03T01:00:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, '"Guitar Hero for che')
+
+    assert [r["session_id"] for r in results][:2] == ["chess_pitch", "noise_che"]
+    assert results[0]["prefix_fallback"] is True
+    assert "phrase_fallback" not in results[0]
+    assert results[0]["prefix_fallback_from"] == "guitar hero for che"
+    assert results[0]["prefix_fallback_terms"] == "guitar, hero, che*"
+
+
+def test_search_ranked_unfinished_quote_demotes_search_diagnostic_artifact(db):
+    _seed(
+        db,
+        "source_thread",
+        'The call described the game as "Guitar Hero for chess" and named the skill floor.',
+        timestamp="2026-06-02T00:00:00Z",
+        last_timestamp="2026-06-02T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                'The call described the game as "Guitar Hero for chess" and named the skill floor.',
+                "2026-06-02T01:00:00Z",
+            ),
+        ],
+    )
+    _seed(
+        db,
+        "diagnostic_artifact",
+        "claude-browse diagnostic: search_ranked returns Guitar Hero for chess at rank 1.",
+        timestamp="2026-06-03T00:00:00Z",
+        last_timestamp="2026-06-03T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                "claude-browse diagnostic: search_ranked returns Guitar Hero for chess at rank 1.",
+                "2026-06-03T01:00:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, '"Guitar Hero for che')
+
+    assert results[0]["session_id"] == "source_thread"
+    assert "diagnostic_artifact" not in [r["session_id"] for r in results]
+
+
+def test_search_ranked_partial_phrase_prefers_continuation_context(db):
+    _seed(
+        db,
+        "source_thread",
+        'The call gives us their own words ("Guitar Hero for chess," "skill floor"). '
+        "Later I reused the shorter Guitar Hero label in a heading.",
+        segments=[
+            (
+                "assistant",
+                'The call gives us their own words ("Guitar Hero for chess," "skill floor").',
+                "2026-06-02T01:00:00Z",
+            ),
+            ("user", "Now update a different part of the deck.", "2026-06-02T01:10:00Z"),
+            ("assistant", "I changed the investment slide.", "2026-06-02T01:12:00Z"),
+            (
+                "assistant",
+                "Later I reused the shorter Guitar Hero label in a heading.",
+                "2026-06-02T01:20:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, "guitar hero")
+
+    assert results[0]["session_id"] == "source_thread"
+    context = results[0]["context"].replace("\x01", "").replace("\x02", "")
+    assert "Guitar Hero for chess" in context
+    assert "shorter Guitar Hero" not in context
 
 
 def test_search_ranked_phrase_fallback_prefers_compact_phrase_match(db):
@@ -679,7 +809,8 @@ def test_search_ranked_demotes_self_referential_debug_threads(db):
     )
 
     results = fts.search_ranked(db, "Neil performance with Nevena")
-    assert [r["session_id"] for r in results][:2] == ["real_thread", "debug_thread"]
+    assert results[0]["session_id"] == "real_thread"
+    assert "debug_thread" not in [r["session_id"] for r in results]
 
 
 def test_search_ranked_demotes_imported_session_artifacts(db):
@@ -862,7 +993,8 @@ def test_search_ranked_demotes_session_handover_artifacts(db):
     )
 
     results = fts.search_ranked(db, "last closeout session for Musopia")
-    assert [r["session_id"] for r in results][:2] == ["closeout_thread", "handover_thread"]
+    assert results[0]["session_id"] == "closeout_thread"
+    assert "handover_thread" not in [r["session_id"] for r in results]
 
 
 def test_search_ranked_uses_metadata_anchor_score_for_feedback_queries(db):
@@ -1245,6 +1377,143 @@ def test_search_ranked_descriptive_query_matches_local_window(db):
     assert "Nevena" in results[0]["context"]
 
 
+def test_search_ranked_exact_url_matches_codex_transcript(db):
+    page_id = "38652e2d5fd981c7ad1ad62e7dc0743e"
+    url = (
+        "https://app.notion.com/p/rocketshiphq/"
+        "Note-to-Nevena-creative-strategy-reset-the-Neil-conversation-"
+        f"{page_id}?source=copy_link"
+    )
+    _seed(
+        db,
+        "codex_url_thread",
+        f"Please inspect this Notion page: {url}",
+        provider="codex",
+        title="Note to Nevena creative strategy reset",
+        first_msg=f"Please inspect this Notion page: {url}",
+        segments=[
+            (
+                "user",
+                f"Please inspect this Notion page: {url}",
+                "2026-05-12T00:00:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, page_id)
+
+    assert results[0]["session_id"] == "codex_url_thread"
+    assert results[0]["exact_identifier_match"] == page_id
+    assert page_id in results[0]["context"]
+
+
+def test_search_ranked_descriptive_query_uses_semantic_window(db):
+    query = "Hey, please look at the thread when I had a discussion about Neil's performance."
+    plan = build_query_plan(query)
+    assert "hey" in plan.anchor_terms
+    assert "when" in plan.anchor_terms
+
+    for idx in range(5):
+        _seed(
+            db,
+            f"generic_{idx}",
+            "hey when should we look at the planning thread",
+            timestamp=f"2026-05-1{idx}T00:00:00Z",
+            last_timestamp=f"2026-05-1{idx}T00:05:00Z",
+        )
+    _seed(
+        db,
+        "target_thread",
+        "Neil performance review with Nevena focused on feedback and support.",
+        timestamp="2026-05-09T00:00:00Z",
+        last_timestamp="2026-05-09T00:05:00Z",
+        segments=[
+            (
+                "user",
+                "Neil performance review with Nevena focused on feedback and support.",
+                "2026-05-09T00:00:00Z",
+            ),
+        ],
+    )
+    _refresh_semantic(db)
+
+    results = fts.search_ranked(db, query)
+
+    assert results[0]["session_id"] == "target_thread"
+    assert results[0]["match_semantic_score"] > 0
+
+
+def test_dense_embedding_sync_disabled_does_not_call_api(db, monkeypatch):
+    _seed(db, "local_thread", "Local transcript window about a roadmap decision.")
+    _refresh_semantic(db)
+
+    def fail_embeddings(texts, *, model, dimensions):
+        raise AssertionError("embedding API should not be called by default")
+
+    monkeypatch.setattr(fts, "_request_openai_embeddings", fail_embeddings)
+
+    fts._sync_dense_embeddings(db)
+
+    count = db.execute("SELECT COUNT(*) FROM dense_embeddings").fetchone()[0]
+    assert count == 0
+
+
+def test_dense_embedding_sync_skips_unchanged_windows(db, monkeypatch):
+    monkeypatch.setenv("CLAUDE_BROWSE_DENSE_EMBEDDINGS", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("CLAUDE_BROWSE_EMBEDDING_DIMENSIONS", "2")
+    _seed(db, "target_thread", "We discussed Ravi's support plan and manager feedback.")
+    _seed(db, "noise_thread", "We planned the billing dashboard rollout.")
+    _refresh_semantic(db)
+    calls = []
+
+    def fake_embeddings(texts, *, model, dimensions):
+        calls.append(list(texts))
+        return [_dense_vector_for_text(text) for text in texts]
+
+    monkeypatch.setattr(fts, "_request_openai_embeddings", fake_embeddings)
+
+    fts._sync_dense_embeddings(db)
+    fts._sync_dense_embeddings(db)
+
+    assert len(calls) == 1
+    assert len(calls[0]) == 2
+
+
+def test_search_ranked_uses_dense_embeddings_when_enabled(db, monkeypatch):
+    monkeypatch.setenv("CLAUDE_BROWSE_DENSE_EMBEDDINGS", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("CLAUDE_BROWSE_EMBEDDING_DIMENSIONS", "2")
+    _seed(
+        db,
+        "target_thread",
+        "We discussed Ravi's support plan and manager feedback.",
+        timestamp="2026-05-09T00:00:00Z",
+        last_timestamp="2026-05-09T00:05:00Z",
+    )
+    _seed(
+        db,
+        "noise_thread",
+        "We planned the billing dashboard rollout.",
+        timestamp="2026-05-10T00:00:00Z",
+        last_timestamp="2026-05-10T00:05:00Z",
+    )
+    _refresh_semantic(db)
+
+    def fake_embeddings(texts, *, model, dimensions):
+        assert dimensions == 2
+        return [_dense_vector_for_text(text) for text in texts]
+
+    monkeypatch.setattr(fts, "_request_openai_embeddings", fake_embeddings)
+
+    fts._sync_dense_embeddings(db)
+    results = fts.search_ranked(db, "performance review discussion for Ravi")
+
+    assert results[0]["session_id"] == "target_thread"
+    assert results[0]["match_dense_score"] > 0.9
+    assert results[0]["match_source"] == "dense"
+
+
 def test_search_ranked_phrase_highlight_prefers_long_query_span(db):
     _seed(
         db,
@@ -1448,6 +1717,52 @@ def test_reindex_keeps_session_when_same_sid_moves_paths(db, tmp_path, monkeypat
     assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
     assert removed == 0
     assert added + updated == 1
+
+
+def test_reindex_dedupes_duplicate_session_ids(db, tmp_path, monkeypatch):
+    sid = "duplicate-session-id"
+    old_path = str(tmp_path / "old.jsonl")
+    new_path = str(tmp_path / "new.jsonl")
+
+    def _record(path: str, timestamp: str, mtime: float) -> dict[str, object]:
+        return {
+            "path": path,
+            "provider": "claude",
+            "session_id": sid,
+            "first_msg": "Please inspect the duplicated thread",
+            "last_msg": "The newer transcript should win",
+            "timestamp": timestamp,
+            "last_timestamp": timestamp,
+            "cwd": "/Users/alice/code/webapp",
+            "name": "Duplicated thread",
+            "msg_count": 2,
+            "mtime": mtime,
+            "fields": {
+                "cwd": "/users/alice/code/webapp",
+                "title": "duplicated thread",
+                "first_msg": "please inspect the duplicated thread",
+                "user_text": "please inspect the duplicated thread",
+                "asst_text": "the newer transcript should win",
+                "boilerplate": "",
+            },
+        }
+
+    records = [
+        _record(old_path, "2026-04-01T10:00:00Z", 1.0),
+        _record(new_path, "2026-04-01T10:10:00Z", 2.0),
+    ]
+    monkeypatch.setattr(fts, "list_index_records", lambda: records)
+
+    added, updated, removed = fts.reindex(db)
+    added2, updated2, removed2 = fts.reindex(db)
+
+    row = db.execute(
+        "SELECT sid, path FROM sessions WHERE sid = ?",
+        (sid,),
+    ).fetchone()
+    assert (added, updated, removed) == (1, 0, 0)
+    assert (added2, updated2, removed2) == (0, 0, 0)
+    assert row == (sid, new_path)
 
 
 def test_get_by_sid_roundtrip(db):

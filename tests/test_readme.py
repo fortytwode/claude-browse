@@ -31,9 +31,9 @@ def test_readme_documents_target_app_browsers():
     assert "Ctrl-H" in text
     assert "Ctrl-U" in text
     assert "Find thread where..." in text
-    assert "where i was asking nevena about feedback" in text
-    assert "last closeout session for musopia" in text
-    assert "Looking for: musopia + closeout" in text
+    assert "where i was asking about teammate feedback" in text
+    assert "last closeout session for client" in text
+    assert "Looking for: client + closeout" in text
     assert "add one anchor" in text.lower()
     assert "local concept cues" in text.lower()
     assert "trust/provenance tags" in text.lower()

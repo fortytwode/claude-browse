@@ -74,6 +74,8 @@ def test_format_row_keeps_sid_tail_attached():
     assert row.rstrip().endswith(
         f"abc-123{browse.ROW_META_SEP}/home/alice/proj{browse.ROW_META_SEP}claude"
         f"{browse.ROW_META_SEP}mentioned later{browse.ROW_META_SEP}{browse.ROW_META_SEP}medium"
+        f"{browse.ROW_META_SEP}"
+        f"{browse.ROW_META_SEP}anything"
     )
 
 
@@ -127,6 +129,46 @@ def test_format_row_labels_prefix_fallback_results():
     row = format_row(info, query="ayan kar")
 
     assert "prefix match" in row
+
+
+def test_format_row_labels_exact_phrase_context_results():
+    info = _info(
+        context='The call said "\x01Guitar Hero for chess\x02" and named the skill floor.',
+        timestamp="2026-06-21T10:00:00Z",
+        last_timestamp="2026-06-21T10:00:00Z",
+    )
+
+    row = format_row(info, query='"Guitar Hero for chess"')
+
+    assert "exact phrase" in row
+    assert "high" in row
+
+
+def test_format_row_labels_unquoted_contiguous_phrase_context_results():
+    info = _info(
+        context='The call said "\x01Guitar Hero for chess\x02" and named the skill floor.',
+        timestamp="2026-06-21T10:00:00Z",
+        last_timestamp="2026-06-21T10:00:00Z",
+    )
+
+    row = format_row(info, query="Guitar Hero for chess")
+
+    assert "exact phrase" in row
+    assert "high" in row
+
+
+def test_format_row_lowers_exact_phrase_confidence_when_thread_moved_on():
+    info = _info(
+        context='The call said "\x01Guitar Hero for chess\x02" and named the skill floor.',
+        timestamp="2026-06-21T10:00:00Z",
+        last_timestamp="2026-06-22T10:00:00Z",
+        match_timestamp="2026-06-21T10:05:00Z",
+    )
+
+    row = format_row(info, query='"Guitar Hero for chess"')
+
+    assert "exact phrase" in row
+    assert "medium" in row
 
 
 def test_format_row_shows_opening_match_when_anchor_is_in_first_message():
@@ -234,7 +276,30 @@ def test_decode_row_metadata_exposes_match_provenance_fields():
         "match_label": "primary subject",
         "match_timestamp": "2026-05-12T10:00:00Z",
         "match_confidence": "high",
+        "match_segment_idx": "",
+        "query": "",
     }
+
+
+def test_format_row_carries_query_for_preview_context():
+    row = format_row(
+        _info(context='call said "\x01Guitar Hero for chess\x02"'),
+        query='"Guitar Hero for chess"',
+    )
+    meta = browse._decode_row_metadata(row)
+    assert meta["query"] == '"Guitar Hero for chess"'
+
+
+def test_format_row_carries_match_segment_idx_for_preview_context():
+    row = format_row(
+        _info(
+            context='call said "\x01Guitar Hero for chess\x02"',
+            match_segment_idx=7,
+        ),
+        query='"Guitar Hero for chess"',
+    )
+    meta = browse._decode_row_metadata(row)
+    assert meta["match_segment_idx"] == "7"
 
 
 def test_format_query_coach_row_suggests_anchor_summary_for_descriptive_query():
@@ -282,7 +347,7 @@ def test_render_query_coach_preview_shows_phrase_no_hit_fallback():
 def test_render_query_coach_preview_handles_low_confidence_query():
     preview = browse.render_query_coach_preview("that we discussed, please?")
     assert "Add one concrete anchor" in preview
-    assert "nevena feedback" in preview
+    assert "teammate feedback" in preview
 
 
 def test_write_search_script_reads_query_from_fzf_env(tmp_path):
@@ -304,7 +369,7 @@ def test_write_search_script_reads_query_from_fzf_env(tmp_path):
     assert 'sys.argv[1]' not in text
 
 
-def test_write_preview_script_reads_query_from_fzf_env(tmp_path):
+def test_write_preview_script_reads_query_from_row_metadata_with_fzf_env_fallback(tmp_path):
     script_path = tmp_path / "preview.py"
     browse._write_preview_script(
         str(script_path),
@@ -312,7 +377,10 @@ def test_write_preview_script_reads_query_from_fzf_env(tmp_path):
         "/tmp/pkg",
     )
     text = script_path.read_text()
-    assert 'query = os.environ.get("FZF_QUERY", "")' in text
+    assert '(row_meta or {}).get("query", "")' in text
+    assert 'or os.environ.get("FZF_QUERY", "")' in text
+    assert '"match_segment_idx": row_meta.get("match_segment_idx", "")' in text
+    assert "query.strip().strip" in text
     assert 'sys.argv[2]' not in text
 
 

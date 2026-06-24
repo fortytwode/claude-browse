@@ -76,6 +76,8 @@ def _encode_row_metadata(
     match_label: str = "",
     match_timestamp: str = "",
     match_confidence: str = "",
+    match_segment_idx: str = "",
+    query: str = "",
 ) -> str:
     parts = (
         visible,
@@ -85,6 +87,8 @@ def _encode_row_metadata(
         _sanitize_row_meta_value(match_label),
         _sanitize_row_meta_value(match_timestamp),
         _sanitize_row_meta_value(match_confidence),
+        _sanitize_row_meta_value(match_segment_idx),
+        _sanitize_row_meta_value(query),
     )
     return ROW_META_SEP.join(parts)
 
@@ -102,12 +106,14 @@ def _sanitize_row_meta_value(value: object) -> str:
 def _decode_row_metadata(line: str) -> dict[str, str] | None:
     if ROW_META_SEP not in line:
         return None
-    parts = line.rsplit(ROW_META_SEP, 6)
+    parts = line.rsplit(ROW_META_SEP, 8)
     if len(parts) == 4:
         visible, sid, cwd, provider = parts
         match_label = ""
         match_timestamp = ""
         match_confidence = ""
+        match_segment_idx = ""
+        query = ""
     elif len(parts) == 7:
         (
             visible,
@@ -117,6 +123,32 @@ def _decode_row_metadata(line: str) -> dict[str, str] | None:
             match_label,
             match_timestamp,
             match_confidence,
+        ) = parts
+        match_segment_idx = ""
+        query = ""
+    elif len(parts) == 8:
+        (
+            visible,
+            sid,
+            cwd,
+            provider,
+            match_label,
+            match_timestamp,
+            match_confidence,
+            query,
+        ) = parts
+        match_segment_idx = ""
+    elif len(parts) == 9:
+        (
+            visible,
+            sid,
+            cwd,
+            provider,
+            match_label,
+            match_timestamp,
+            match_confidence,
+            match_segment_idx,
+            query,
         ) = parts
     else:
         return None
@@ -128,6 +160,8 @@ def _decode_row_metadata(line: str) -> dict[str, str] | None:
         "match_label": match_label.strip(),
         "match_timestamp": match_timestamp.strip(),
         "match_confidence": match_confidence.strip(),
+        "match_segment_idx": match_segment_idx.strip(),
+        "query": query.strip(),
     }
 
 
@@ -188,6 +222,23 @@ def _match_provenance(info: Mapping[str, object], query: str) -> dict[str, str]:
         return {
             "match_label": "prefix match",
             "match_confidence": "medium",
+        }
+
+    context_text = (
+        str(info.get("context") or "")
+        .replace("\x01", "")
+        .replace("\x02", "")
+        .lower()
+    )
+    phrase_candidates = [
+        term
+        for term in (*plan.exact_phrase_terms, *plan.highlight_terms)
+        if " " in term
+    ]
+    if any(term and term in context_text for term in phrase_candidates):
+        return {
+            "match_label": "exact phrase",
+            "match_confidence": "medium" if drifted else "high",
         }
 
     if len(anchor_terms) == 1:
@@ -259,6 +310,7 @@ def format_query_coach_row(query: str) -> str | None:
         COACH_SESSION_ID,
         "",
         COACH_PROVIDER,
+        query=query,
     )
 
 
@@ -270,9 +322,9 @@ def render_query_coach_preview(query: str) -> str:
             "Query coaching\n\n"
             "Describe the thread you want in a short sentence.\n\n"
             "Examples:\n"
-            "  where i was asking nevena about feedback\n"
-            "  last closeout session for musopia\n"
-            "  pokpok brief where we questioned the opportunities"
+            "  where i was asking about teammate feedback\n"
+            "  last closeout session for client\n"
+            "  brand brief where we questioned the opportunities"
         )
 
     lines = ["Query coaching", "", _query_coach_summary(plan)]
@@ -284,9 +336,9 @@ def render_query_coach_preview(query: str) -> str:
                 "Good anchors: person, client, brand, folder, or exact phrase.",
                 "",
                 "Try something like:",
-                "  nevena feedback",
-                "  musopia closeout",
-                "  pokpok opportunities",
+                "  teammate feedback",
+                "  client closeout",
+                "  brand opportunities",
             ]
         )
         return "\n".join(lines)
@@ -464,6 +516,8 @@ def format_row(
             match_label=provenance["match_label"],
             match_timestamp=str(info.get("match_timestamp") or ""),
             match_confidence=provenance["match_confidence"],
+            match_segment_idx=str(info.get("match_segment_idx") or ""),
+            query=query,
         )
     else:
         msgs = f"{info.get('msg_count', 0)}msg"
@@ -491,6 +545,8 @@ def format_row(
         match_label=provenance["match_label"],
         match_timestamp=str(info.get("match_timestamp") or ""),
         match_confidence=provenance["match_confidence"],
+        match_segment_idx=str(info.get("match_segment_idx") or ""),
+        query=query,
     )
 
 
@@ -596,6 +652,7 @@ def get_preview(row_meta, query=""):
             "match_label": row_meta.get("match_label", ""),
             "match_timestamp": row_meta.get("match_timestamp", ""),
             "match_confidence": row_meta.get("match_confidence", ""),
+            "match_segment_idx": row_meta.get("match_segment_idx", ""),
         }},
         query,
     )
@@ -625,7 +682,8 @@ def get_preview(row_meta, query=""):
             if b
         ]
         suffix = (" (" + " · ".join(bits) + ")") if bits else ""
-        print(hl('Matches "' + query + '"' + suffix + ":"))
+        query_label = query.strip().strip('"') or query.strip()
+        print(hl('Matches "' + query_label + '"' + suffix + ":"))
         print()
         for role, text in lead:
             label = "User" if role == "user" else "Assistant"
@@ -656,8 +714,11 @@ def get_preview(row_meta, query=""):
 
 if __name__ == "__main__":
     line = sys.argv[1] if len(sys.argv) > 1 else ""
-    query = os.environ.get("FZF_QUERY", "")
     row_meta = _decode_row_metadata(line)
+    query = (
+        (row_meta or {{}}).get("query", "")
+        or os.environ.get("FZF_QUERY", "")
+    )
     if row_meta and row_meta.get("session_id"):
         get_preview(row_meta, query)
 """
@@ -862,9 +923,9 @@ def _build_fzf_cmd(
         "--prompt=Find thread where... ",
         (
             "--header="
-            'Type a sentence, not just keywords. Try: "where i was asking nevena about feedback" | '
-            '"last closeout session for musopia" | '
-            '"pokpok brief where we questioned the opportunities". '
+            'Type a sentence, not just keywords. Try: "where i was asking about teammate feedback" | '
+            '"last closeout session for client" | '
+            '"brand brief where we questioned the opportunities". '
             f"Enter: resume in {target_name} (yolo) | "
             f"Ctrl-O: resume in {target_name} immediately | "
             f"Ctrl-T: re-enter matched topic in {target_name} | "
@@ -965,9 +1026,9 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         "  -h, --help            Show this help\n"
         "\n"
         "Type a sentence inside the picker, not just one or two words:\n"
-        "  pokpok brief where we questioned the opportunities\n"
-        "  where i was asking nevena about feedback\n"
-        "  last closeout session for musopia\n"
+        "  brand brief where we questioned the opportunities\n"
+        "  where i was asking about teammate feedback\n"
+        "  last closeout session for client\n"
         '  "runna sca2"          Exact phrase when you know the words already\n'
         "  runna*                Prefix match: runna, runnathon, runna2026, ...\n"
         "  Longer descriptive queries are reduced to the most specific anchors.\n"

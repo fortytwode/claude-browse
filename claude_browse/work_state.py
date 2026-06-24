@@ -30,6 +30,23 @@ _QUESTION_STARTERS = (
     "have ",
     "has ",
 )
+_PHRASE_CONTINUATION_CONNECTORS = frozenset(
+    {
+        "about",
+        "and",
+        "as",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "of",
+        "on",
+        "or",
+        "to",
+        "with",
+    }
+)
 
 def _word_overlap(a: str, b: str) -> int:
     left = {word for word in a.lower().split() if len(word) >= 4}
@@ -96,6 +113,28 @@ def _query_match_terms(selection_query: str) -> list[str]:
     return [term.lower() for term in plan.highlight_terms if term.strip()]
 
 
+def _phrase_continuation_score(text: str, selection_query: str) -> int:
+    plan = build_query_plan(selection_query)
+    phrase_terms = [
+        term
+        for term in (*plan.exact_phrase_terms, *plan.highlight_terms)
+        if " " in term and not term.endswith("*")
+    ]
+    if not phrase_terms:
+        return 0
+
+    best = 0
+    for phrase in phrase_terms:
+        for _start, end in term_spans(text, phrase):
+            after = text[end : end + 40].lstrip(" \t\r\n\"'.,;:)-]")
+            if not after or not after[0].isalnum():
+                continue
+            first_word = after.split(None, 1)[0].strip(".,;:!?)]}\"'").lower()
+            if first_word in _PHRASE_CONTINUATION_CONNECTORS:
+                best = 1
+    return best
+
+
 def _excerpt_around_terms(
     text: str,
     terms: list[str],
@@ -148,10 +187,12 @@ def _exchange_for_index(
 def _exchange_match_score(
     exchange: list[tuple[str, str]],
     lowered_terms: list[str],
-) -> tuple[int, int]:
+    selection_query: str,
+) -> tuple[int, int, int]:
     combined = " ".join(text.lower() for _role, text in exchange)
     term_count = sum(1 for term in lowered_terms if text_contains_term(combined, term))
-    return term_count, -len(combined)
+    continuation = _phrase_continuation_score(combined, selection_query)
+    return term_count, continuation, -len(combined)
 
 
 def _latest_match_index(
@@ -162,17 +203,42 @@ def _latest_match_index(
     if not terms:
         return None
 
-    ranked: list[tuple[int, int, int, int]] = []
+    ranked: list[tuple[int, int, int, int, int]] = []
     for idx in range(len(turns) - 1, -1, -1):
         role, text = turns[idx]
         if any(text_contains_term(text, term) for term in terms):
             exchange = _exchange_for_index(turns, idx)
-            term_count, brevity = _exchange_match_score(exchange, terms)
-            ranked.append((term_count, brevity, 1 if role == "assistant" else 0, idx))
+            term_count, continuation, brevity = _exchange_match_score(
+                exchange,
+                terms,
+                selection_query,
+            )
+            ranked.append(
+                (
+                    term_count,
+                    continuation,
+                    brevity,
+                    1 if role == "assistant" else 0,
+                    idx,
+                )
+            )
     if not ranked:
         return None
     ranked.sort(reverse=True)
-    return ranked[0][3]
+    return ranked[0][4]
+
+
+def _match_index_from_segment_idx(
+    turns: list[tuple[str, str]],
+    segment_idx: object,
+) -> int | None:
+    try:
+        idx = int(str(segment_idx or "").strip()) - 1
+    except (TypeError, ValueError):
+        return None
+    if 0 <= idx < len(turns):
+        return idx
+    return None
 
 
 def _matched_exchange(
@@ -187,6 +253,37 @@ def _matched_exchange(
         (role, _excerpt_around_terms(text, terms))
         for role, text in _exchange_for_index(turns, match_index)
     ]
+
+
+def _refined_match_provenance(
+    selection_query: str,
+    matched_exchange: list[tuple[str, str]],
+    match_label: str,
+    match_confidence: str,
+    *,
+    thread_continued_after_match: bool,
+) -> tuple[str, str]:
+    if not selection_query.strip() or not matched_exchange:
+        return match_label, match_confidence
+    if match_label in {"prefix match", "near phrase"}:
+        return match_label, match_confidence
+
+    plan = build_query_plan(selection_query)
+    phrase_terms = [
+        term
+        for term in (*plan.exact_phrase_terms, *plan.highlight_terms)
+        if " " in term and not term.endswith("*")
+    ]
+    if not phrase_terms:
+        return match_label, match_confidence
+
+    combined = " ".join(text for _role, text in matched_exchange).lower()
+    if any(term_spans(combined, term) for term in phrase_terms):
+        return (
+            "exact phrase",
+            "medium" if thread_continued_after_match else "high",
+        )
+    return match_label, match_confidence
 
 
 def _post_match_recent_turns(
@@ -318,11 +415,28 @@ def build_work_state(
     last_meaningful_user = _latest_user_turn(turns, substantive_only=True)
     latest_assistant = _latest_assistant_turn(turns)
     current_task = _current_task(title, first_msg, last_meaningful_user)
-    latest_match_index = _latest_match_index(turns, selection_query)
+    row_match_index = _match_index_from_segment_idx(
+        turns,
+        session.get("match_segment_idx"),
+    )
+    latest_match_index = (
+        row_match_index
+        if selection_query.strip() and row_match_index is not None
+        else _latest_match_index(turns, selection_query)
+    )
     matched_exchange = _matched_exchange(turns, latest_match_index, selection_query)
     likely_open_question = _likely_open_question(turns)
     thread_continued_after_match = bool(
         latest_match_index is not None and latest_match_index < len(turns) - 1
+    )
+    match_label = str(session.get("match_label") or "")
+    match_confidence = str(session.get("match_confidence") or "")
+    match_label, match_confidence = _refined_match_provenance(
+        selection_query,
+        matched_exchange,
+        match_label,
+        match_confidence,
+        thread_continued_after_match=thread_continued_after_match,
     )
     topic_shifted = bool(
         current_task and first_msg and _word_overlap(current_task, first_msg) <= 1
@@ -342,9 +456,9 @@ def build_work_state(
         "provider_name": spec.display_name,
         "session_title": title,
         "opening_topic": first_msg,
-        "match_label": str(session.get("match_label") or ""),
+        "match_label": match_label,
         "match_timestamp": str(session.get("match_timestamp") or ""),
-        "match_confidence": str(session.get("match_confidence") or ""),
+        "match_confidence": match_confidence,
         "current_task": current_task,
         "last_meaningful_user": last_meaningful_user,
         "latest_assistant": latest_assistant,
