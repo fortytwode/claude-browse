@@ -99,7 +99,7 @@ def log_event(event: str, payload: dict[str, Any] | None = None) -> None:
         return
 
 
-def _summarize_result(row: dict[str, Any], rank: int) -> dict[str, Any]:
+def _summarize_result(row: dict[str, Any], rank: int | None) -> dict[str, Any]:
     return {
         "rank": rank,
         "session_id": _safe_text(row.get("session_id"), 80),
@@ -114,6 +114,7 @@ def _summarize_result(row: dict[str, Any], rank: int) -> dict[str, Any]:
         "current_cwd_score": row.get("current_cwd_score"),
         "prefix_fallback": bool(row.get("prefix_fallback")),
         "phrase_fallback": bool(row.get("phrase_fallback")),
+        "retokenize_fallback": bool(row.get("retokenize_fallback")),
         "message_count": row.get("msg_count"),
     }
 
@@ -152,6 +153,30 @@ def log_search(
     log_event("search", payload)
 
 
+def _find_selection_rank(query: str, session_id: str) -> int | None:
+    """Recover the rank the user actually picked.
+
+    The picker only hands back the selected line, not its list position; the
+    per-keystroke search event that painted the list carries the top rows, so
+    join the selection against the latest search event for the same query.
+    None when unknown (no logged search — e.g. an empty-query pick straight
+    off the initial paint — or the selection sat below the logged top-N).
+    """
+    if not session_id:
+        return None
+    query_text = _safe_text(query, 500)
+    for event in reversed(recent_events(limit=200)):
+        if event.get("event") != "search":
+            continue
+        if event.get("query") != query_text:
+            continue
+        for entry in event.get("top") or []:
+            if entry.get("session_id") == session_id:
+                return entry.get("rank")
+        return None
+    return None
+
+
 def log_selection(
     query: str,
     *,
@@ -160,11 +185,14 @@ def log_selection(
     session: dict[str, Any],
 ) -> None:
     try:
+        rank = _find_selection_rank(
+            query, _safe_text(session.get("session_id"), 80)
+        )
         payload = {
             "query": _safe_text(query, 500),
             "action": action,
             "target_provider": _safe_text(target_provider, 32),
-            "selected": _summarize_result(session, 1),
+            "selected": _summarize_result(session, rank),
         }
     except Exception:
         return

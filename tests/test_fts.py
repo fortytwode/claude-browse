@@ -294,6 +294,96 @@ def test_search_ranked_unfinished_quoted_phrase_falls_back_to_last_word_prefix(d
     assert results[0]["prefix_fallback_terms"] == "guitar, hero, che*"
 
 
+def test_search_ranked_glued_punctuation_falls_back_to_retokenized_terms(db):
+    _seed(
+        db,
+        "bounty_design",
+        "The op design doc covers the bounty coin payout flow.",
+        timestamp="2026-06-28T00:00:00Z",
+        last_timestamp="2026-06-28T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                "The op design doc covers the bounty coin payout flow.",
+                "2026-06-28T01:00:00Z",
+            ),
+        ],
+    )
+
+    # Terminal-typed parens glue into the token `op(the`, which matches
+    # nothing even though every word is in the corpus.
+    results = fts.search_ranked(db, "op(the bounty coin)")
+
+    assert [r["session_id"] for r in results] == ["bounty_design"]
+    assert results[0]["retokenize_fallback"] is True
+    assert "op(the" in results[0]["retokenize_fallback_from"]
+    assert "bounty" in results[0]["retokenize_fallback_terms"]
+
+
+def test_search_ranked_overtyped_token_falls_back_to_trimmed_prefix(db):
+    _seed(
+        db,
+        "tiktok_pipeline",
+        "Set up the tiktok creator pipeline for the ads review.",
+        timestamp="2026-06-28T00:00:00Z",
+        last_timestamp="2026-06-28T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                "Set up the tiktok creator pipeline for the ads review.",
+                "2026-06-28T01:00:00Z",
+            ),
+        ],
+    )
+
+    # `tiktoker` overshoots the indexed token; appending `*` can't recover
+    # it, only trimming back to `tiktok*` can.
+    results = fts.search_ranked(db, "tiktoker")
+
+    assert [r["session_id"] for r in results] == ["tiktok_pipeline"]
+    assert results[0]["prefix_fallback"] is True
+    assert results[0]["prefix_fallback_from"] == "tiktoker"
+    assert results[0]["prefix_fallback_terms"] == "tiktok*"
+
+
+def test_search_ranked_suffix_trim_never_displaces_strict_matches(db):
+    _seed(
+        db,
+        "exact_hit",
+        "The tiktoker outreach list is ready.",
+        timestamp="2026-06-28T00:00:00Z",
+        last_timestamp="2026-06-28T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                "The tiktoker outreach list is ready.",
+                "2026-06-28T01:00:00Z",
+            ),
+        ],
+    )
+    _seed(
+        db,
+        "trim_only",
+        "Set up the tiktok creator pipeline for the ads review.",
+        timestamp="2026-06-29T00:00:00Z",
+        last_timestamp="2026-06-29T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                "Set up the tiktok creator pipeline for the ads review.",
+                "2026-06-29T01:00:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, "tiktoker")
+
+    # Strict match exists, so no fallback fires — the newer trim-only
+    # session must not appear at all.
+    assert [r["session_id"] for r in results] == ["exact_hit"]
+    assert "prefix_fallback" not in results[0]
+
+
 def test_search_ranked_unfinished_quote_demotes_search_diagnostic_artifact(db):
     _seed(
         db,
