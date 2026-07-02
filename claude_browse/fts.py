@@ -1049,6 +1049,95 @@ def _prefix_fallback_plan(plan: QueryPlan) -> QueryPlan | None:
     return None
 
 
+def _retokenize_fallback_plan(plan: QueryPlan, raw_query: str) -> QueryPlan | None:
+    """Split punctuation-glued tokens after strict zero hits.
+
+    Terminal queries like `op(the bounty coin)` tokenize to `op(the`, which
+    no transcript matches even though every word exists in the corpus.
+    Re-plan the query with punctuation as whitespace.
+    """
+    if '"' in raw_query:
+        return None
+    cleaned = " ".join(
+        part for part in re.split(r"[^0-9A-Za-z]+", raw_query) if part
+    )
+    if not cleaned or cleaned.lower() == raw_query.strip().lower():
+        return None
+    new_plan = build_query_plan(cleaned)
+    if not new_plan.fts_terms:
+        return None
+    if tuple(new_plan.fts_terms) == tuple(plan.fts_terms):
+        return None
+    return new_plan
+
+
+def _mark_retokenize_fallback(
+    rows: list[dict],
+    strict_plan: QueryPlan,
+    fallback_plan: QueryPlan,
+) -> list[dict]:
+    if not rows:
+        return rows
+    for row in rows:
+        row["retokenize_fallback"] = True
+        row["retokenize_fallback_from"] = ", ".join(strict_plan.fts_terms)
+        row["retokenize_fallback_terms"] = ", ".join(fallback_plan.fts_terms)
+    return rows
+
+
+_SUFFIX_TRIM_MAX_STEPS = 6
+_SUFFIX_TRIM_MIN_PREFIX = 3
+
+
+def _suffix_trim_fallback_plan(
+    conn: sqlite3.Connection, plan: QueryPlan
+) -> QueryPlan | None:
+    """Trim an over-typed last token to its longest productive prefix.
+
+    `tiktoker` matches nothing and neither does `tiktoker*`;
+    _prefix_fallback_plan can only append `*`, never shorten. Trim the last
+    concrete term one character at a time (bounded) and return the first
+    prefix query the index answers with any hit. Zero-result path only, so
+    this can never displace a strict match.
+    """
+    terms = list(plan.fts_terms)
+    for idx in range(len(terms) - 1, -1, -1):
+        term = terms[idx]
+        if " " in term or term.endswith("*"):
+            continue
+        core = term.strip(".*")
+        if len(core) <= _SUFFIX_TRIM_MIN_PREFIX:
+            continue
+        floor = max(_SUFFIX_TRIM_MIN_PREFIX, len(core) - _SUFFIX_TRIM_MAX_STEPS)
+        for cut in range(len(core) - 1, floor - 1, -1):
+            probe_terms = terms.copy()
+            probe_terms[idx] = f"{core[:cut]}*"
+            probe_query = _terms_to_fts_query(probe_terms)
+            if not probe_query:
+                continue
+            try:
+                hit = conn.execute(
+                    "SELECT 1 FROM sessions_fts WHERE sessions_fts MATCH ? LIMIT 1",
+                    (probe_query,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                continue
+            if not hit:
+                continue
+            return replace(
+                plan,
+                fts_terms=tuple(probe_terms),
+                anchor_terms=tuple(probe_terms),
+                exact_phrase_terms=(),
+                highlight_terms=_unique_terms(
+                    tuple(probe_terms), plan.highlight_terms
+                ),
+            )
+        # Only the last concrete term is a plausible over-type; stop there.
+        return None
+    return None
+
+
 def _has_unclosed_quote(query: str) -> bool:
     return query.count('"') % 2 == 1
 
@@ -2723,6 +2812,41 @@ def search_ranked(
                     descriptive = plan.descriptive
                     terms = list(plan.fts_terms)
                     prefix_fallback_matched = True
+    retokenize_plan = None
+    retokenize_matched = False
+    if fts_query and not rows:
+        retokenize_plan = _retokenize_fallback_plan(strict_plan, query)
+        if retokenize_plan:
+            retokenize_query = _terms_to_fts_query(list(retokenize_plan.fts_terms))
+            if retokenize_query:
+                try:
+                    rows = conn.execute(
+                        sql, (retokenize_query, candidate_pool)
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                if rows:
+                    plan = retokenize_plan
+                    descriptive = plan.descriptive
+                    terms = list(plan.fts_terms)
+                    retokenize_matched = True
+    if fts_query and not rows:
+        suffix_plan = _suffix_trim_fallback_plan(conn, plan)
+        if suffix_plan:
+            suffix_query = _terms_to_fts_query(list(suffix_plan.fts_terms))
+            if suffix_query:
+                try:
+                    rows = conn.execute(sql, (suffix_query, candidate_pool)).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                if rows:
+                    plan = suffix_plan
+                    descriptive = plan.descriptive
+                    terms = list(plan.fts_terms)
+                    # A trimmed token is a prefix match; reuse the prefix-
+                    # fallback marking and completion scoring downstream.
+                    prefix_fallback_plan = suffix_plan
+                    prefix_fallback_matched = True
 
     fts_results = [
         _row_to_dict(r[:12]) | {"_bm25": -float(r[12] or 0.0)}
@@ -2735,6 +2859,12 @@ def search_ranked(
             fts_results,
             strict_plan,
             prefix_fallback_plan,
+        )
+    if retokenize_matched and fts_results:
+        fts_results = _mark_retokenize_fallback(
+            fts_results,
+            strict_plan,
+            retokenize_plan,
         )
     exact_ids = {str(r["session_id"]) for r in exact_results}
     results = [
