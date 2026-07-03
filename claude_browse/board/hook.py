@@ -61,6 +61,21 @@ def _placeholder_name(cwd: str | None) -> str:
     return Path(cwd).name or "(new session)"
 
 
+def _notify_body(name: str, cwd: str | None) -> str:
+    """Name plus a [folder] tag so a banner is unambiguous at a glance.
+
+    User feedback: a banner showing only a stale name like 'Continue CodeX
+    session context' says nothing about WHICH project's thread needs you.
+    The Slack alerts already carry this tag (sync.post_alert); the native
+    banner must too. Skipped when the name IS the folder (placeholder case)
+    to avoid 'claude-browse [claude-browse]'.
+    """
+    folder = Path(cwd).name if cwd else ""
+    if folder and folder != name:
+        return f"{name}  [{folder}]"
+    return name
+
+
 def _name_from_prompt(prompt: str, *, max_words: int = 6, max_chars: int = 60) -> str:
     words = prompt.strip().split()
     name = " ".join(words[:max_words])
@@ -109,7 +124,7 @@ def dispatch(payload: dict) -> None:
         _set_state(session_id, "idle", cwd=cwd)
         if working_since and (time.time() - working_since) > _NOTIFY_AFTER_S:
             name = (row or {}).get("name") or _placeholder_name(cwd)
-            notify.notify("✅ done", name)
+            notify.notify("✅ done", _notify_body(name, cwd))
             # Same trigger as the local notification, so the async sync hook
             # knows to post a fresh Slack message too -- chat.update alone
             # doesn't re-notify Slack channel members (see sync.post_alert).
@@ -121,7 +136,7 @@ def dispatch(payload: dict) -> None:
             row = store.get(session_id)
             _set_state(session_id, "needs-input", cwd=cwd)
             name = (row or {}).get("name") or _placeholder_name(cwd)
-            notify.notify("⏸️ needs your input", name)
+            notify.notify("⏸️ needs your input", _notify_body(name, cwd))
             store.set_pending_alert(session_id, "needs-input")
 
     elif event == "SessionEnd":

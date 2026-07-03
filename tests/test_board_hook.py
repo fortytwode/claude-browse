@@ -259,3 +259,24 @@ def test_entry_script_end_to_end_working_then_idle_transition(tmp_path, monkeypa
     row = store.get("s-e2e")
     assert row is not None
     assert row["state"] == "idle"
+
+
+def test_notify_body_includes_folder_tag():
+    assert hook._notify_body("Continue CodeX session context", "/Users/me/team-operations") == \
+        "Continue CodeX session context  [team-operations]"
+    assert hook._notify_body("my-thread", None) == "my-thread"
+    # placeholder case: name IS the folder -- no redundant tag
+    assert hook._notify_body("claude-browse", "/Users/me/claude-browse") == "claude-browse"
+
+
+def test_stop_notification_banner_carries_folder(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+
+    store.upsert("s-folder", host="air", cwd="/Users/me/claude-browse", state="working",
+                 working_since=time.time() - 90, name="agent board build")
+    hook.dispatch({"hook_event_name": "Stop", "session_id": "s-folder",
+                   "cwd": "/Users/me/claude-browse"})
+
+    assert calls == [("✅ done", "agent board build  [claude-browse]")]
