@@ -341,6 +341,30 @@ def open_db(path: str = DB_PATH) -> sqlite3.Connection:
     return conn
 
 
+def reset_db(path: str = DB_PATH) -> None:
+    """Quarantine a corrupt index so the next open_db() starts fresh.
+
+    The DB is a derived cache over session JSONL files, so recovery from
+    corruption (observed live: B-tree rowids out of order surfacing as a
+    spurious UNIQUE-constraint failure during reindex) is: move the bad
+    file aside for forensics, drop the WAL/SHM siblings, rebuild from
+    source. Never crash the tool over a cache.
+    """
+    if os.path.exists(path):
+        quarantine = f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            os.replace(path, quarantine)
+        except OSError:
+            os.remove(path)
+    for suffix in ("-wal", "-shm"):
+        sidecar = f"{path}{suffix}"
+        if os.path.exists(sidecar):
+            try:
+                os.remove(sidecar)
+            except OSError:
+                pass
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     """Create tables on first run; migrate (drop+recreate) on schema bump.
 

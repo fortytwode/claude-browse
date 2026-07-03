@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -1471,7 +1472,23 @@ def main() -> None:
     total_pre = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
     if total_pre == 0:
         print("Indexing sessions for the first time...", file=sys.stderr)
-    added, updated, removed = fts.reindex(conn)
+    try:
+        added, updated, removed = fts.reindex(conn)
+    except sqlite3.DatabaseError as exc:
+        # The index is a derived cache over the session JSONL files -- when
+        # it corrupts (observed live: 'UNIQUE constraint failed:
+        # semantic_terms.term' from B-tree pages with out-of-order rowids,
+        # likely a mid-write kill under many concurrent sessions), the right
+        # move is a transparent rebuild from source, never a startup crash.
+        print(
+            f"Search index corrupted ({exc}); rebuilding from scratch...",
+            file=sys.stderr,
+        )
+        conn.close()
+        fts.reset_db()
+        conn = fts.open_db()
+        added, updated, removed = fts.reindex(conn)
+        print(f"  rebuilt: {added} sessions reindexed", file=sys.stderr)
     if added + updated + removed > 0 and total_pre == 0:
         print(f"  indexed {added} sessions", file=sys.stderr)
     conn.close()

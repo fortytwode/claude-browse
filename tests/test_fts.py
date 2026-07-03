@@ -1945,3 +1945,31 @@ def test_artifact_penalty_ignores_metadata_tool_mention_when_match_is_deep():
     assert _artifact_penalty(row_deep_match, plan, "cfo") == 0.0
     assert _artifact_penalty(row_echo_match, plan, "cfo") >= 6.0
     assert _artifact_penalty(row_opening_match, plan, "cfo") >= 6.0
+
+
+def test_reset_db_quarantines_corrupt_file_and_allows_fresh_open(tmp_path):
+    """Startup self-heal: a corrupt index must never crash the tool.
+    Observed live: B-tree corruption surfacing as 'UNIQUE constraint
+    failed: semantic_terms.term' during reindex at launch."""
+    import os
+
+    db_path = str(tmp_path / "index.db")
+    conn = fts.open_db(db_path)
+    conn.execute("INSERT INTO schema_version (version) VALUES (999)")
+    conn.commit()
+    conn.close()
+    # sidecar files as WAL mode would leave them
+    (tmp_path / "index.db-wal").write_bytes(b"x")
+    (tmp_path / "index.db-shm").write_bytes(b"x")
+
+    fts.reset_db(db_path)
+
+    assert not os.path.exists(db_path)
+    assert not os.path.exists(db_path + "-wal")
+    assert not os.path.exists(db_path + "-shm")
+    quarantined = [p for p in os.listdir(tmp_path) if ".corrupt-" in p]
+    assert len(quarantined) == 1  # kept for forensics, not deleted
+
+    conn2 = fts.open_db(db_path)  # fresh open works
+    assert conn2.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+    conn2.close()
