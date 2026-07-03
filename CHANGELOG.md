@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Agent Board**: every Claude Code session is now tracked as a live,
+  auto-named thread. State (`working` / `idle` / `needs-input` / `gone` /
+  `ended`) is driven by Claude Code hooks and shown in the statusline; a
+  native macOS notification (with sound) fires on completion of a long run
+  or when a session needs input. A session's name is derived from its own
+  Claude Code title when the session is still short, and re-synthesized
+  from its most *recent* activity (not the opening prompt) once it has
+  grown enough that its topic may have drifted. Optional cross-laptop sync
+  mirrors state to Firestore and a private Slack `#agent-status` channel,
+  which shows every session across machines with a copy-paste resume
+  command each, and posts a distinct alert message (not just a board
+  update) when a session needs attention. `work <name>` (tmux
+  attach-or-create) and `aj` (board glance) shell functions round out local
+  ergonomics. Run `./install.sh` to wire it up (idempotent, backs up
+  `~/.claude/settings.json` first). See
+  [`docs/agent-board-verification-report.md`](docs/agent-board-verification-report.md)
+  for the full build, code-review, and live-verification trail, and the
+  README's "Agent Board" section for setup and rollout.
 - Local JSONL search diagnostics now write to
   `~/.claude/cache/claude-browse-search.log.jsonl`, recording query
   interpretation, ranker, result counts, top visible matches, and selection

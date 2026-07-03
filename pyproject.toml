@@ -38,6 +38,11 @@ dev = [
     "pytest>=7.0",
     "ruff>=0.5",
 ]
+board-sync = [
+    "google-cloud-firestore>=2.16",
+    "requests>=2.31",
+    "anthropic>=0.40",
+]
 
 [project.urls]
 Homepage = "https://github.com/fortytwode/claude-browse"

@@ -14,7 +14,7 @@ BIN_DIR="$HOME/.local/bin"
 
 mkdir -p "$BIN_DIR"
 
-for tool in claude-browse codex-browse gemini-browse copilot-browse cursor-browse codex-mobile-json codexmobile; do
+for tool in claude-browse codex-browse gemini-browse copilot-browse cursor-browse codex-mobile-json codexmobile agent-board; do
     chmod +x "$SCRIPT_DIR/$tool"
     ln -sf "$SCRIPT_DIR/$tool" "$BIN_DIR/$tool"
     echo "  Installed $tool -> $BIN_DIR/$tool"
@@ -70,6 +70,27 @@ if ! command -v fzf >/dev/null 2>&1; then
     esac
 fi
 
+# tmux dependency check (agent-board's work/aj shell aliases)
+if ! command -v tmux >/dev/null 2>&1; then
+    echo ""
+    echo "  WARNING: tmux is not installed. agent-board's \`work\` (attach-or-create)"
+    echo "  alias needs it; the board CLI (\`aj\`) works without it."
+    os="$(uname -s)"
+    case "$os" in
+        Darwin) echo "  Install with:  brew install tmux" ;;
+        Linux)
+            if command -v apt >/dev/null 2>&1; then
+                echo "  Install with:  sudo apt install tmux"
+            elif command -v dnf >/dev/null 2>&1; then
+                echo "  Install with:  sudo dnf install tmux"
+            else
+                echo "  Install via your package manager, or see https://github.com/tmux/tmux"
+            fi
+            ;;
+        *) echo "  See https://github.com/tmux/tmux" ;;
+    esac
+fi
+
 # PATH sanity check
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
@@ -80,6 +101,32 @@ case ":$PATH:" in
         ;;
 esac
 
+# Wire agent-board hooks + statusLine into ~/.claude/settings.json (idempotent, backs up first)
+echo ""
+echo "Agent Board setup:"
+python3 "$SCRIPT_DIR/scripts/install_agent_board.py"
+
+echo ""
+echo "  To enable \`work <name>\` (tmux attach-or-create) and \`aj\` (board glance),"
+echo "  add this line to your shell rc (~/.zshrc):"
+echo "    source \"$SCRIPT_DIR/shell/agent-board.zsh\""
+
+if [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+    echo ""
+    echo "  --- agent-board sync check (Firestore + Slack connectivity) ---"
+    "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/agent-board" sync check || true
+else
+    echo ""
+    echo "  NOTE: no .venv found, so cross-laptop sync (Firestore/Slack) isn't set up yet."
+    echo "  The local loop (statusline, notifications, jobs board) works without it."
+    echo "  To enable sync:"
+    echo "    python3 -m venv \"$SCRIPT_DIR/.venv\""
+    echo "    \"$SCRIPT_DIR/.venv/bin/pip\" install -e \"$SCRIPT_DIR[board-sync]\""
+    echo "  Then update the async sync hook commands in ~/.claude/settings.json to point at"
+    echo "  \"$SCRIPT_DIR/.venv/bin/python\" (install_agent_board.py already wires this path;"
+    echo "  re-run install.sh after creating the venv if hooks were wired before it existed)."
+fi
+
 echo ""
 echo "Done. Available commands:"
 echo "  claude-browse    Interactive browser that opens everything in Claude by default"
@@ -89,3 +136,6 @@ echo "  copilot-browse   Interactive browser that opens everything in Copilot by
 echo "  cursor-browse    Interactive browser that opens everything in Cursor by default"
 echo "  codex-mobile-json  Experimental mobile-safe Codex JSON transcript runner"
 echo "  codexmobile      Short alias for codex-mobile-json"
+echo "  agent-board      Session status board (hook/statusline/board/sync subcommands)"
+echo "  aj               (after sourcing shell/agent-board.zsh) glance at all active sessions"
+echo "  work <name>      (after sourcing shell/agent-board.zsh) tmux attach-or-create"

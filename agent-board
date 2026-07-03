@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Thin shim for direct-script (git clone) usage.
+
+Delegates to claude_browse.board subcommands. When installed via
+`pip install`, an entry point in pyproject.toml can replace this shim --
+until then, install.sh symlinks it into ~/.local/bin/agent-board.
+"""
+
+import os
+import sys
+
+# Resolve the symlink so the shim still finds the package when install.sh
+# links it into ~/.local/bin/
+_HERE = os.path.dirname(os.path.realpath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        print("usage: agent-board <hook|statusline|board|sync>", file=sys.stderr)
+        sys.exit(1)
+
+    subcommand = sys.argv[1]
+
+    if subcommand == "hook":
+        from claude_browse.board.hook import main as hook_main
+
+        hook_main()
+    elif subcommand == "statusline":
+        from claude_browse.board.statusline import main as statusline_main
+
+        statusline_main()
+    elif subcommand in ("board", "jobs"):
+        from claude_browse.board.cli import main as cli_main
+
+        cli_main()
+    elif subcommand == "sync":
+        from claude_browse.board.sync import main as sync_main
+
+        sync_main(sys.argv[2:])
+    else:
+        print(f"unknown subcommand: {subcommand}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
