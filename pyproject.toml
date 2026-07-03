@@ -41,6 +41,7 @@ dev = [
 board-sync = [
     "google-cloud-firestore>=2.16",
     "requests>=2.31",
+    "anthropic>=0.40",
 ]
 
 [project.urls]

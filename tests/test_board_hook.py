@@ -34,6 +34,25 @@ def test_stop_after_long_run_sets_idle_and_notifies(tmp_path, monkeypatch):
     assert "my-thread" in calls[0][1]
 
 
+def test_stop_refreshes_heartbeat(tmp_path, monkeypatch):
+    """Stop fires reliably on every turn per the verified hook contract,
+    making it a more dependable liveness signal than statusline's refresh
+    cadence during long tool-heavy sequences (observed live: this exact
+    build's own session showed 'gone' on the real board mid-session, purely
+    from statusline gaps, even though it was actively being worked on)."""
+    _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+
+    store.upsert("s-hb", host="air", cwd="/tmp/proj", state="working",
+                 working_since=time.time() - 5, heartbeat_at=time.time() - 700)
+    hook.dispatch({"hook_event_name": "Stop", "session_id": "s-hb", "cwd": "/tmp/proj"})
+
+    row = store.get("s-hb")
+    assert row["heartbeat_at"] is not None
+    assert time.time() - row["heartbeat_at"] < 5
+    assert store.display_state(row) == "idle"  # not 'gone', despite the stale heartbeat_at set above
+
+
 def test_stop_after_short_run_sets_idle_no_notify(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
@@ -107,6 +126,27 @@ def test_notification_ignored_types_do_not_change_state_or_notify(tmp_path, monk
 
     assert store.get("s4")["state"] == "working"
     assert calls == []
+
+
+def test_notification_unrecognized_future_type_fails_safe_to_needs_input(tmp_path, monkeypatch):
+    """The core forward-compatibility fix: _IGNORED_NOTIFICATION_TYPES is a
+    denylist, not an allowlist. A notification_type this code has never seen
+    (e.g. one a future Claude Code version introduces) must default to
+    needs-input, not silently no-op -- an allowlist would miss it."""
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+
+    store.upsert("s11", host="air", cwd="/tmp/proj", state="working", name="future-thread")
+    hook.dispatch({
+        "hook_event_name": "Notification",
+        "session_id": "s11",
+        "cwd": "/tmp/proj",
+        "notification_type": "some_brand_new_type_from_a_future_claude_code_version",
+    })
+
+    assert store.get("s11")["state"] == "needs-input"
+    assert len(calls) == 1
 
 
 def test_session_start_creates_row_with_placeholder_name_no_crash(tmp_path, monkeypatch):

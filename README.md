@@ -286,9 +286,21 @@ availability, experimental status, and auth state when a provider reports one.
 
 Turns every Claude Code session into a tracked, auto-named thread with a
 live state (`working` / `idle` / `needs-input` / `gone` / `ended`), shown in
-your statusline, pushed as a native macOS notification on completion or
-when blocked, and (optionally) mirrored to Firestore + a private Slack
-channel so you can see every session across multiple machines in one place.
+your statusline, pushed as a native macOS notification (with sound) on
+completion or when blocked, and (optionally) mirrored to Firestore + a
+private Slack channel so you can see every session across multiple
+machines in one place.
+
+**Notification persistence:** the banner plays a sound (your System
+Settings > Sound > Alert sound), but still auto-dismisses after a few
+seconds by default -- that auto-dismiss timing is a per-app Notification
+Center setting, not something this code can set programmatically. To make
+it stay on screen until you dismiss it: System Settings > Notifications >
+find the app that's actually registered as the sender (likely "Script
+Editor", or whichever terminal app you run Claude Code in -- Terminal,
+iTerm2, etc.; check both if unsure) > set Alert Style to "Alerts" instead
+of "Banners". The Slack `#agent-status` board is the durable fallback if
+you miss the banner entirely -- it never auto-dismisses.
 
 **Setup (one machine):**
 

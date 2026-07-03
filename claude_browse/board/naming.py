@@ -7,18 +7,28 @@ Claude Code's own session naming) over ever calling the model.
 
 from __future__ import annotations
 
-import glob
 import os
 
 from claude_browse.board import store
-from claude_browse.providers.claude import SESSIONS_DIR, get_session_info
+from claude_browse.providers.claude import get_session_info, list_session_files
 
 _MODEL = "claude-haiku-4-5-20251001"
 
 
 def _find_jsonl_path(session_id: str) -> str | None:
-    matches = glob.glob(os.path.join(SESSIONS_DIR, "*", f"{session_id}.jsonl"))
-    return matches[0] if matches else None
+    """Locate a session's jsonl by id.
+
+    Uses list_session_files() rather than a plain glob over SESSIONS_DIR --
+    it already unions that glob with a history.jsonl-based recovery path for
+    sessions whose project directory was renamed or moved, which a narrower
+    glob would silently miss (naming.compute_name() would return None for
+    that session, not because naming failed, but because discovery did).
+    """
+    target = f"{session_id}.jsonl"
+    for path in list_session_files():
+        if os.path.basename(path) == target:
+            return path
+    return None
 
 
 def _get_client():

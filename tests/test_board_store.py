@@ -97,6 +97,19 @@ def test_display_state_falls_back_to_updated_at_when_no_heartbeat():
     assert store.display_state(row, stale_after_s=600) == "gone"
 
 
+def test_display_state_handles_row_missing_state_key_without_raising():
+    """Regression: display_state used row["state"] (unguarded) elsewhere it
+    used .get() -- safe for local SQLite rows (schema-guaranteed) but not
+    for Firestore-sourced dicts sync.py feeds it, which have no schema
+    guarantee (e.g. a doc written before a field existed)."""
+    now = time.time()
+    row_no_state_recent = {"heartbeat_at": now - 5, "updated_at": now - 5}
+    row_no_state_stale = {"heartbeat_at": now - 700, "updated_at": now - 700}
+
+    assert store.display_state(row_no_state_recent) == "gone"
+    assert store.display_state(row_no_state_stale) == "gone"
+
+
 def test_heartbeat_updates_heartbeat_at(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
 

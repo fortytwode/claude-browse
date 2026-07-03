@@ -123,14 +123,34 @@ def heartbeat(session_id: str) -> None:
         )
 
 
+#: Canonical state -> (sort rank, icon), shared by every renderer (cli.py's
+#: `jobs`/`aj` board and sync.py's Slack board) so a new state only needs to
+#: be added here once, not kept in sync across files.
+STATE_ORDER = {"needs-input": 0, "working": 1, "idle": 2, "gone": 3, "ended": 4}
+STATE_ICON = {
+    "needs-input": "⏸️",
+    "working": "◇",
+    "idle": "✓",
+    "gone": "☠",
+    "ended": "·",
+}
+
+
 def display_state(row: dict, *, stale_after_s: int = 600) -> str:
-    """Derive the state a renderer should show: 'gone' overrides a stale non-ended row."""
-    if row["state"] == "ended":
+    """Derive the state a renderer should show: 'gone' overrides a stale non-ended row.
+
+    Uses .get() throughout, not row["state"] -- local SQLite rows always have
+    a state column, but callers (sync.py) also feed this Firestore-derived
+    dicts with no schema guarantee, where a missing/legacy doc could lack
+    the key entirely.
+    """
+    state = row.get("state")
+    if state == "ended":
         return "ended"
     last_seen = row.get("heartbeat_at") or row.get("updated_at")
     if last_seen is None or (time.time() - last_seen) > stale_after_s:
         return "gone"
-    return row["state"]
+    return state or "gone"
 
 
 def _raw_set_updated_at(session_id: str, updated_at: float) -> None:

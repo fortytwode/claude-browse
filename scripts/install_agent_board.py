@@ -18,11 +18,22 @@ from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 AGENT_BOARD = str(REPO_DIR / "agent-board")
-VENV_PYTHON = str(REPO_DIR / ".venv" / "bin" / "python")
+VENV_PYTHON = REPO_DIR / ".venv" / "bin" / "python"
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
+# Prefer the board-sync venv when it exists (has google-cloud-firestore,
+# requests, anthropic); fall back to system python3 otherwise, so the async
+# sync hook -- and with it, the Haiku namer in naming.py, which is only ever
+# invoked from sync.push() -- is at least *reachable* on a fresh install
+# before the optional venv is set up, rather than failing to launch at all
+# (a hardcoded nonexistent .venv path would mean naming never runs even
+# though naming itself needs neither Firestore nor Slack). Re-running
+# install.sh after creating the venv upgrades this automatically, since
+# _fully_wired() recomputes SYNC_CMD fresh each run.
+_SYNC_PYTHON = str(VENV_PYTHON) if VENV_PYTHON.exists() else (sys.executable or "python3")
+
 HOOK_CMD = f"{AGENT_BOARD} hook"
-SYNC_CMD = f"{VENV_PYTHON} {AGENT_BOARD} sync push"
+SYNC_CMD = f"{_SYNC_PYTHON} {AGENT_BOARD} sync push"
 STATUSLINE_CMD = f"{AGENT_BOARD} statusline"
 
 _SIMPLE_EVENTS = ("SessionStart", "UserPromptSubmit")
@@ -98,19 +109,21 @@ def _wire_hooks_and_statusline() -> dict:
             or changed
         )
 
-    existing_statusline = settings.get("statusLine")
-    if existing_statusline and existing_statusline.get("command") != STATUSLINE_CMD:
-        print(
-            f"  NOTE: replacing existing statusLine command "
-            f"({existing_statusline.get('command')!r}) with agent-board's"
-        )
-    settings["statusLine"] = {
+    desired_statusline = {
         "type": "command",
         "command": STATUSLINE_CMD,
         "padding": 0,
         "refreshInterval": 5,
     }
-    changed = True
+    existing_statusline = settings.get("statusLine")
+    if existing_statusline != desired_statusline:
+        if existing_statusline and existing_statusline.get("command") != STATUSLINE_CMD:
+            print(
+                f"  NOTE: replacing existing statusLine command "
+                f"({existing_statusline.get('command')!r}) with agent-board's"
+            )
+        settings["statusLine"] = desired_statusline
+        changed = True
 
     if changed:
         SETTINGS_PATH.write_text(json.dumps(settings, indent=2) + "\n")

@@ -31,9 +31,6 @@ META_DOC = "slack"
 # unreliable for private channels. #agent-status, private, bot is a member.
 SLACK_CHANNEL = "C0BFW39EXBJ"
 
-_STATE_ORDER = {"needs-input": 0, "working": 1, "idle": 2, "gone": 3, "ended": 4}
-_STATE_ICON = {"needs-input": "⏸️", "working": "◇", "idle": "✓", "gone": "☠", "ended": "·"}
-
 _LOG_PATH = Path.home() / ".claude" / "agent-board" / "sync.log"
 _DEFAULT_ENV_FILE = Path.home() / "team-operations" / ".env"
 
@@ -45,6 +42,21 @@ def _log(message: str) -> None:
             f.write(f"{time.time()} {message}\n")
     except Exception:
         pass
+
+
+def _strip_env_value(value: str) -> str:
+    """Strip surrounding quotes, or an inline `# comment` on an unquoted value."""
+    value = value.strip()
+    if value[:1] in ('"', "'"):
+        quote = value[0]
+        end = value.find(quote, 1)
+        return value[1:end] if end != -1 else value.strip(quote)
+    idx = value.find("#")
+    while idx != -1:
+        if idx == 0 or value[idx - 1].isspace():
+            return value[:idx].rstrip()
+        idx = value.find("#", idx + 1)
+    return value
 
 
 def _load_env_fallback() -> None:
@@ -64,7 +76,7 @@ def _load_env_fallback() -> None:
                 continue
             key, _, value = line.partition("=")
             key = key.strip()
-            value = value.strip().strip('"').strip("'")
+            value = _strip_env_value(value)
             if key and key not in os.environ:
                 os.environ[key] = value
     except Exception:
@@ -118,12 +130,20 @@ def _fetch_all_session_docs():
 
 
 def render_slack_body() -> str:
-    """Render the full cross-laptop board as one Slack message body."""
+    """Render the full cross-laptop board as one Slack message body.
+
+    Includes a resume command per row (R6, plan scenario S4) -- built the
+    same way cli.py's local board does, via the real provider, not
+    reimplemented here.
+    """
+    from claude_browse.providers import get_provider
+
     docs = _fetch_all_session_docs()
     rows = [d.to_dict() for d in docs]
     if not rows:
         return "*#agent-status* — all clear, no active sessions"
 
+    provider = get_provider("claude")
     by_host: dict[str, list[dict]] = {}
     for row in rows:
         by_host.setdefault(row.get("host") or "unknown-host", []).append(row)
@@ -131,12 +151,13 @@ def render_slack_body() -> str:
     lines = ["*#agent-status*"]
     for host in sorted(by_host):
         lines.append(f"\n*{host}*")
-        host_rows = sorted(by_host[host], key=lambda r: _STATE_ORDER.get(store.display_state(r), 5))
+        host_rows = sorted(by_host[host], key=lambda r: store.STATE_ORDER.get(store.display_state(r), 5))
         for row in host_rows:
             state = store.display_state(row)
             name = row.get("name") or row.get("cwd") or row.get("session_id")
-            icon = _STATE_ICON.get(state, "?")
-            lines.append(f"{icon} {name} — `{state}`")
+            icon = store.STATE_ICON.get(state, "?")
+            resume = " ".join(provider.native_resume_cmd(row.get("session_id"), yolo=False))
+            lines.append(f"{icon} {name} — `{state}` — `{resume}`")
 
     return "\n".join(lines)
 

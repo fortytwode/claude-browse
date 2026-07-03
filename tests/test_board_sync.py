@@ -108,3 +108,27 @@ def test_load_env_fallback_fills_missing_key_without_overwriting_existing(tmp_pa
 def test_load_env_fallback_missing_file_is_a_noop(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_BOARD_ENV_FILE", str(tmp_path / "does-not-exist.env"))
     sync._load_env_fallback()  # must not raise
+
+
+def test_load_env_fallback_strips_inline_comment_on_unquoted_value(tmp_path, monkeypatch):
+    """Regression: a trailing `# comment` on an unquoted value used to become
+    part of the value itself (e.g. a token rotation note appended in-line)."""
+    env_file = tmp_path / "test.env"
+    env_file.write_text("SLACK_BOT_TOKEN=xoxb-abc123  # rotated 2026-07-03\n")
+    monkeypatch.setenv("AGENT_BOARD_ENV_FILE", str(env_file))
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+
+    sync._load_env_fallback()
+
+    assert os.environ["SLACK_BOT_TOKEN"] == "xoxb-abc123"
+
+
+def test_load_env_fallback_quoted_value_with_hash_inside_is_preserved(tmp_path, monkeypatch):
+    env_file = tmp_path / "test.env"
+    env_file.write_text('SOME_KEY="value#with#hash"\n')
+    monkeypatch.setenv("AGENT_BOARD_ENV_FILE", str(env_file))
+    monkeypatch.delenv("SOME_KEY", raising=False)
+
+    sync._load_env_fallback()
+
+    assert os.environ["SOME_KEY"] == "value#with#hash"

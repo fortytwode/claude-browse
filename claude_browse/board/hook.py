@@ -20,15 +20,39 @@ from claude_browse.board import notify, store
 
 _NOTIFY_AFTER_S = 60
 
-_NEEDS_INPUT_TYPES = {"permission_prompt", "agent_needs_input", "elicitation_dialog"}
-# Explicitly ignored: idle_prompt (fires on ~60s of user inactivity -- mapping
-# it to needs-input would notify on every unanswered turn), auth_success,
-# elicitation_complete, elicitation_response, agent_completed (Stop already
-# covers completion via the duration gate).
+# Fail-safe denylist, not an allowlist: any notification_type NOT in this set
+# triggers needs-input by default, including one Claude Code introduces in a
+# future version that this code doesn't know about yet. An allowlist would
+# silently no-op on an unrecognized-but-genuinely-blocking future type --
+# exactly the failure this feature exists to prevent.
+_IGNORED_NOTIFICATION_TYPES = {
+    "idle_prompt",  # fires on ~60s of user inactivity -- not "needs you", just "hasn't typed"
+    "auth_success",
+    "elicitation_complete",
+    "elicitation_response",
+    "agent_completed",  # Stop already covers completion via the duration gate
+}
 
 
 def _hostname() -> str:
     return socket.gethostname()
+
+
+def _set_state(session_id: str, state: str, *, cwd: str | None) -> None:
+    """store.set_state, always including host, and refreshing the heartbeat.
+
+    Centralizes the host backfill here so a future new hook event handler
+    can't reintroduce the host=None bug found in this session's own live
+    data. Also bumps heartbeat_at: statusline.py's refreshInterval is the
+    primary heartbeat source, but its actual invocation cadence during a
+    long tool-heavy sequence turned out to be uncertain -- observed live in
+    this session's own build (it showed 'gone' on the real Slack board
+    while actively being worked on). Stop fires reliably on every turn per
+    the verified hook contract, so it's a second, more dependable heartbeat
+    source that doesn't depend on the statusline actually re-rendering.
+    """
+    store.set_state(session_id, state, cwd=cwd, host=_hostname())
+    store.heartbeat(session_id)
 
 
 def _placeholder_name(cwd: str | None) -> str:
@@ -60,6 +84,7 @@ def dispatch(payload: dict) -> None:
                 name=_placeholder_name(cwd),
                 name_source="provisional",
             )
+        store.heartbeat(session_id)
 
     elif event == "UserPromptSubmit":
         existing = store.get(session_id)
@@ -76,25 +101,26 @@ def dispatch(payload: dict) -> None:
                 fields["name"] = name
                 fields["name_source"] = "provisional"
         store.upsert(session_id, **fields)
+        store.heartbeat(session_id)
 
     elif event == "Stop":
         row = store.get(session_id)
         working_since = row.get("working_since") if row else None
-        store.set_state(session_id, "idle", cwd=cwd, host=_hostname())
+        _set_state(session_id, "idle", cwd=cwd)
         if working_since and (time.time() - working_since) > _NOTIFY_AFTER_S:
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify("✅ done", name)
 
     elif event == "Notification":
         notification_type = payload.get("notification_type")
-        if notification_type in _NEEDS_INPUT_TYPES:
+        if notification_type not in _IGNORED_NOTIFICATION_TYPES:
             row = store.get(session_id)
-            store.set_state(session_id, "needs-input", cwd=cwd, host=_hostname())
+            _set_state(session_id, "needs-input", cwd=cwd)
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify("⏸️ needs your input", name)
 
     elif event == "SessionEnd":
-        store.set_state(session_id, "ended", cwd=cwd, host=_hostname())
+        _set_state(session_id, "ended", cwd=cwd)
 
 
 def main() -> None:
