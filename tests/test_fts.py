@@ -1920,3 +1920,28 @@ def test_row_with_no_match_context_is_not_suppressed():
         "context": "",
     }
     assert fts._is_suppressible_diagnostic_row(row, "search improvements") is False
+
+
+def test_artifact_penalty_ignores_metadata_tool_mention_when_match_is_deep():
+    """Ranking-layer sibling of the suppression bug: a session whose opening
+    message mentioned the tool ranked 49/62 for 'cfo' from a -6 identity
+    penalty, despite the match landing 100s of segments into real work."""
+    from claude_browse.fts import _artifact_penalty, build_query_plan
+
+    plan = build_query_plan("cfo")
+    row_deep_match = {
+        "name": "Review chunking strategy",
+        "cwd": "/Users/me/team-operations",
+        "first_msg": "I updated /Users/me/claude-browse/docs/plans/foo.md",
+        "last_msg": "give me the CFO update",
+        "context": "…the CFO weekly review pulls Client Planning…",
+        "match_segment_idx": 400,
+    }
+    row_echo_match = dict(row_deep_match) | {
+        "context": "…I ran claude-browse to find the thread…",
+    }
+    row_opening_match = dict(row_deep_match) | {"match_segment_idx": 1}
+
+    assert _artifact_penalty(row_deep_match, plan, "cfo") == 0.0
+    assert _artifact_penalty(row_echo_match, plan, "cfo") >= 6.0
+    assert _artifact_penalty(row_opening_match, plan, "cfo") >= 6.0

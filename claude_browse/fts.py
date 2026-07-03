@@ -2457,14 +2457,37 @@ def _artifact_penalty(row: dict, plan: QueryPlan, query: str) -> float:
             or not _query_can_trust_imported_continuation(plan)
         ):
             penalty += 8.0
+    # Self-referential / automation / handover penalties follow the same
+    # evidence-based rule as the imported-session branch above (and the
+    # suppression filter): a cue in the MATCH CONTEXT is real evidence the
+    # hit is tool-echo; a cue merely in session metadata only counts when
+    # the match landed in the boilerplate-prone opening segments. The old
+    # whole-haystack check quietly buried any real work session that ever
+    # mentioned the tool in its first/last message -- the ranking-layer
+    # sibling of the invisibility bug fixed in
+    # _is_suppressible_diagnostic_row (a same-day 1,550-message CFO thread
+    # ranked 49/62 for 'cfo' purely from this penalty).
+    try:
+        _match_segment_idx = int(row.get("match_segment_idx") or 0)
+    except (TypeError, ValueError):
+        _match_segment_idx = 0
+    _opening_match = _match_segment_idx <= 2
+
     if (
-        _contains_any(haystack, _SELF_REFERENTIAL_CUES)
-        or _looks_like_search_diagnostic(haystack)
+        _contains_any(context_haystack, _SELF_REFERENTIAL_CUES)
+        or _looks_like_search_diagnostic(context_haystack)
+        or (_opening_match and _contains_any(metadata_haystack, _SELF_REFERENTIAL_CUES))
     ) and not _query_mentions_search_system(query):
         penalty += 6.0
-    if _contains_any(haystack, _AUTOMATION_CUES) and "automation" not in query.lower():
+    if (
+        _contains_any(context_haystack, _AUTOMATION_CUES)
+        or (_opening_match and _contains_any(metadata_haystack, _AUTOMATION_CUES))
+    ) and "automation" not in query.lower():
         penalty += 4.0
-    if _contains_any(haystack, _HANDOVER_ARTIFACT_CUES) and "handover" not in query.lower():
+    if (
+        _contains_any(context_haystack, _HANDOVER_ARTIFACT_CUES)
+        or (_opening_match and _contains_any(metadata_haystack, _HANDOVER_ARTIFACT_CUES))
+    ) and "handover" not in query.lower():
         penalty += 6.0
     if _contains_any(haystack, _PLANNING_CUES) and (
         plan.wants_closeout
