@@ -53,7 +53,13 @@ the honest arc was "claude-browse agent board build and search fixes".
    inclusion? weight by turn length?), prompt wording, and model (Haiku is
    the default; do NOT move naming to a bigger model without eval proof it's
    needed).
-3. Constraints that already exist and must hold: `_clean_name` validation
+3. Include one stale-name case in the eval set: the macOS banner shows
+   the name as of the last refresh (naming is out-of-band by design; lag
+   bounded at ~20 messages / one turn) -- e.g. a banner reading 'Continue
+   CodeX session context' for an active work thread. Freshness is part of
+   naming quality, not just phrasing. Do NOT fix this by calling the model
+   from hook.py -- the hot path stays network-free (settled rule).
+4. Constraints that already exist and must hold: `_clean_name` validation
    (2-8 words, ≤60 chars, no preamble — regression-tested), prefill-based
    prompt shape, `_REFRESH_AFTER_MSGS` throttle, existing tests green.
 
