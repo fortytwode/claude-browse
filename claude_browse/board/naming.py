@@ -96,21 +96,31 @@ def _clean_name(raw: str) -> str | None:
 
 
 def _naming_context(path: str, info: dict) -> str:
-    """Opening + recent turns, so the model sees the thread's whole arc.
+    """Turns sampled across the WHOLE thread, so the model sees the arc.
 
-    An earlier version fed ONLY the last few turns, which over-corrected
-    the original frozen-on-the-opening-prompt bug: a 900-message session
-    about building a feature got named after whatever micro-task happened
-    in the final turns ("adding missing problem statement section") --
-    real user feedback. The name must capture the overall topic, weighted
-    toward where the work ended up, so the model needs both ends of the
-    thread.
+    Naming has failed twice in the same direction now (real user feedback
+    both times): v1 fed only the last few turns and named a 900-message
+    feature build after its final micro-task; v2 added the opening, but
+    imported sessions open with boilerplate, so recent turns still
+    dominated. The durable fix is arc coverage: sample user turns at
+    ~25/50/75% of the thread (user turns carry intent; assistant turns
+    echo), plus the opening and the most recent exchanges.
     """
     parts = []
     first_msg = (info.get("first_msg") or "").strip()
     if first_msg:
-        parts.append(f"how the session started: {first_msg[:_RECENT_CHARS_PER_TURN]}")
+        parts.append(f"opening: {first_msg[:_RECENT_CHARS_PER_TURN]}")
+
     turns = transcript_turns(path, "")
+    user_turns = [(i, text) for i, (role, text) in enumerate(turns) if role == "user"]
+    if len(user_turns) > 6:
+        mids = []
+        for frac in (0.25, 0.5, 0.75):
+            idx, text = user_turns[int(len(user_turns) * frac)]
+            if idx not in mids:
+                mids.append(idx)
+                parts.append(f"along the way: {text[:_RECENT_CHARS_PER_TURN]}")
+
     recent = turns[-_RECENT_TURNS:]
     if recent:
         parts.append("most recent exchanges:")

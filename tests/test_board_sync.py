@@ -126,7 +126,7 @@ def test_push_calls_post_alert_when_pending_alert_set_and_clears_it(tmp_path, mo
     monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
 
     calls = []
-    monkeypatch.setattr(sync, "post_alert", lambda sid, kind, name: calls.append((sid, kind, name)))
+    monkeypatch.setattr(sync, "post_alert", lambda sid, kind, name, folder=None: calls.append((sid, kind, name)))
 
     sync.push("s-alert")
 
@@ -142,7 +142,7 @@ def test_push_does_not_call_post_alert_when_none_pending(tmp_path, monkeypatch):
     monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
 
     calls = []
-    monkeypatch.setattr(sync, "post_alert", lambda sid, kind, name: calls.append((sid, kind, name)))
+    monkeypatch.setattr(sync, "post_alert", lambda sid, kind, name, folder=None: calls.append((sid, kind, name)))
 
     sync.push("s-no-alert")
 
@@ -159,7 +159,7 @@ def test_push_clears_pending_alert_even_if_post_alert_raises(tmp_path, monkeypat
     monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)
     monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
 
-    def _raise(sid, kind, name):
+    def _raise(sid, kind, name, folder=None):
         raise RuntimeError("slack down")
 
     monkeypatch.setattr(sync, "post_alert", _raise)
@@ -230,3 +230,13 @@ def test_load_env_fallback_quoted_value_with_hash_inside_is_preserved(tmp_path, 
     sync._load_env_fallback()
 
     assert os.environ["SOME_KEY"] == "value#with#hash"
+
+
+def test_post_alert_includes_folder_tag_when_provided(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(sync, "_slack_post_message", lambda body: captured.setdefault("body", body))
+
+    sync.post_alert("abc-123", "needs-input", "my-thread", folder="claude-browse")
+
+    assert "[claude-browse]" in captured["body"]
+    assert "my-thread" in captured["body"]
