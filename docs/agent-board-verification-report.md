@@ -6,7 +6,24 @@
 **Date:** 2026-07-03
 **Status:** implemented, code-reviewed, fixes applied, live-verified against real infrastructure
 
-This document exists so the work can be independently reviewed without re-reading the whole build session. It records what was built, how it was verified, every bug found (by code review *and* by live testing), and what was deliberately left as accepted residual. "Verified" in this document means checked against real running infrastructure — the real Firestore project, the real Slack workspace, real Claude Code sessions on this machine — not just unit tests against mocks. Where a claim rests only on mocked tests, it says so explicitly.
+This document exists so the work can be independently reviewed without re-reading the whole build session. It records the problem this solves, what was built, how it was verified, every bug found (by code review *and* by live testing), and what was deliberately left as accepted residual. "Verified" in this document means checked against real running infrastructure — the real Firestore project, the real Slack workspace, real Claude Code sessions on this machine — not just unit tests against mocks. Where a claim rests only on mocked tests, it says so explicitly.
+
+---
+
+## 0. The problem this solves (read this before the build log)
+
+**Starting pain:** the user routinely runs 7-8 concurrent Claude Code sessions across two laptops. Long autonomous runs (sometimes hours) hold a terminal window hostage. Nothing about a session signals its own state, so the only way to learn whether a thread is done, stuck, or still working is to open its window and look — i.e. polling. Polling is the actual distraction: constantly flipping between windows to check on background work. Three windows open in the same project folder are visually indistinguishable from each other. Coming back to a thread from days ago means hunting for it.
+
+**Diagnosis:** the existing tool in this repo, `claude-browse`, already solves *find and resume* — it discovers every session and can relaunch the right one. What it had no concept of was *live state* or *human-legible identity*: it could not answer "which of my 8 threads is done, which is stuck waiting on me, and which is still working?" — the actual question the user needed answered to stop polling.
+
+**Why this shape, not another one:**
+- **Push, not poll.** The fix has to be state changes coming *to* the user (notification, board), not the user going to check. This is the entire reason hooks + notifications + a Slack board exist, rather than, say, a `claude-browse --status` command the user would have to remember to run.
+- **Local-first, cross-laptop optional.** The state store is local SQLite so the hot path (every hook event, every statusline tick) never touches the network — cross-laptop visibility (Firestore + Slack) is a separate, out-of-band layer that degrades gracefully if unset up, rather than a hard dependency.
+- **Auto-identity, not manual labeling.** Early discussion considered having the user manually name/label each thread; this was rejected because anything requiring manual discipline reliably doesn't happen (this is the same reason `claude-browse` itself works — it derives identity from the session transcript, never asks the user to tag anything).
+- **Detach ergonomics (tmux), not a redesign of how Claude Code runs.** The `work`/`aj` shell functions exist so a long-running session doesn't need to occupy a visible window at all — closing a window should not mean losing track of the work.
+- **Slack Canvas was considered and explicitly not chosen** (see the plan's KTD6) in favor of one continuously-updated message plus separate alert messages for important transitions — a deliberate scope decision revisited once already during this build (see §5) and still open for reconsideration by the user.
+
+The full requirements, concrete scenarios, and every key technical decision with its rationale are in the plan doc linked above (§Problem Frame, §Requirements, §Key Technical Decisions). This report assumes that context and focuses on the build/review/verification trail — an independent reviewer or QA pass should read the plan's Problem Frame first, then this report.
 
 ---
 
