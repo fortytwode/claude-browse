@@ -38,6 +38,16 @@ def test_set_state_working_then_idle_preserves_working_since(tmp_path, monkeypat
     assert row["working_since"] == t0
 
 
+def test_set_state_backfills_host_when_provided_on_a_hostless_row(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+
+    store.set_state("sess-hostless", "working")  # no host arg -- row starts with host=None
+    assert store.get("sess-hostless")["host"] is None
+
+    store.set_state("sess-hostless", "idle", host="real-hostname")
+    assert store.get("sess-hostless")["host"] == "real-hostname"
+
+
 def test_active_excludes_stale_ended_includes_recent_idle_newest_first(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
 

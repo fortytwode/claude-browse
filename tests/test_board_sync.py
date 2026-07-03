@@ -41,6 +41,7 @@ def test_push_writes_doc_keyed_by_host_and_session_id(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     store.upsert("s1", host="air", cwd="/tmp/proj", state="idle", name="foo")
     monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
+    monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)  # U7 concern; isolated here
 
     fake_client = _FakeClient()
     monkeypatch.setattr(sync, "_firestore_client", lambda: fake_client)
@@ -56,6 +57,7 @@ def test_push_still_writes_ended_state(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     store.upsert("s2", host="air", cwd="/tmp/proj", state="ended", name="done-thread")
     monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
+    monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)  # U7 concern; isolated here
 
     fake_client = _FakeClient()
     monkeypatch.setattr(sync, "_firestore_client", lambda: fake_client)
@@ -80,6 +82,7 @@ def test_push_never_raises_when_client_construction_fails(tmp_path, monkeypatch)
     _fresh_store(tmp_path, monkeypatch)
     store.upsert("s3", host="air", cwd="/tmp/proj", state="idle", name="foo")
     monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
+    monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)  # U7 concern; isolated here
 
     def _raise():
         raise RuntimeError("no creds")

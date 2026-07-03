@@ -25,6 +25,14 @@ from claude_browse.board import naming, store
 PROJECT = "team-projects-480520"
 DATABASE = "creative-dashboard"
 COLLECTION = "agent_board_sessions"
+META_COLLECTION = "agent_board_meta"
+META_DOC = "slack"
+# Channel ID, not name -- chat.postMessage/chat.update resolution by name is
+# unreliable for private channels. #agent-status, private, bot is a member.
+SLACK_CHANNEL = "C0BFW39EXBJ"
+
+_STATE_ORDER = {"needs-input": 0, "working": 1, "idle": 2, "gone": 3, "ended": 4}
+_STATE_ICON = {"needs-input": "⏸️", "working": "◇", "idle": "✓", "gone": "☠", "ended": "·"}
 
 _LOG_PATH = Path.home() / ".claude" / "agent-board" / "sync.log"
 _DEFAULT_ENV_FILE = Path.home() / "team-operations" / ".env"
@@ -96,6 +104,98 @@ def push(session_id: str) -> None:
         )
     except Exception as exc:
         _log(f"push failed for session_id={session_id}: {exc}")
+        return
+
+    try:
+        post_or_update_slack(render_slack_body())
+    except Exception as exc:
+        _log(f"slack board update failed for session_id={session_id}: {exc}")
+
+
+def _fetch_all_session_docs():
+    client = _firestore_client()
+    return list(client.collection(COLLECTION).stream())
+
+
+def render_slack_body() -> str:
+    """Render the full cross-laptop board as one Slack message body."""
+    docs = _fetch_all_session_docs()
+    rows = [d.to_dict() for d in docs]
+    if not rows:
+        return "*#agent-status* — all clear, no active sessions"
+
+    by_host: dict[str, list[dict]] = {}
+    for row in rows:
+        by_host.setdefault(row.get("host") or "unknown-host", []).append(row)
+
+    lines = ["*#agent-status*"]
+    for host in sorted(by_host):
+        lines.append(f"\n*{host}*")
+        host_rows = sorted(by_host[host], key=lambda r: _STATE_ORDER.get(store.display_state(r), 5))
+        for row in host_rows:
+            state = store.display_state(row)
+            name = row.get("name") or row.get("cwd") or row.get("session_id")
+            icon = _STATE_ICON.get(state, "?")
+            lines.append(f"{icon} {name} — `{state}`")
+
+    return "\n".join(lines)
+
+
+def _get_stored_slack_ts() -> str | None:
+    client = _firestore_client()
+    doc = client.collection(META_COLLECTION).document(META_DOC).get()
+    if doc.exists:
+        return doc.to_dict().get("ts")
+    return None
+
+
+def _store_slack_ts(ts: str) -> None:
+    client = _firestore_client()
+    client.collection(META_COLLECTION).document(META_DOC).set({"ts": ts})
+
+
+def _slack_post_message(body: str) -> str:
+    import requests
+
+    token = os.environ["SLACK_BOT_TOKEN"]
+    resp = requests.post(
+        "https://slack.com/api/chat.postMessage",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"channel": SLACK_CHANNEL, "text": body},
+        timeout=10,
+    )
+    data = resp.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"chat.postMessage failed: {data.get('error')}")
+    return data["ts"]
+
+
+def _slack_update_message(ts: str, body: str) -> None:
+    import requests
+
+    token = os.environ["SLACK_BOT_TOKEN"]
+    resp = requests.post(
+        "https://slack.com/api/chat.update",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"channel": SLACK_CHANNEL, "ts": ts, "text": body},
+        timeout=10,
+    )
+    data = resp.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"chat.update failed: {data.get('error')}")
+
+
+def post_or_update_slack(body: str) -> None:
+    """Post the board as a new Slack message, or update the existing one in place."""
+    try:
+        ts = _get_stored_slack_ts()
+        if ts is None:
+            new_ts = _slack_post_message(body)
+            _store_slack_ts(new_ts)
+        else:
+            _slack_update_message(ts, body)
+    except Exception as exc:
+        _log(f"post_or_update_slack failed: {exc}")
 
 
 def check() -> str:

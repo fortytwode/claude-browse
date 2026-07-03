@@ -67,6 +67,30 @@ def test_notification_needs_input_types_set_state_and_notify(tmp_path, monkeypat
     assert len(calls) == 1
 
 
+def test_notification_backfills_host_on_a_pre_existing_row_with_no_host(tmp_path, monkeypatch):
+    """Regression: a session whose SessionStart never fired under these hooks
+    (e.g. it was already running when hooks were wired) had its row created
+    with host=None by whichever event touched it first. Every state-changing
+    event must backfill host, not just SessionStart/UserPromptSubmit."""
+    _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    monkeypatch.setattr(hook, "_hostname", lambda: "real-hostname")
+
+    # Row created by a bare set_state call with no host, mirroring how the
+    # very first Notification/Stop for a pre-existing session used to behave.
+    store.set_state("s10", "working")
+    assert store.get("s10")["host"] is None
+
+    hook.dispatch({
+        "hook_event_name": "Notification",
+        "session_id": "s10",
+        "cwd": "/tmp/proj",
+        "notification_type": "permission_prompt",
+    })
+
+    assert store.get("s10")["host"] == "real-hostname"
+
+
 @pytest.mark.parametrize("notification_type", ["idle_prompt", "auth_success"])
 def test_notification_ignored_types_do_not_change_state_or_notify(tmp_path, monkeypatch, notification_type):
     _fresh_store(tmp_path, monkeypatch)

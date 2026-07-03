@@ -80,7 +80,7 @@ def dispatch(payload: dict) -> None:
     elif event == "Stop":
         row = store.get(session_id)
         working_since = row.get("working_since") if row else None
-        store.set_state(session_id, "idle", cwd=cwd)
+        store.set_state(session_id, "idle", cwd=cwd, host=_hostname())
         if working_since and (time.time() - working_since) > _NOTIFY_AFTER_S:
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify("✅ done", name)
@@ -89,12 +89,12 @@ def dispatch(payload: dict) -> None:
         notification_type = payload.get("notification_type")
         if notification_type in _NEEDS_INPUT_TYPES:
             row = store.get(session_id)
-            store.set_state(session_id, "needs-input", cwd=cwd)
+            store.set_state(session_id, "needs-input", cwd=cwd, host=_hostname())
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify("⏸️ needs your input", name)
 
     elif event == "SessionEnd":
-        store.set_state(session_id, "ended", cwd=cwd)
+        store.set_state(session_id, "ended", cwd=cwd, host=_hostname())
 
 
 def main() -> None:

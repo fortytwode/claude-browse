@@ -7,11 +7,14 @@ sync (Firestore/Slack) reads from here out-of-band, never the other way.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from pathlib import Path
 
-_DB_PATH = Path.home() / ".claude" / "agent-board" / "state.db"
+_DB_PATH = Path(os.environ["AGENT_BOARD_DB_PATH"]) if os.environ.get(
+    "AGENT_BOARD_DB_PATH"
+) else Path.home() / ".claude" / "agent-board" / "state.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -100,12 +103,15 @@ def set_state(
     *,
     cwd: str | None = None,
     working_since: float | None = None,
+    host: str | None = None,
 ) -> None:
     fields: dict[str, object] = {"state": state}
     if cwd is not None:
         fields["cwd"] = cwd
     if working_since is not None:
         fields["working_since"] = working_since
+    if host is not None:
+        fields["host"] = host
     upsert(session_id, **fields)
 
 
