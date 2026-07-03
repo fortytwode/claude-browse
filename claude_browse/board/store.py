@@ -18,16 +18,18 @@ _DB_PATH = Path(os.environ["AGENT_BOARD_DB_PATH"]) if os.environ.get(
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
-    session_id    TEXT PRIMARY KEY,
-    host          TEXT,
-    cwd           TEXT,
-    name          TEXT,
-    name_source   TEXT,
-    state         TEXT,
-    working_since REAL,
-    heartbeat_at  REAL,
-    updated_at    REAL,
-    msg_count     INTEGER
+    session_id         TEXT PRIMARY KEY,
+    host               TEXT,
+    cwd                TEXT,
+    name               TEXT,
+    name_source        TEXT,
+    state              TEXT,
+    working_since      REAL,
+    heartbeat_at       REAL,
+    updated_at         REAL,
+    msg_count          INTEGER,
+    named_at_msg_count INTEGER,
+    pending_alert      TEXT
 )
 """
 
@@ -42,16 +44,67 @@ _COLUMNS = (
     "heartbeat_at",
     "updated_at",
     "msg_count",
+    "named_at_msg_count",
+    "pending_alert",
 )
+
+_COLUMN_TYPES = {
+    "host": "TEXT",
+    "cwd": "TEXT",
+    "name": "TEXT",
+    "name_source": "TEXT",
+    "state": "TEXT",
+    "working_since": "REAL",
+    "heartbeat_at": "REAL",
+    "updated_at": "REAL",
+    "msg_count": "INTEGER",
+    "named_at_msg_count": "INTEGER",
+    "pending_alert": "TEXT",
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add any column in _COLUMNS missing from an already-existing table.
+
+    CREATE TABLE IF NOT EXISTS only creates the table on first use -- it
+    never adds columns to a table that already exists with an older schema.
+    Without this, a new column added here would silently not exist on any
+    machine that already ran an earlier version.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    for col in _COLUMNS:
+        if col not in existing and col in _COLUMN_TYPES:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {_COLUMN_TYPES[col]}")
+
+
+_conn_cache: sqlite3.Connection | None = None
+_conn_cache_path: Path | None = None
 
 
 def get_conn() -> sqlite3.Connection:
+    """Return a connection, cached per-process (keyed by _DB_PATH).
+
+    A hook invocation is a short-lived process, but several of its own
+    calls often open a connection each (e.g. hook.py's Stop handler does
+    get() then set_state() then heartbeat()) -- caching within that one
+    process avoids re-running WAL/busy_timeout/migration setup 2-3x for a
+    single logical operation. Keyed by _DB_PATH (not just cached globally)
+    so tests that monkeypatch _DB_PATH to a fresh tmp_path per test still
+    get an isolated connection rather than reusing a stale one.
+    """
+    global _conn_cache, _conn_cache_path
+    if _conn_cache is not None and _conn_cache_path == _DB_PATH:
+        return _conn_cache
+
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(_DB_PATH, timeout=3)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=3000")
     conn.execute(_SCHEMA)
+    _migrate(conn)
+    _conn_cache = conn
+    _conn_cache_path = _DB_PATH
     return conn
 
 
@@ -121,6 +174,18 @@ def heartbeat(session_id: str) -> None:
             "UPDATE sessions SET heartbeat_at = ? WHERE session_id = ?",
             (time.time(), session_id),
         )
+
+
+def set_pending_alert(session_id: str, kind: str) -> None:
+    """Mark that hook.py just fired a local notification of this kind
+    ("done" or "needs-input") -- the single source of truth for "this
+    transition matters enough to alert on", read by sync.py to decide
+    whether to post a fresh Slack message (not just update the board)."""
+    upsert(session_id, pending_alert=kind)
+
+
+def clear_pending_alert(session_id: str) -> None:
+    upsert(session_id, pending_alert=None)
 
 
 #: Canonical state -> (sort rank, icon), shared by every renderer (cli.py's

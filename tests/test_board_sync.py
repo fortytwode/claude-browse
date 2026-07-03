@@ -11,6 +11,28 @@ def _fresh_store(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "_DB_PATH", tmp_path / "state.db")
 
 
+def test_firestore_client_is_constructed_once_and_cached(monkeypatch):
+    """push() alone touches _firestore_client() up to 4 times per call
+    (directly, plus via _fetch_all_session_docs/_get_stored_slack_ts/
+    _store_slack_ts) -- must not construct a fresh Client each time."""
+    monkeypatch.setattr(sync, "_firestore_client_cache", None)
+    calls = []
+
+    import google.cloud.firestore as firestore_module
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(firestore_module, "Client", _FakeClient)
+
+    c1 = sync._firestore_client()
+    c2 = sync._firestore_client()
+
+    assert c1 is c2
+    assert len(calls) == 1
+
+
 class _FakeDocRef:
     def __init__(self, sink, doc_id):
         self.sink = sink
@@ -90,6 +112,82 @@ def test_push_never_raises_when_client_construction_fails(tmp_path, monkeypatch)
     monkeypatch.setattr(sync, "_firestore_client", _raise)
 
     sync.push("s3")  # must not raise
+
+
+def test_push_calls_post_alert_when_pending_alert_set_and_clears_it(tmp_path, monkeypatch):
+    """The fix for the real gap found in production: chat.update (what the
+    board itself uses) doesn't re-notify Slack channel members, so a
+    transition that warrants attention needs a genuinely NEW message too."""
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("s-alert", host="air", cwd="/tmp/proj", state="needs-input",
+                 name="blocked-thread", pending_alert="needs-input")
+    monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
+    monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)
+    monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
+
+    calls = []
+    monkeypatch.setattr(sync, "post_alert", lambda sid, kind, name: calls.append((sid, kind, name)))
+
+    sync.push("s-alert")
+
+    assert calls == [("s-alert", "needs-input", "blocked-thread")]
+    assert store.get("s-alert")["pending_alert"] is None  # cleared after posting
+
+
+def test_push_does_not_call_post_alert_when_none_pending(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("s-no-alert", host="air", cwd="/tmp/proj", state="idle", name="quiet-thread")
+    monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
+    monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)
+    monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
+
+    calls = []
+    monkeypatch.setattr(sync, "post_alert", lambda sid, kind, name: calls.append((sid, kind, name)))
+
+    sync.push("s-no-alert")
+
+    assert calls == []
+
+
+def test_push_clears_pending_alert_even_if_post_alert_raises(tmp_path, monkeypatch):
+    """Best-effort: a failed alert attempt is not retried forever (which
+    could pile up duplicate alerts if a later push succeeds)."""
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("s-alert-fail", host="air", cwd="/tmp/proj", state="needs-input",
+                 name="x", pending_alert="needs-input")
+    monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
+    monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)
+    monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
+
+    def _raise(sid, kind, name):
+        raise RuntimeError("slack down")
+
+    monkeypatch.setattr(sync, "post_alert", _raise)
+
+    sync.push("s-alert-fail")  # must not raise
+
+    assert store.get("s-alert-fail")["pending_alert"] is None
+
+
+def test_post_alert_needs_input_message_body(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(sync, "_slack_post_message", lambda body: captured.setdefault("body", body))
+
+    sync.post_alert("abc-123", "needs-input", "my-thread")
+
+    assert "needs your input" in captured["body"]
+    assert "my-thread" in captured["body"]
+    assert "claude --resume abc-123" in captured["body"]
+
+
+def test_post_alert_done_message_body(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(sync, "_slack_post_message", lambda body: captured.setdefault("body", body))
+
+    sync.post_alert("abc-123", "done", "my-thread")
+
+    assert "done" in captured["body"]
+    assert "my-thread" in captured["body"]
 
 
 def test_load_env_fallback_fills_missing_key_without_overwriting_existing(tmp_path, monkeypatch):

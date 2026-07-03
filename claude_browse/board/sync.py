@@ -83,10 +83,36 @@ def _load_env_fallback() -> None:
         pass
 
 
-def _firestore_client():
-    from google.cloud import firestore
+_firestore_client_cache = None
 
-    return firestore.Client(project=PROJECT, database=DATABASE)
+
+def _firestore_client():
+    """Cached per-process -- push() alone calls this up to 4 times
+    (directly, plus via _fetch_all_session_docs/_get_stored_slack_ts/
+    _store_slack_ts); constructing a fresh Client (ADC/gRPC setup) each
+    time was pure waste within one invocation."""
+    global _firestore_client_cache
+    if _firestore_client_cache is None:
+        from google.cloud import firestore
+
+        _firestore_client_cache = firestore.Client(project=PROJECT, database=DATABASE)
+    return _firestore_client_cache
+
+
+def post_alert(session_id: str, kind: str, name: str) -> None:
+    """Post a fresh Slack message (chat.postMessage, not update) for a
+    transition that needs the user's attention. chat.update -- what the
+    board itself uses -- edits a message in place, which Slack does not
+    treat as a new notification for channel members; only an actual new
+    message does. This is a second, distinct message alongside the board,
+    not a replacement for it.
+    """
+    resume_hint = f"claude --resume {session_id}"
+    if kind == "needs-input":
+        body = f"⏸️ *{name}* — needs your input\n`{resume_hint}`"
+    else:
+        body = f"✅ *{name}* — done\n`{resume_hint}`"
+    _slack_post_message(body)
 
 
 def push(session_id: str) -> None:
@@ -117,6 +143,15 @@ def push(session_id: str) -> None:
     except Exception as exc:
         _log(f"push failed for session_id={session_id}: {exc}")
         return
+
+    pending_alert = row.get("pending_alert")
+    if pending_alert:
+        try:
+            post_alert(session_id, pending_alert, row.get("name") or session_id)
+        except Exception as exc:
+            _log(f"post_alert failed for session_id={session_id}: {exc}")
+        finally:
+            store.clear_pending_alert(session_id)
 
     try:
         post_or_update_slack(render_slack_body())

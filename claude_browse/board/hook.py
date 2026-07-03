@@ -110,6 +110,10 @@ def dispatch(payload: dict) -> None:
         if working_since and (time.time() - working_since) > _NOTIFY_AFTER_S:
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify("✅ done", name)
+            # Same trigger as the local notification, so the async sync hook
+            # knows to post a fresh Slack message too -- chat.update alone
+            # doesn't re-notify Slack channel members (see sync.post_alert).
+            store.set_pending_alert(session_id, "done")
 
     elif event == "Notification":
         notification_type = payload.get("notification_type")
@@ -118,6 +122,7 @@ def dispatch(payload: dict) -> None:
             _set_state(session_id, "needs-input", cwd=cwd)
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify("⏸️ needs your input", name)
+            store.set_pending_alert(session_id, "needs-input")
 
     elif event == "SessionEnd":
         _set_state(session_id, "ended", cwd=cwd)

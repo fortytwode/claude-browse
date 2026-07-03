@@ -122,3 +122,71 @@ def test_heartbeat_updates_heartbeat_at(tmp_path, monkeypatch):
     after = store.get("sess-hb")["heartbeat_at"]
     assert after is not None
     assert before is None or after > before
+
+
+def test_pending_alert_set_and_clear(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("sess-alert", host="air", cwd="/tmp", state="idle", name="foo")
+
+    store.set_pending_alert("sess-alert", "needs-input")
+    assert store.get("sess-alert")["pending_alert"] == "needs-input"
+
+    store.clear_pending_alert("sess-alert")
+    assert store.get("sess-alert")["pending_alert"] is None
+
+
+def test_get_conn_is_cached_but_invalidates_on_db_path_change(tmp_path, monkeypatch):
+    path_a = tmp_path / "a.db"
+    path_b = tmp_path / "b.db"
+
+    monkeypatch.setattr(store, "_DB_PATH", path_a)
+    conn1 = store.get_conn()
+    conn2 = store.get_conn()
+    assert conn1 is conn2  # cached within the same _DB_PATH
+
+    monkeypatch.setattr(store, "_DB_PATH", path_b)
+    conn3 = store.get_conn()
+    assert conn3 is not conn1  # invalidated when _DB_PATH changes (test isolation)
+
+
+def test_upsert_and_get_named_at_msg_count(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("sess-named", host="air", cwd="/tmp", state="idle",
+                 name="foo", name_source="haiku", named_at_msg_count=42)
+
+    row = store.get("sess-named")
+    assert row["named_at_msg_count"] == 42
+
+
+def test_migration_adds_named_at_msg_count_to_a_pre_existing_older_schema_db(tmp_path, monkeypatch):
+    """Regression: adding a column to _SCHEMA does nothing for a database
+    that already exists with an older schema -- CREATE TABLE IF NOT EXISTS
+    only fires on first creation. Simulates a real machine's existing db
+    predating this column."""
+    import sqlite3
+
+    db_path = tmp_path / "old_state.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE sessions (
+            session_id TEXT PRIMARY KEY, host TEXT, cwd TEXT, name TEXT,
+            name_source TEXT, state TEXT, working_since REAL,
+            heartbeat_at REAL, updated_at REAL, msg_count INTEGER
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO sessions (session_id, state, name) VALUES (?, ?, ?)",
+        ("pre-existing-row", "idle", "pre-migration-name"),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(store, "_DB_PATH", db_path)
+
+    # get_conn() (called by any store function) must migrate in the missing column
+    row = store.get("pre-existing-row")
+    assert row["name"] == "pre-migration-name"  # old data preserved
+    assert row["named_at_msg_count"] is None  # new column present, defaults NULL
+
+    store.upsert("pre-existing-row", named_at_msg_count=7)
+    assert store.get("pre-existing-row")["named_at_msg_count"] == 7

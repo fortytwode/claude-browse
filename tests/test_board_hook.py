@@ -32,6 +32,7 @@ def test_stop_after_long_run_sets_idle_and_notifies(tmp_path, monkeypatch):
     assert store.get("s1")["state"] == "idle"
     assert len(calls) == 1
     assert "my-thread" in calls[0][1]
+    assert store.get("s1")["pending_alert"] == "done"  # so sync.py posts a fresh Slack alert too
 
 
 def test_stop_refreshes_heartbeat(tmp_path, monkeypatch):
@@ -64,6 +65,7 @@ def test_stop_after_short_run_sets_idle_no_notify(tmp_path, monkeypatch):
 
     assert store.get("s2")["state"] == "idle"
     assert calls == []
+    assert store.get("s2")["pending_alert"] is None  # short run -- no alert warranted
 
 
 @pytest.mark.parametrize(
