@@ -282,6 +282,64 @@ availability, experimental status, and auth state when a provider reports one.
 
 ---
 
+## Agent Board (live session status + notifications)
+
+Turns every Claude Code session into a tracked, auto-named thread with a
+live state (`working` / `idle` / `needs-input` / `gone` / `ended`), shown in
+your statusline, pushed as a native macOS notification on completion or
+when blocked, and (optionally) mirrored to Firestore + a private Slack
+channel so you can see every session across multiple machines in one place.
+
+**Setup (one machine):**
+
+```bash
+./install.sh
+```
+
+This idempotently wires hooks + a statusLine command into
+`~/.claude/settings.json` (backing it up first; safe to re-run), symlinks
+`agent-board`, and reports:
+- whether hooks/statusLine were already wired (skips if so)
+- a native-overlap check (Claude Code's own `agentPushNotifEnabled` state,
+  and how many of your recent sessions already have an `ai-title` -- the
+  namer only calls Haiku for the rest)
+- live Firestore + Slack connectivity (`agent-board sync check`)
+
+Add this to your shell rc (not done automatically) for `work <name>`
+(tmux attach-or-create) and `aj` (board glance):
+
+```bash
+source "/path/to/claude-browse/shell/agent-board.zsh"
+```
+
+**Cross-laptop sync (optional):** requires the `board-sync` extra and
+Firestore/Slack creds. Without it, the local loop (statusline,
+notifications, `aj`) still works fully -- sync just no-ops and logs to
+`~/.claude/agent-board/sync.log`.
+
+```bash
+python3 -m venv .venv
+./.venv/bin/pip install -e ".[board-sync]"
+```
+
+Firestore uses Application Default Credentials (`gcloud auth
+application-default login`) against project `team-projects-480520`. Slack
+needs `SLACK_BOT_TOKEN` -- set in your environment, or in
+`~/team-operations/.env` (auto-detected as a fallback, since hooks run
+with a minimal inherited environment that usually won't have it exported).
+
+**Rolling out to a second laptop:**
+
+1. `git pull` this repo on the second machine.
+2. Run `./install.sh` there -- same idempotent wiring, own local `state.db`.
+3. Set up `board-sync` + creds the same way if you want that machine's
+   sessions on the shared board too.
+4. Both machines' sessions appear together, grouped by hostname, in the
+   `#agent-status` board and via `agent-board board` (which only reads
+   the local machine's `state.db` -- Slack is the cross-machine view).
+
+---
+
 ## Troubleshooting
 
 Search diagnostics are written locally to:
