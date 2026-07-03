@@ -39,6 +39,7 @@ _REFRESH_AFTER_MSGS = 20
 #: "what's happening lately", not the whole transcript.
 _RECENT_TURNS = 4
 _RECENT_CHARS_PER_TURN = 300
+_ARC_SAMPLE_FRACTIONS = (0.25, 0.5, 0.75)
 
 
 def _find_jsonl_path(session_id: str) -> str | None:
@@ -95,16 +96,26 @@ def _clean_name(raw: str) -> str | None:
     return text
 
 
+def _is_substantive_context_turn(text: str) -> bool:
+    stripped = text.strip()
+    if len(stripped) < 20:
+        return False
+    if stripped.startswith("[Image:"):
+        return False
+    return True
+
+
 def _naming_context(path: str, info: dict) -> str:
     """Turns sampled across the WHOLE thread, so the model sees the arc.
 
     Naming has failed twice in the same direction now (real user feedback
     both times): v1 fed only the last few turns and named a 900-message
     feature build after its final micro-task; v2 added the opening, but
-    imported sessions open with boilerplate, so recent turns still
-    dominated. The durable fix is arc coverage: sample user turns at
-    ~25/50/75% of the thread (user turns carry intent; assistant turns
-    echo), plus the opening and the most recent exchanges.
+    imported sessions open with boilerplate, so recent turns still dominated.
+    v3 sampled only user turns across the arc, but long coding sessions often
+    have the clearest durable labels in assistant checkpoint/final-summary
+    turns. Sample substantive turns from both roles at ~25/50/75% of the
+    thread, plus the opening and the most recent substantive exchanges.
     """
     parts = []
     first_msg = (info.get("first_msg") or "").strip()
@@ -112,19 +123,31 @@ def _naming_context(path: str, info: dict) -> str:
         parts.append(f"opening: {first_msg[:_RECENT_CHARS_PER_TURN]}")
 
     turns = transcript_turns(path, "")
-    user_turns = [(i, text) for i, (role, text) in enumerate(turns) if role == "user"]
-    if len(user_turns) > 6:
-        mids = []
-        for frac in (0.25, 0.5, 0.75):
-            idx, text = user_turns[int(len(user_turns) * frac)]
-            if idx not in mids:
-                mids.append(idx)
-                parts.append(f"along the way: {text[:_RECENT_CHARS_PER_TURN]}")
+    substantive_turns = [
+        (i, role, text)
+        for i, (role, text) in enumerate(turns)
+        if _is_substantive_context_turn(text)
+    ]
+    if len(substantive_turns) > 6:
+        sampled_turn_indexes: set[int] = set()
+        for frac in _ARC_SAMPLE_FRACTIONS:
+            sample_idx = min(
+                len(substantive_turns) - 1,
+                int(len(substantive_turns) * frac),
+            )
+            idx, role, text = substantive_turns[sample_idx]
+            if idx in sampled_turn_indexes:
+                continue
+            sampled_turn_indexes.add(idx)
+            parts.append(f"along the way {role}: {text[:_RECENT_CHARS_PER_TURN]}")
 
-    recent = turns[-_RECENT_TURNS:]
+    recent = substantive_turns[-_RECENT_TURNS:]
     if recent:
         parts.append("most recent exchanges:")
-        parts.extend(f"{role}: {text[:_RECENT_CHARS_PER_TURN]}" for role, text in recent)
+        parts.extend(
+            f"{role}: {text[:_RECENT_CHARS_PER_TURN]}"
+            for _idx, role, text in recent
+        )
     return "\n".join(parts)
 
 

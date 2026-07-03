@@ -107,6 +107,27 @@ def test_compute_name_refresh_sees_both_opening_and_recent_turns(monkeypatch):
     assert "OVERALL" in captured_prompt["content"]  # prompt asks for the whole-thread topic
 
 
+def test_naming_context_samples_substantive_arc_turns_not_only_user_turns(monkeypatch):
+    info = {"first_msg": "continue imported context", "msg_count": 80}
+    turns = [
+        ("user", "continue imported context"),
+        ("assistant", "loaded the handoff"),
+        ("user", "please build the board"),
+        ("assistant", "I built the agent board and verified live hooks"),
+        ("user", "[Image: source: /tmp/screenshot.png]"),
+        ("assistant", "I fixed search ranking and database self heal"),
+        ("user", "what about the other laptop?"),
+        ("assistant", "final summary: claude browse agent board and search fixes shipped"),
+    ]
+    monkeypatch.setattr(naming, "transcript_turns", lambda path, sid: turns)
+
+    context = naming._naming_context("/fake/path.jsonl", info)
+
+    assert "agent board and verified live hooks" in context
+    assert "search ranking and database self heal" in context
+    assert "[Image:" not in context
+
+
 def test_compute_name_returns_existing_title_when_client_construction_fails(monkeypatch):
     monkeypatch.setattr(naming, "_find_jsonl_path", lambda sid: "/fake/path.jsonl")
     monkeypatch.setattr(naming, "transcript_turns", lambda path, sid: [("user", "some prompt")])
