@@ -267,8 +267,11 @@ def test_notify_title_includes_folder_tag():
     assert hook._notify_title("done", "/Users/me/team-operations", "Sonnet") == \
         "[team-operations] Sonnet done"
     assert hook._notify_title("needs input", None, "Codex") == "Codex needs input"
+    # Body carries the name ONLY -- the folder tag lives exclusively in the
+    # title. Both surfaces carrying it shipped a double-folder banner,
+    # caught by the user from a real screenshot.
     assert hook._notify_body("Continue CodeX session context", "/Users/me/team-operations") == \
-        "Continue CodeX session context  [team-operations]"
+        "Continue CodeX session context"
     assert hook._notify_body("team-operations", "/Users/me/team-operations") == "team-operations"
 
 
@@ -304,7 +307,7 @@ def test_stop_notification_banner_carries_folder(tmp_path, monkeypatch):
                    "cwd": "/Users/me/claude-browse",
                    "model": {"display_name": "Codex"}})
 
-    assert calls == [("[claude-browse] Codex done", "agent board build  [claude-browse]")]
+    assert calls == [("[claude-browse] Codex done", "agent board build")]
 
 
 def test_stop_notification_uses_stored_model_when_payload_omits_it(tmp_path, monkeypatch):
@@ -318,7 +321,7 @@ def test_stop_notification_uses_stored_model_when_payload_omits_it(tmp_path, mon
     hook.dispatch({"hook_event_name": "Stop", "session_id": "s-stored-model",
                    "cwd": "/Users/me/claude-browse"})
 
-    assert calls == [("[claude-browse] Sonnet done", "agent board build  [claude-browse]")]
+    assert calls == [("[claude-browse] Sonnet done", "agent board build")]
 
 
 def test_needs_input_notification_title_carries_folder(tmp_path, monkeypatch):
@@ -336,4 +339,4 @@ def test_needs_input_notification_title_carries_folder(tmp_path, monkeypatch):
         "model": "claude-sonnet-4-5",
     })
 
-    assert calls == [("[claude-browse] Sonnet needs input", "agent board build  [claude-browse]")]
+    assert calls == [("[claude-browse] Sonnet needs input", "agent board build")]

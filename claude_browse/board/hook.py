@@ -156,9 +156,13 @@ def _notify_title(action: str, cwd: str | None, model_label: str = "") -> str:
 
 
 def _notify_body(name: str, cwd: str | None) -> str:
-    folder = _folder_name(cwd)
-    if folder and folder != name:
-        return f"{name}  [{folder}]"
+    """Just the session name. The [folder] tag lives in the TITLE only
+    (_notify_title) -- two authors added it to both surfaces independently,
+    which shipped banners like 'title: [claude-browse] Opus done / body:
+    final qa smoke test [claude-browse]' with the folder twice (user-caught
+    bug). The title always carries the folder, so the body never needs it.
+    """
+    del cwd
     return name
 
 
