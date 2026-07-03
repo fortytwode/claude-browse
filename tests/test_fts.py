@@ -1867,3 +1867,56 @@ def test_get_by_sid_roundtrip(db):
 
 def test_get_by_sid_missing(db):
     assert fts.get_by_sid(db, "does-not-exist") is None
+
+
+# --- diagnostic-row suppression: evidence-based, never identity-based ---
+# Regression for a live failure: a 1,550-message CFO/ops work session whose
+# OPENING message referenced a claude-browse plan file was invisible to
+# 'cfo'/'coo'/'healing' -- the old filter branded any session mentioning the
+# tool anywhere in title/first/last message as diagnostic noise and hid it
+# from every query. 6 of 317 indexed sessions were unfindable, including
+# real work threads.
+
+
+def test_real_work_session_mentioning_tool_in_metadata_is_not_suppressed():
+    row = {
+        "name": "Review chunking strategy",
+        "cwd": "/Users/me/team-operations",
+        "first_msg": "I updated the plan at /Users/me/claude-browse/docs/plans/foo.md",
+        "last_msg": "give me the CFO update please",
+        "context": "…the CFO weekly review pulls Client Planning and the ops update…",
+    }
+    assert fts._is_suppressible_diagnostic_row(row, "cfo") is False
+
+
+def test_row_whose_match_evidence_is_tool_echo_is_suppressed():
+    row = {
+        "name": "Some session",
+        "cwd": "/Users/me/proj",
+        "first_msg": "hello",
+        "last_msg": "bye",
+        "context": "…I ran claude-browse to find the thread but session not found…",
+    }
+    assert fts._is_suppressible_diagnostic_row(row, "payments") is True
+
+
+def test_search_system_queries_are_never_suppressed():
+    row = {
+        "name": "Fix claude browse database corruption",
+        "cwd": "/Users/me/claude-browse",
+        "first_msg": "claude-browse is broken",
+        "last_msg": "fixed",
+        "context": "…claude-browse database corruption fix…",
+    }
+    assert fts._is_suppressible_diagnostic_row(row, "claude-browse corruption") is False
+
+
+def test_row_with_no_match_context_is_not_suppressed():
+    row = {
+        "name": "claude-browse dev session",
+        "cwd": "/Users/me/claude-browse",
+        "first_msg": "let's improve claude-browse search",
+        "last_msg": "done",
+        "context": "",
+    }
+    assert fts._is_suppressible_diagnostic_row(row, "search improvements") is False

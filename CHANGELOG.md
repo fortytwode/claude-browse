@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   everything in Copilot by default and indexes local session state from
   `~/.copilot/session-state/`.
 
+### Fixed
+- Diagnostic-row suppression no longer hides whole sessions that merely
+  *mention* the tool. The old filter branded any session with
+  "claude-browse"/"codex-browse" (or other self-referential cues) anywhere in
+  its title/first/last message as search-diagnostic noise and silently
+  excluded it from every query — 6 of 317 indexed sessions were unfindable,
+  including a 1,550-message real work thread that was invisible to the exact
+  terms it contained hundreds of times. Suppression now keys on the **match
+  evidence** (the snippet the query actually hit) instead of session
+  identity: only rows whose matched context is itself search-tool echo get
+  suppressed.
+
 ### Removed
 - `claude-resume` is no longer a supported command surface. The paired browser
   entrypoints (`claude-browse` and `codex-browse`) are now the only reopen

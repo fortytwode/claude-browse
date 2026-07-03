@@ -2505,13 +2505,24 @@ def _artifact_haystacks(row: dict) -> tuple[str, str, str]:
 
 
 def _is_suppressible_diagnostic_row(row: dict, query: str) -> bool:
+    """Suppress on the MATCH EVIDENCE only, never on session identity.
+
+    A cue inside the matched snippet means the hit itself is search-tool
+    echo/diagnostic text -- the noise this filter exists for. A cue merely
+    somewhere in the session's metadata (title/first/last message) must NOT
+    hide the whole session: that branded any real work session that ever
+    mentioned the tool as permanently invisible to every query. Found live:
+    a 1,550-message CFO/ops work thread whose OPENING message referenced a
+    claude-browse plan file was unfindable by 'cfo'/'coo'/'healing' -- along
+    with 5 other sessions including the tool's own multi-hour build thread.
+    """
     if _query_mentions_search_system(query):
         return False
-    _context, _metadata, haystack = _artifact_haystacks(row)
+    context_haystack, _metadata, _haystack = _artifact_haystacks(row)
     return (
-        _contains_any(haystack, _SELF_REFERENTIAL_CUES)
-        or _looks_like_search_diagnostic(haystack)
-        or _contains_any(haystack, _HANDOVER_ARTIFACT_CUES)
+        _contains_any(context_haystack, _SELF_REFERENTIAL_CUES)
+        or _looks_like_search_diagnostic(context_haystack)
+        or _contains_any(context_haystack, _HANDOVER_ARTIFACT_CUES)
     )
 
 
