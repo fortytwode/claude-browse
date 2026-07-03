@@ -30,9 +30,9 @@ def test_render_slack_body_groups_by_host_and_uses_display_state(monkeypatch):
     assert "thread-b" in body
 
 
-def test_render_slack_body_includes_resume_command_per_row(monkeypatch):
-    """R6 requires a resume command per row -- was missing entirely before
-    this fix (grep for 'resume' in sync.py returned nothing)."""
+def test_render_slack_body_includes_yolo_resume_command_per_row(monkeypatch):
+    """R6 requires a resume command per row; per user request it includes the
+    provider's skip-permissions flag for one-paste re-entry."""
     docs = [
         _FakeDoc({"session_id": "abc-123", "host": "air", "name": "thread-a", "state": "idle",
                   "cwd": "/tmp/proj-a", "heartbeat_at": None, "updated_at": 1000.0}),
@@ -41,7 +41,16 @@ def test_render_slack_body_includes_resume_command_per_row(monkeypatch):
 
     body = sync.render_slack_body()
 
-    assert "claude --resume abc-123" in body
+    assert "claude --resume abc-123 --dangerously-skip-permissions" in body
+
+
+def test_post_alert_includes_yolo_resume_command(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(sync, "_slack_post_message", lambda body: captured.setdefault("body", body))
+
+    sync.post_alert("abc-123", "needs-input", "my-thread")
+
+    assert "claude --resume abc-123 --dangerously-skip-permissions" in captured["body"]
 
 
 def test_render_slack_body_empty_shows_all_clear(monkeypatch):

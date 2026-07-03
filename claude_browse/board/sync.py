@@ -107,7 +107,13 @@ def post_alert(session_id: str, kind: str, name: str) -> None:
     message does. This is a second, distinct message alongside the board,
     not a replacement for it.
     """
-    resume_hint = f"claude --resume {session_id}"
+    from claude_browse.providers import get_provider
+
+    # yolo=True per user request: alert resume commands include the
+    # provider's skip-permissions flag so re-entry is one paste. Built via
+    # the provider (not a hardcoded string) so each provider's own flag is
+    # used automatically.
+    resume_hint = " ".join(get_provider("claude").native_resume_cmd(session_id, yolo=True))
     if kind == "needs-input":
         body = f"⏸️ *{name}* — needs your input\n`{resume_hint}`"
     else:
@@ -191,7 +197,7 @@ def render_slack_body() -> str:
             state = store.display_state(row)
             name = row.get("name") or row.get("cwd") or row.get("session_id")
             icon = store.STATE_ICON.get(state, "?")
-            resume = " ".join(provider.native_resume_cmd(row.get("session_id"), yolo=False))
+            resume = " ".join(provider.native_resume_cmd(row.get("session_id"), yolo=True))
             lines.append(f"{icon} {name} — `{state}` — `{resume}`")
 
     return "\n".join(lines)

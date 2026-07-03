@@ -10,7 +10,11 @@ from claude_browse.providers import get_provider
 
 
 def _resume_cmd(provider, session_id: str) -> str:
-    return " ".join(provider.native_resume_cmd(session_id, yolo=False))
+    # yolo=True: the board's resume commands are for quickly re-entering your
+    # own sessions, so include each provider's skip-permissions flag
+    # (--dangerously-skip-permissions for claude, the equivalent for codex)
+    # for one-paste resumption. User-requested.
+    return " ".join(provider.native_resume_cmd(session_id, yolo=True))
 
 
 def render_board(max_age_hours: float = 24) -> str:
