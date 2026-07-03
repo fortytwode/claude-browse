@@ -99,7 +99,13 @@ def _firestore_client():
     return _firestore_client_cache
 
 
-def post_alert(session_id: str, kind: str, name: str, folder: str | None = None) -> None:
+def post_alert(
+    session_id: str,
+    kind: str,
+    name: str,
+    folder: str | None = None,
+    model_label: str | None = None,
+) -> None:
     """Post a fresh Slack message (chat.postMessage, not update) for a
     transition that needs the user's attention. chat.update -- what the
     board itself uses -- edits a message in place, which Slack does not
@@ -119,10 +125,11 @@ def post_alert(session_id: str, kind: str, name: str, folder: str | None = None)
     # used automatically.
     resume_hint = " ".join(get_provider("claude").native_resume_cmd(session_id, yolo=True))
     tag = f" `[{folder}]`" if folder else ""
+    model = f" · {model_label}" if model_label else ""
     if kind == "needs-input":
-        body = f"⏸️ *{name}*{tag} — needs your input\n`{resume_hint}`"
+        body = f"⏸️ *{name}*{tag}{model} — needs your input\n`{resume_hint}`"
     else:
-        body = f"✅ *{name}*{tag} — done\n`{resume_hint}`"
+        body = f"✅ *{name}*{tag}{model} — done\n`{resume_hint}`"
     _slack_post_message(body)
 
 
@@ -149,6 +156,7 @@ def push(session_id: str) -> None:
                 "cwd": row.get("cwd"),
                 "updated_at": row.get("updated_at"),
                 "heartbeat_at": row.get("heartbeat_at"),
+                "model_label": row.get("model_label"),
             }
         )
     except Exception as exc:
@@ -163,6 +171,7 @@ def push(session_id: str) -> None:
                 pending_alert,
                 row.get("name") or session_id,
                 folder=os.path.basename(row.get("cwd") or "") or None,
+                model_label=row.get("model_label") or None,
             )
         except Exception as exc:
             _log(f"post_alert failed for session_id={session_id}: {exc}")
@@ -206,9 +215,10 @@ def render_slack_body() -> str:
         for row in host_rows:
             state = store.display_state(row)
             name = row.get("name") or row.get("cwd") or row.get("session_id")
+            model = f" · {row.get('model_label')}" if row.get("model_label") else ""
             icon = store.STATE_ICON.get(state, "?")
             resume = " ".join(provider.native_resume_cmd(row.get("session_id"), yolo=True))
-            lines.append(f"{icon} {name} — `{state}` — `{resume}`")
+            lines.append(f"{icon} {name}{model} — `{state}` — `{resume}`")
 
     return "\n".join(lines)
 

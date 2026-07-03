@@ -291,6 +291,11 @@ completion or when blocked, and (optionally) mirrored to Firestore + a
 private Slack channel so you can see every session across multiple
 machines in one place.
 
+Native notification titles are formatted as `[folder] Model state` (for
+example `[claude-browse] Codex needs input` or `[team-operations] Opus
+done`) so the repo and model are visible even when macOS truncates the
+message body.
+
 **Notification persistence:** the banner plays a sound (your System
 Settings > Sound > Alert sound), but still auto-dismisses after a few
 seconds by default -- that auto-dismiss timing is a per-app Notification
@@ -310,10 +315,12 @@ you miss the banner entirely -- it never auto-dismisses.
 
 This idempotently wires hooks + a statusLine command into
 `~/.claude/settings.json` (backing it up first; safe to re-run), symlinks
-`agent-board`, and reports:
+`agent-board`, disables Claude Code's built-in folderless push
+notifications so Agent Board is the only local alert source, and reports:
 - whether hooks/statusLine were already wired (skips if so)
-- a native-overlap check (Claude Code's own `agentPushNotifEnabled` state,
-  and how many of your recent sessions already have an `ai-title` -- the
+- the local notification setting (`agentPushNotifEnabled`, kept false to
+  avoid duplicate lower-information banners) and how many of your recent
+  sessions already have an `ai-title` -- the
   namer only calls Haiku for the rest)
 - live Firestore + Slack connectivity (`agent-board sync check`)
 

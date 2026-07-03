@@ -61,7 +61,8 @@ class _FakeClient:
 
 def test_push_writes_doc_keyed_by_host_and_session_id(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
-    store.upsert("s1", host="air", cwd="/tmp/proj", state="idle", name="foo")
+    store.upsert("s1", host="air", cwd="/tmp/proj", state="idle",
+                 name="foo", model_label="Codex")
     monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
     monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)  # U7 concern; isolated here
 
@@ -73,6 +74,7 @@ def test_push_writes_doc_keyed_by_host_and_session_id(tmp_path, monkeypatch):
     assert "air:s1" in fake_client.sink
     assert fake_client.sink["air:s1"]["state"] == "idle"
     assert fake_client.sink["air:s1"]["name"] == "foo"
+    assert fake_client.sink["air:s1"]["model_label"] == "Codex"
 
 
 def test_push_still_writes_ended_state(tmp_path, monkeypatch):
@@ -120,17 +122,22 @@ def test_push_calls_post_alert_when_pending_alert_set_and_clears_it(tmp_path, mo
     transition that warrants attention needs a genuinely NEW message too."""
     _fresh_store(tmp_path, monkeypatch)
     store.upsert("s-alert", host="air", cwd="/tmp/proj", state="needs-input",
-                 name="blocked-thread", pending_alert="needs-input")
+                 name="blocked-thread", pending_alert="needs-input", model_label="Sonnet")
     monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
     monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)
     monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
 
     calls = []
-    monkeypatch.setattr(sync, "post_alert", lambda sid, kind, name, folder=None: calls.append((sid, kind, name)))
+    monkeypatch.setattr(
+        sync,
+        "post_alert",
+        lambda sid, kind, name, folder=None, model_label=None:
+            calls.append((sid, kind, name, model_label)),
+    )
 
     sync.push("s-alert")
 
-    assert calls == [("s-alert", "needs-input", "blocked-thread")]
+    assert calls == [("s-alert", "needs-input", "blocked-thread", "Sonnet")]
     assert store.get("s-alert")["pending_alert"] is None  # cleared after posting
 
 
@@ -142,7 +149,12 @@ def test_push_does_not_call_post_alert_when_none_pending(tmp_path, monkeypatch):
     monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
 
     calls = []
-    monkeypatch.setattr(sync, "post_alert", lambda sid, kind, name, folder=None: calls.append((sid, kind, name)))
+    monkeypatch.setattr(
+        sync,
+        "post_alert",
+        lambda sid, kind, name, folder=None, model_label=None:
+            calls.append((sid, kind, name, model_label)),
+    )
 
     sync.push("s-no-alert")
 
@@ -159,7 +171,7 @@ def test_push_clears_pending_alert_even_if_post_alert_raises(tmp_path, monkeypat
     monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)
     monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
 
-    def _raise(sid, kind, name, folder=None):
+    def _raise(sid, kind, name, folder=None, model_label=None):
         raise RuntimeError("slack down")
 
     monkeypatch.setattr(sync, "post_alert", _raise)
@@ -173,10 +185,11 @@ def test_post_alert_needs_input_message_body(monkeypatch):
     captured = {}
     monkeypatch.setattr(sync, "_slack_post_message", lambda body: captured.setdefault("body", body))
 
-    sync.post_alert("abc-123", "needs-input", "my-thread")
+    sync.post_alert("abc-123", "needs-input", "my-thread", model_label="Codex")
 
     assert "needs your input" in captured["body"]
     assert "my-thread" in captured["body"]
+    assert "Codex" in captured["body"]
     assert "claude --resume abc-123" in captured["body"]
 
 

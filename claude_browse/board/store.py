@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at         REAL,
     msg_count          INTEGER,
     named_at_msg_count INTEGER,
+    model_label        TEXT,
     pending_alert      TEXT
 )
 """
@@ -45,6 +46,7 @@ _COLUMNS = (
     "updated_at",
     "msg_count",
     "named_at_msg_count",
+    "model_label",
     "pending_alert",
 )
 
@@ -59,6 +61,7 @@ _COLUMN_TYPES = {
     "updated_at": "REAL",
     "msg_count": "INTEGER",
     "named_at_msg_count": "INTEGER",
+    "model_label": "TEXT",
     "pending_alert": "TEXT",
 }
 
@@ -157,6 +160,7 @@ def set_state(
     cwd: str | None = None,
     working_since: float | None = None,
     host: str | None = None,
+    model_label: str | None = None,
 ) -> None:
     fields: dict[str, object] = {"state": state}
     if cwd is not None:
@@ -165,6 +169,8 @@ def set_state(
         fields["working_since"] = working_since
     if host is not None:
         fields["host"] = host
+    if model_label is not None:
+        fields["model_label"] = model_label
     upsert(session_id, **fields)
 
 

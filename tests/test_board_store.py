@@ -44,8 +44,10 @@ def test_set_state_backfills_host_when_provided_on_a_hostless_row(tmp_path, monk
     store.set_state("sess-hostless", "working")  # no host arg -- row starts with host=None
     assert store.get("sess-hostless")["host"] is None
 
-    store.set_state("sess-hostless", "idle", host="real-hostname")
-    assert store.get("sess-hostless")["host"] == "real-hostname"
+    store.set_state("sess-hostless", "idle", host="real-hostname", model_label="Codex")
+    row = store.get("sess-hostless")
+    assert row["host"] == "real-hostname"
+    assert row["model_label"] == "Codex"
 
 
 def test_active_excludes_stale_ended_includes_recent_idle_newest_first(tmp_path, monkeypatch):
@@ -158,7 +160,7 @@ def test_upsert_and_get_named_at_msg_count(tmp_path, monkeypatch):
     assert row["named_at_msg_count"] == 42
 
 
-def test_migration_adds_named_at_msg_count_to_a_pre_existing_older_schema_db(tmp_path, monkeypatch):
+def test_migration_adds_new_columns_to_a_pre_existing_older_schema_db(tmp_path, monkeypatch):
     """Regression: adding a column to _SCHEMA does nothing for a database
     that already exists with an older schema -- CREATE TABLE IF NOT EXISTS
     only fires on first creation. Simulates a real machine's existing db
@@ -187,6 +189,9 @@ def test_migration_adds_named_at_msg_count_to_a_pre_existing_older_schema_db(tmp
     row = store.get("pre-existing-row")
     assert row["name"] == "pre-migration-name"  # old data preserved
     assert row["named_at_msg_count"] is None  # new column present, defaults NULL
+    assert row["model_label"] is None
 
-    store.upsert("pre-existing-row", named_at_msg_count=7)
-    assert store.get("pre-existing-row")["named_at_msg_count"] == 7
+    store.upsert("pre-existing-row", named_at_msg_count=7, model_label="Opus")
+    row = store.get("pre-existing-row")
+    assert row["named_at_msg_count"] == 7
+    assert row["model_label"] == "Opus"

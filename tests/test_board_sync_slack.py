@@ -16,6 +16,7 @@ class _FakeDoc:
 def test_render_slack_body_groups_by_host_and_uses_display_state(monkeypatch):
     docs = [
         _FakeDoc({"session_id": "s1", "host": "air", "name": "thread-a", "state": "working",
+                  "model_label": "Codex",
                   "cwd": "/tmp/proj-a", "heartbeat_at": None, "updated_at": 1000.0}),
         _FakeDoc({"session_id": "s2", "host": "pro", "name": "thread-b", "state": "idle",
                   "cwd": "/tmp/proj-b", "heartbeat_at": None, "updated_at": 1000.0}),
@@ -26,6 +27,7 @@ def test_render_slack_body_groups_by_host_and_uses_display_state(monkeypatch):
 
     assert "air" in body
     assert "thread-a" in body
+    assert "Codex" in body
     assert "pro" in body
     assert "thread-b" in body
 
@@ -48,9 +50,10 @@ def test_post_alert_includes_yolo_resume_command(monkeypatch):
     captured = {}
     monkeypatch.setattr(sync, "_slack_post_message", lambda body: captured.setdefault("body", body))
 
-    sync.post_alert("abc-123", "needs-input", "my-thread")
+    sync.post_alert("abc-123", "needs-input", "my-thread", model_label="Opus")
 
     assert "claude --resume abc-123 --dangerously-skip-permissions" in captured["body"]
+    assert "Opus" in captured["body"]
 
 
 def test_render_slack_body_empty_shows_all_clear(monkeypatch):

@@ -261,12 +261,36 @@ def test_entry_script_end_to_end_working_then_idle_transition(tmp_path, monkeypa
     assert row["state"] == "idle"
 
 
-def test_notify_body_includes_folder_tag():
+def test_notify_title_includes_folder_tag():
+    assert hook._notify_title("needs input", "/Users/me/team-operations", "Codex") == \
+        "[team-operations] Codex needs input"
+    assert hook._notify_title("done", "/Users/me/team-operations", "Sonnet") == \
+        "[team-operations] Sonnet done"
+    assert hook._notify_title("needs input", None, "Codex") == "Codex needs input"
     assert hook._notify_body("Continue CodeX session context", "/Users/me/team-operations") == \
         "Continue CodeX session context  [team-operations]"
-    assert hook._notify_body("my-thread", None) == "my-thread"
-    # placeholder case: name IS the folder -- no redundant tag
-    assert hook._notify_body("claude-browse", "/Users/me/claude-browse") == "claude-browse"
+    assert hook._notify_body("team-operations", "/Users/me/team-operations") == "team-operations"
+
+
+def test_model_label_compacts_common_model_ids():
+    assert hook._compact_model_label("gpt-5-codex") == "Codex"
+    assert hook._compact_model_label("claude-opus-4-8") == "Opus"
+    assert hook._compact_model_label("claude-sonnet-4-5") == "Sonnet"
+    assert hook._compact_model_label("fable") == "Fable"
+
+
+def test_model_label_reads_latest_assistant_model_from_transcript(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        "\n".join([
+            json.dumps({"message": {"model": "claude-haiku-4-5"}}),
+            "not-json",
+            json.dumps({"message": {"model": "claude-opus-4-8"}}),
+        ])
+        + "\n"
+    )
+
+    assert hook._model_label({"transcript_path": str(transcript)}, None) == "Opus"
 
 
 def test_stop_notification_banner_carries_folder(tmp_path, monkeypatch):
@@ -277,6 +301,39 @@ def test_stop_notification_banner_carries_folder(tmp_path, monkeypatch):
     store.upsert("s-folder", host="air", cwd="/Users/me/claude-browse", state="working",
                  working_since=time.time() - 90, name="agent board build")
     hook.dispatch({"hook_event_name": "Stop", "session_id": "s-folder",
+                   "cwd": "/Users/me/claude-browse",
+                   "model": {"display_name": "Codex"}})
+
+    assert calls == [("[claude-browse] Codex done", "agent board build  [claude-browse]")]
+
+
+def test_stop_notification_uses_stored_model_when_payload_omits_it(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+
+    store.upsert("s-stored-model", host="air", cwd="/Users/me/claude-browse",
+                 state="working", working_since=time.time() - 90,
+                 name="agent board build", model_label="Sonnet")
+    hook.dispatch({"hook_event_name": "Stop", "session_id": "s-stored-model",
                    "cwd": "/Users/me/claude-browse"})
 
-    assert calls == [("✅ done", "agent board build  [claude-browse]")]
+    assert calls == [("[claude-browse] Sonnet done", "agent board build  [claude-browse]")]
+
+
+def test_needs_input_notification_title_carries_folder(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+
+    store.upsert("s-folder-input", host="air", cwd="/Users/me/claude-browse",
+                 state="working", name="agent board build")
+    hook.dispatch({
+        "hook_event_name": "Notification",
+        "session_id": "s-folder-input",
+        "cwd": "/Users/me/claude-browse",
+        "notification_type": "permission_prompt",
+        "model": "claude-sonnet-4-5",
+    })
+
+    assert calls == [("[claude-browse] Sonnet needs input", "agent board build  [claude-browse]")]

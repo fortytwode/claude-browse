@@ -85,7 +85,11 @@ def _wire_hooks_and_statusline() -> dict:
 
     hooks = settings.get("hooks", {})
     statusline = settings.get("statusLine", {})
-    already_wired = _fully_wired(hooks) and statusline.get("command") == STATUSLINE_CMD
+    already_wired = (
+        _fully_wired(hooks)
+        and statusline.get("command") == STATUSLINE_CMD
+        and settings.get("agentPushNotifEnabled") is False
+    )
 
     if already_wired:
         print("  agent-board hooks + statusLine already wired in ~/.claude/settings.json (skipping)")
@@ -125,6 +129,14 @@ def _wire_hooks_and_statusline() -> dict:
         settings["statusLine"] = desired_statusline
         changed = True
 
+    if settings.get("agentPushNotifEnabled") is not False:
+        settings["agentPushNotifEnabled"] = False
+        changed = True
+        print(
+            "  Disabled Claude Code's built-in push notifications so "
+            "agent-board's folder/model banners are the only local alerts"
+        )
+
     if changed:
         SETTINGS_PATH.write_text(json.dumps(settings, indent=2) + "\n")
         print(f"  Wired agent-board hooks + statusLine into {SETTINGS_PATH}")
@@ -137,8 +149,7 @@ def _overlap_check(settings: dict) -> None:
     push_enabled = settings.get("agentPushNotifEnabled")
     print(
         f"  agentPushNotifEnabled: {push_enabled!r} "
-        "(Claude Code's own push notifications may already partially cover "
-        "done/needs-input on this device -- agent-board's notifications are additive)"
+        "(kept false by agent-board to avoid duplicate folderless banners)"
     )
 
     try:
