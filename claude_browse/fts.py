@@ -54,7 +54,9 @@ DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
 #     without sending transcript text to a network service.
 # v7: optional dense embedding side cache over semantic_windows, stored and
 #     queried locally. Disabled by default so the normal tool remains offline.
-SCHEMA_VERSION = 7
+# v8: provider parsers move AGENTS/CLAUDE instruction dumps into the
+#     low-weight boilerplate column instead of title/first_msg/user_text.
+SCHEMA_VERSION = 8
 _CLOSEOUT_CUE_WEIGHTS = {
     "closeout": 3.0,
     "close out": 3.0,

@@ -705,6 +705,50 @@ def test_search_ranked_uses_last_activity_for_recency(db):
     ]
 
 
+def test_search_ranked_prefers_real_work_over_instruction_boilerplate(db):
+    for idx in range(5):
+        _seed(
+            db,
+            f"instruction_dump_{idx}",
+            "",
+            timestamp=f"2026-05-1{idx}T00:00:00Z",
+            last_timestamp=f"2026-05-1{idx}T01:00:00Z",
+            title="",
+            first_msg="Continue the imported context.",
+            fts_boiler=(
+                "# AGENTS.md instructions\n"
+                "<INSTRUCTIONS>\n"
+                "| CFO | Vela | Finance, cash flow, client profitability |\n"
+                "</INSTRUCTIONS>"
+            ),
+            segments=[
+                (
+                    "user",
+                    "Continue the imported context.",
+                    f"2026-05-1{idx}T00:00:00Z",
+                )
+            ],
+        )
+    _seed(
+        db,
+        "real_cfo_work",
+        "The CFO weekly report is generated and ready for review.",
+        timestamp="2026-05-09T00:00:00Z",
+        last_timestamp="2026-05-09T01:00:00Z",
+        segments=[
+            (
+                "assistant",
+                "The CFO weekly report is generated and ready for review.",
+                "2026-05-09T01:00:00Z",
+            ),
+        ],
+    )
+
+    results = fts.search_ranked(db, "cfo")
+
+    assert results[0]["session_id"] == "real_cfo_work"
+
+
 def test_search_ranked_uses_latest_matching_mention_not_later_unrelated_activity(db):
     _seed(
         db,

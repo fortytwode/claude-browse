@@ -10,6 +10,11 @@ from datetime import datetime, timezone
 _BOILERPLATE_RE = re.compile(
     r"^\s*[-*]\s*[\w][\w\s.&'-]*?:\s*\d+(?:\.\d+)?\s*h\s*$"
 )
+_INSTRUCTION_DUMP_PREFIX_RE = re.compile(
+    r"^\s*(?:#\s*)?(?:AGENTS|CLAUDE)\.md instructions\b",
+    re.IGNORECASE,
+)
+_INSTRUCTIONS_BLOCK_END_RE = re.compile(r"</INSTRUCTIONS>", re.IGNORECASE)
 
 _NOISE_PREFIXES = (
     "<local-command",
@@ -65,8 +70,22 @@ def is_substantive_text(cleaned: str) -> bool:
 
 
 def split_boilerplate(text: str) -> tuple[str, list[str]]:
-    keep_lines: list[str] = []
+    stripped = text.lstrip()
     boilerplate: list[str] = []
+    if (
+        _INSTRUCTION_DUMP_PREFIX_RE.match(stripped)
+        or stripped.startswith("<INSTRUCTIONS>")
+    ):
+        leading_ws = len(text) - len(stripped)
+        match = _INSTRUCTIONS_BLOCK_END_RE.search(stripped)
+        if match:
+            end = leading_ws + match.end()
+            boilerplate.append(text[:end].strip())
+            text = text[end:].strip()
+        else:
+            return ("", [text.strip()] if text.strip() else [])
+
+    keep_lines: list[str] = []
     for line in text.split("\n"):
         if _BOILERPLATE_RE.match(line):
             boilerplate.append(line.strip())

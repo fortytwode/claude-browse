@@ -10,6 +10,7 @@ import pytest
 
 from claude_browse.providers import claude as claude_provider
 from claude_browse.providers import codex as codex_provider
+from claude_browse.providers import common as provider_common
 from claude_browse.providers import copilot as copilot_provider
 from claude_browse.providers import gemini as gemini_provider
 from claude_browse.providers import get_provider, provider_entries, provider_ids
@@ -434,6 +435,70 @@ def test_claude_provider_recovers_history_sessions_missed_by_glob(
     assert records[0]["first_msg"] == "Find the chess deck discussion"
 
 
+def test_split_boilerplate_moves_agent_instruction_dump_out_of_body():
+    text = (
+        "# AGENTS.md instructions for /Users/alice/team-operations\n"
+        "<INSTRUCTIONS>\n"
+        "## Compound Codex Tool Mapping\n"
+        "| CFO | Vela | Finance, cash flow, profitability |\n"
+        "</INSTRUCTIONS>\n"
+        "Please review the CFO weekly report."
+    )
+
+    body, boilerplate = provider_common.split_boilerplate(text)
+
+    assert body == "Please review the CFO weekly report."
+    assert len(boilerplate) == 1
+    assert "AGENTS.md instructions" in boilerplate[0]
+    assert "Vela" in boilerplate[0]
+
+
+def test_claude_provider_keeps_instruction_dump_out_of_first_msg(tmp_path):
+    session_path = tmp_path / "claude-agent-dump.jsonl"
+    instruction_dump = (
+        "# CLAUDE.md instructions for /Users/alice/team-operations\n"
+        "<INSTRUCTIONS>\n"
+        "## Team Operations\n"
+        "| CFO | Vela | Finance, cash flow, profitability |\n"
+        "</INSTRUCTIONS>"
+    )
+    session_path.write_text(
+        "\n".join([
+            json.dumps({
+                "type": "user",
+                "sessionId": "claude-agent-dump",
+                "cwd": "/Users/alice/team-operations",
+                "timestamp": "2026-05-12T08:00:00Z",
+                "message": {
+                    "role": "user",
+                    "content": instruction_dump,
+                },
+            }),
+            json.dumps({
+                "type": "user",
+                "sessionId": "claude-agent-dump",
+                "cwd": "/Users/alice/team-operations",
+                "timestamp": "2026-05-12T08:02:00Z",
+                "message": {
+                    "role": "user",
+                    "content": "Please review the CFO weekly report.",
+                },
+            }),
+        ])
+        + "\n"
+    )
+
+    info = claude_provider.get_session_info(str(session_path))
+    fields = claude_provider.extract_fielded_corpus(str(session_path))
+
+    assert info is not None
+    assert info["first_msg"] == "Please review the CFO weekly report."
+    assert fields["first_msg"] == "please review the cfo weekly report."
+    assert "vela" not in fields["first_msg"]
+    assert "vela" not in fields["user_text"]
+    assert "vela" in fields["boilerplate"]
+
+
 def test_codex_provider_lists_index_records(monkeypatch, tmp_path):
     state_path = tmp_path / "state.sqlite"
     history_path = tmp_path / "history.jsonl"
@@ -552,6 +617,100 @@ def test_codex_provider_lists_index_records(monkeypatch, tmp_path):
     assert records[0]["path"] == str(session_path)
     assert "paywall copy" in records[0]["last_msg"]
     assert "root cause in the signup gate" in records[0]["fields"]["asst_text"]
+
+
+def test_codex_provider_keeps_agent_instructions_out_of_title_and_first_msg(tmp_path):
+    session_path = tmp_path / "rollout-2026-05-12T09-05-25-019e-agent-dump.jsonl"
+    instruction_dump = (
+        "# AGENTS.md instructions for /Users/alice/team-operations\n"
+        "<INSTRUCTIONS>\n"
+        "## Compound Codex Tool Mapping\n"
+        "| CFO | Vela | Finance, cash flow, profitability |\n"
+        "</INSTRUCTIONS>"
+    )
+    session_path.write_text(
+        "\n".join([
+            json.dumps({
+                "timestamp": "2026-05-12T08:00:00.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": instruction_dump,
+                },
+            }),
+            json.dumps({
+                "timestamp": "2026-05-12T08:02:00.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "Please review the CFO weekly report.",
+                },
+            }),
+        ])
+        + "\n"
+    )
+    codex_provider._CODEX_SESSION_TURNS_CACHE["entries"] = {}
+
+    record = codex_provider._build_index_record(
+        "019e-agent-dump",
+        str(session_path),
+        {
+            "first_user_message": instruction_dump,
+            "title": instruction_dump,
+            "cwd": "/Users/alice/team-operations",
+            "created_ms": 1_776_000_000_000,
+            "updated_ms": 1_776_000_600_000,
+        },
+        {
+            "timestamp": "2026-05-12T08:00:00.000Z",
+            "last_timestamp": "2026-05-12T08:02:00.000Z",
+        },
+        {},
+        0.0,
+        0.0,
+    )
+
+    assert record is not None
+    assert record["first_msg"] == "Please review the CFO weekly report."
+    assert record["name"] == "Please review the CFO weekly report."
+    assert record["fields"]["title"] == ""
+    assert record["fields"]["first_msg"] == "please review the cfo weekly report."
+    assert "vela" not in record["fields"]["first_msg"]
+    assert "vela" not in record["fields"]["user_text"]
+    assert "vela" in record["fields"]["boilerplate"]
+
+
+def test_codex_history_only_record_preserves_instruction_boilerplate():
+    instruction_dump = (
+        "# AGENTS.md instructions for /Users/alice/team-operations\n"
+        "<INSTRUCTIONS>\n"
+        "| CFO | Vela | Finance, cash flow, profitability |\n"
+        "</INSTRUCTIONS>"
+    )
+
+    record = codex_provider._build_index_record(
+        "019e-history-agent-dump",
+        "",
+        {
+            "cwd": "/Users/alice/team-operations",
+            "created_ms": 1_776_000_000_000,
+            "updated_ms": 1_776_000_600_000,
+        },
+        {"timestamp": "2026-05-12T08:00:00.000Z"},
+        {
+            "019e-history-agent-dump": [
+                {"text": instruction_dump, "ts": 1_776_000_000},
+                {"text": "Please review the CFO weekly report.", "ts": 1_776_000_120},
+            ]
+        },
+        1.0,
+        0.0,
+    )
+
+    assert record is not None
+    assert record["first_msg"] == "Please review the CFO weekly report."
+    assert "vela" not in record["fields"]["user_text"]
+    assert "vela" in record["fields"]["boilerplate"]
 
 
 def test_codex_provider_indexes_jsonl_session_without_state_row(monkeypatch, tmp_path):

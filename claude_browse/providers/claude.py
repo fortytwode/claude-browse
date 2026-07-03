@@ -67,8 +67,9 @@ def get_session_info(jsonl_path: str) -> dict | None:
                     msg_count += 1
                     text = extract_text(msg.get("content", ""))
                     if text and len(text) > 3:
-                        cleaned = flatten_text(text)
-                        if not is_noise_text(cleaned):
+                        body, _boilerplate = split_boilerplate(text)
+                        cleaned = flatten_text(body)
+                        if cleaned and not is_noise_text(cleaned):
                             if not first_user_msg:
                                 first_user_msg = cleaned
                             if is_substantive_text(cleaned):

@@ -177,6 +177,11 @@ def _load_session_metadata(session_path: str) -> dict[str, object]:
     return metadata
 
 
+def _searchable_body(text: str) -> str:
+    body, _boilerplate = split_boilerplate(text)
+    return flatten_text(body).strip()
+
+
 def load_history() -> dict[str, list[dict[str, object]]]:
     if not os.path.exists(CODEX_HISTORY_PATH):
         return {}
@@ -316,15 +321,16 @@ def _build_index_record(
     turns = _load_session_turns(session_path)
 
     msg_count = len(turns) or len(events)
-    first_msg = flatten_text(str(state.get("first_user_message") or "")).strip()
+    first_msg = _searchable_body(str(state.get("first_user_message") or ""))
     if not first_msg:
         for role, text in turns:
             if role == "user":
-                first_msg = text
-                break
+                first_msg = _searchable_body(text)
+                if first_msg:
+                    break
         if not first_msg:
             for text in event_texts:
-                cleaned = flatten_text(text)
+                cleaned = _searchable_body(text)
                 if cleaned and not is_noise_text(cleaned):
                     first_msg = cleaned
                     break
@@ -358,10 +364,10 @@ def _build_index_record(
             if not cleaned or is_noise_text(cleaned):
                 continue
             body, boilerplate = split_boilerplate(text)
+            boilerplate_parts.extend(boilerplate)
             if not body:
                 continue
             user_parts.append(body)
-            boilerplate_parts.extend(boilerplate)
             body_flat = flatten_text(body)
             if is_substantive_text(body_flat):
                 last_msg = body_flat
@@ -388,7 +394,10 @@ def _build_index_record(
         session_mtime,
     )
     cwd = state.get("cwd") or metadata.get("cwd") or ""
-    title = str(state.get("title") or "").strip()
+    title_raw = str(state.get("title") or "").strip()
+    title, title_boilerplate = split_boilerplate(title_raw)
+    title = flatten_text(title).strip()
+    boilerplate_parts.extend(title_boilerplate)
 
     return {
         "path": session_path or f"codex://{sid}",
