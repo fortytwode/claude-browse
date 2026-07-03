@@ -63,16 +63,18 @@ def test_compute_name_reuses_existing_title_when_session_still_short(monkeypatch
     assert calls == []  # short session -- no API call needed
 
 
-def test_compute_name_refreshes_from_recent_turns_once_session_has_grown(monkeypatch):
-    """The core fix: a session with an existing (possibly stale) title that
-    has grown past the refresh threshold gets a fresh name from RECENT
-    activity, not the frozen opening-derived title."""
+def test_compute_name_refresh_sees_both_opening_and_recent_turns(monkeypatch):
+    """A grown session gets renamed from its WHOLE arc: the prompt must
+    include the opening (so the name captures the overall topic) AND the
+    recent turns (so drift is reflected). Feeding only the last few turns
+    produced hyper-local names like "adding missing problem statement
+    section" for a 900-message feature build -- real user feedback."""
     monkeypatch.setattr(naming, "_find_jsonl_path", lambda sid: "/fake/path.jsonl")
     monkeypatch.setattr(
         naming, "get_session_info",
         lambda path: {
             "name": "continue codex session context import",  # stale opening title
-            "first_msg": "continue the imported context",
+            "first_msg": "continue the imported context and build the status board",
             "msg_count": 45,  # well past _REFRESH_AFTER_MSGS
         },
     )
@@ -91,7 +93,7 @@ def test_compute_name_refreshes_from_recent_turns_once_session_has_grown(monkeyp
                 @staticmethod
                 def create(**kwargs):
                     captured_prompt["content"] = kwargs["messages"][0]["content"]
-                    content = SimpleNamespace(text="fix code review findings for agent board")
+                    content = SimpleNamespace(text="agent thread status board build")
                     return SimpleNamespace(content=[content])
         return _Client()
 
@@ -99,9 +101,10 @@ def test_compute_name_refreshes_from_recent_turns_once_session_has_grown(monkeyp
 
     name = naming.compute_name("s2b")
 
-    assert name == "fix code review findings for agent board"
-    assert "fix the code review findings" in captured_prompt["content"]  # used recent turns
-    assert "continue the imported context" not in captured_prompt["content"]  # not the stale opener
+    assert name == "agent thread status board build"
+    assert "fix the code review findings" in captured_prompt["content"]  # recent turns present
+    assert "build the status board" in captured_prompt["content"]  # opening present too
+    assert "OVERALL" in captured_prompt["content"]  # prompt asks for the whole-thread topic
 
 
 def test_compute_name_returns_existing_title_when_client_construction_fails(monkeypatch):

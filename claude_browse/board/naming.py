@@ -67,20 +67,39 @@ def _get_client():
         return anthropic.Anthropic()
 
 
-def _recent_context(path: str) -> str:
+def _naming_context(path: str, info: dict) -> str:
+    """Opening + recent turns, so the model sees the thread's whole arc.
+
+    An earlier version fed ONLY the last few turns, which over-corrected
+    the original frozen-on-the-opening-prompt bug: a 900-message session
+    about building a feature got named after whatever micro-task happened
+    in the final turns ("adding missing problem statement section") --
+    real user feedback. The name must capture the overall topic, weighted
+    toward where the work ended up, so the model needs both ends of the
+    thread.
+    """
+    parts = []
+    first_msg = (info.get("first_msg") or "").strip()
+    if first_msg:
+        parts.append(f"how the session started: {first_msg[:_RECENT_CHARS_PER_TURN]}")
     turns = transcript_turns(path, "")
     recent = turns[-_RECENT_TURNS:]
-    return "\n".join(f"{role}: {text[:_RECENT_CHARS_PER_TURN]}" for role, text in recent)
+    if recent:
+        parts.append("most recent exchanges:")
+        parts.extend(f"{role}: {text[:_RECENT_CHARS_PER_TURN]}" for role, text in recent)
+    return "\n".join(parts)
 
 
 def compute_name(session_id: str, *, info: dict | None = None) -> str | None:
-    """Best-effort name reflecting current activity. Never raises.
+    """Best-effort name reflecting the session's overall topic. Never raises.
 
     A short/fresh session reuses Claude Code's own ai-title if present (free,
     usually still accurate). A session that has grown past the refresh
     threshold -- or has no existing title at all -- gets a fresh Haiku
-    synthesis from its most RECENT turns, not just the opening prompt, so
-    the name tracks what the session is actually doing now.
+    synthesis from its opening PLUS its most recent turns, so the name
+    reflects the thread's overall arc (weighted toward where the work has
+    ended up), not the opening prompt frozen forever and not just the very
+    latest exchange.
     """
     path = _find_jsonl_path(session_id)
     if not path:
@@ -97,8 +116,7 @@ def compute_name(session_id: str, *, info: dict | None = None) -> str | None:
     if existing_title and msg_count < _REFRESH_AFTER_MSGS:
         return existing_title
 
-    recent = _recent_context(path)
-    prompt_body = recent or info.get("first_msg") or ""
+    prompt_body = _naming_context(path, info)
     if not prompt_body:
         return existing_title
 
@@ -111,11 +129,13 @@ def compute_name(session_id: str, *, info: dict | None = None) -> str | None:
                 {
                     "role": "user",
                     "content": (
-                        "This is an excerpt from an ongoing coding-assistant session. "
-                        "Summarize what is CURRENTLY being worked on in 4-6 words, "
-                        "lowercase, no punctuation, no quotes -- focus on the most "
-                        "recent activity shown here, not necessarily the original "
-                        "request if the topic has moved on:\n\n" + prompt_body
+                        "This shows how an ongoing coding-assistant session started "
+                        "and its most recent exchanges. Name the session's OVERALL "
+                        "topic in 4-6 words, lowercase, no punctuation, no quotes. "
+                        "The name must say what the thread as a whole is about -- "
+                        "weighted toward where the work has ended up if the topic "
+                        "drifted, but never just the very latest exchange or "
+                        "micro-task:\n\n" + prompt_body
                     ),
                 }
             ],
