@@ -128,6 +128,46 @@ def test_compute_name_returns_none_when_no_jsonl_found(monkeypatch):
     assert naming.compute_name("s4") is None
 
 
+def test_clean_name_strips_preamble_and_slash_tokens():
+    """Regression: Haiku once replied 'looking at your recent exchanges, the
+    overall topic of this session is: /rc slack alert message problem
+    statement' and the raw string shipped to the board, the macOS banner,
+    and the Slack alert."""
+    raw = ("looking at your recent exchanges, the overall topic of this "
+           "session is: /rc slack alert message problem statement")
+    assert naming._clean_name(raw) == "slack alert message problem statement"
+
+
+def test_clean_name_accepts_a_normal_terse_name():
+    assert naming._clean_name("agent thread status board build") == "agent thread status board build"
+    assert naming._clean_name('"Batch Posting To TikTok Via API"') == "batch posting to tiktok via api"
+
+
+def test_clean_name_rejects_sentences_and_junk():
+    assert naming._clean_name(
+        "this session appears to be a long conversation about many different "
+        "topics including building a feature and fixing several bugs"
+    ) is None  # too many words
+    assert naming._clean_name("x") is None  # too short
+    assert naming._clean_name("") is None
+    assert naming._clean_name("/rc //") is None  # nothing left after junk tokens
+
+
+def test_compute_name_falls_back_to_existing_title_when_model_output_invalid(monkeypatch):
+    monkeypatch.setattr(naming, "_find_jsonl_path", lambda sid: "/fake/path.jsonl")
+    monkeypatch.setattr(naming, "transcript_turns", lambda path, sid: [("user", "some work")])
+    monkeypatch.setattr(
+        naming, "get_session_info",
+        lambda path: {"name": "good existing title", "first_msg": "some work", "msg_count": 50},
+    )
+    monkeypatch.setattr(naming, "_get_client", lambda: _fake_client(
+        "well, looking at everything here I would say this session is really about "
+        "quite a lot of different threads of work happening at once"
+    ))
+
+    assert naming.compute_name("s-invalid") == "good existing title"
+
+
 def test_maybe_name_names_a_never_named_row(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     store.upsert("s5", host="air", cwd="/tmp/proj", state="idle",

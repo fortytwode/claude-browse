@@ -67,6 +67,34 @@ def _get_client():
         return anthropic.Anthropic()
 
 
+#: A name is a terse label, not a sentence. Anything outside these bounds is
+#: model misbehavior (preamble, explanation, truncated rambling) and must be
+#: rejected rather than stored -- the name goes verbatim onto the statusline,
+#: the macOS banner, and the Slack alert, so verbosity there is user-facing.
+_NAME_MAX_WORDS = 8
+_NAME_MAX_CHARS = 60
+
+
+def _clean_name(raw: str) -> str | None:
+    """Normalize a model response into a valid name, or None if it isn't one.
+
+    Defense in depth behind the prompt/prefill: strips quotes and any
+    'the topic is:'-style preamble (take what follows the last colon),
+    drops leading slash-command tokens leaked from transcripts, then
+    rejects anything that still doesn't look like a terse label.
+    """
+    text = raw.strip().strip('"').strip("'")
+    if ":" in text:
+        text = text.rsplit(":", 1)[1]
+    words = [w for w in text.split() if w]
+    while words and not words[0][0].isalnum():
+        words.pop(0)
+    text = " ".join(words).strip(" .").lower()
+    if not (2 <= len(text.split()) <= _NAME_MAX_WORDS) or len(text) > _NAME_MAX_CHARS:
+        return None
+    return text
+
+
 def _naming_context(path: str, info: dict) -> str:
     """Opening + recent turns, so the model sees the thread's whole arc.
 
@@ -124,23 +152,29 @@ def compute_name(session_id: str, *, info: dict | None = None) -> str | None:
         client = _get_client()
         response = client.messages.create(
             model=_MODEL,
-            max_tokens=20,
+            max_tokens=30,
             messages=[
                 {
                     "role": "user",
                     "content": (
-                        "This shows how an ongoing coding-assistant session started "
-                        "and its most recent exchanges. Name the session's OVERALL "
-                        "topic in 4-6 words, lowercase, no punctuation, no quotes. "
-                        "The name must say what the thread as a whole is about -- "
-                        "weighted toward where the work has ended up if the topic "
-                        "drifted, but never just the very latest exchange or "
-                        "micro-task:\n\n" + prompt_body
+                        "Here is how an ongoing coding-assistant session started "
+                        "and its most recent exchanges:\n\n" + prompt_body + "\n\n"
+                        "Name this session's OVERALL topic -- what the thread as a "
+                        "whole is about, weighted toward where the work ended up if "
+                        "it drifted, never just the latest micro-task.\n"
+                        "Reply with ONLY the name: 4-6 lowercase words, no "
+                        "punctuation, no quotes, no preamble, no explanation."
                     ),
-                }
+                },
+                # Prefill: the assistant turn already begins, so the model can
+                # only continue with the name itself -- no room for "looking at
+                # your recent exchanges, the topic is:" style preamble (which
+                # once burned the whole token budget and shipped as a garbage
+                # name to the board, the macOS banner, and the Slack alert).
+                {"role": "assistant", "content": "name:"},
             ],
         )
-        text = response.content[0].text.strip().strip('"').lower()
+        text = _clean_name(response.content[0].text)
         return text or existing_title
     except Exception:
         return existing_title
