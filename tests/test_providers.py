@@ -713,6 +713,35 @@ def test_codex_history_only_record_preserves_instruction_boilerplate():
     assert "vela" in record["fields"]["boilerplate"]
 
 
+def test_codex_state_records_tolerate_locked_state_db(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.sqlite"
+    state_path.write_text("placeholder")
+    calls: list[dict[str, object]] = []
+
+    class LockedConn:
+        def execute(self, sql, *args):
+            if str(sql).strip().upper().startswith("PRAGMA"):
+                return self
+            raise sqlite3.OperationalError("database is locked")
+
+        def close(self):
+            return None
+
+    def fake_connect(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return LockedConn()
+
+    monkeypatch.setattr(codex_provider, "CODEX_STATE_DB", str(state_path))
+    monkeypatch.setattr(codex_provider.sqlite3, "connect", fake_connect)
+
+    records, mtime = codex_provider._load_state_records()
+
+    assert records == []
+    assert mtime == state_path.stat().st_mtime
+    assert calls[0]["kwargs"]["uri"] is True
+    assert calls[0]["kwargs"]["timeout"] == codex_provider.SQLITE_BUSY_TIMEOUT_MS / 1000
+
+
 def test_codex_provider_indexes_jsonl_session_without_state_row(monkeypatch, tmp_path):
     sessions_dir = tmp_path / "sessions" / "2026" / "05" / "12"
     sessions_dir.mkdir(parents=True)

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sqlite3
+import urllib.request
 
 from .base import ProviderSpec
 from .common import (
@@ -22,6 +23,7 @@ from .common import (
 CODEX_STATE_DB = os.path.expanduser("~/.codex/state_5.sqlite")
 CODEX_HISTORY_PATH = os.path.expanduser("~/.codex/history.jsonl")
 CODEX_SESSIONS_DIR = os.path.expanduser("~/.codex/sessions")
+SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 _CODEX_HISTORY_CACHE: dict[str, object] = {
     "mtime": None,
@@ -138,6 +140,23 @@ def _session_id_from_path(session_path: str) -> str:
     return stem
 
 
+def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
+def _open_state_db(path: str) -> sqlite3.Connection:
+    uri_path = urllib.request.pathname2url(os.path.abspath(path))
+    conn = sqlite3.connect(
+        f"file:{uri_path}?mode=ro",
+        timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
+        uri=True,
+    )
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
 def _load_session_metadata(session_path: str) -> dict[str, object]:
     metadata: dict[str, object] = {
         "session_id": _session_id_from_path(session_path),
@@ -221,7 +240,12 @@ def _load_state_records() -> tuple[list[dict[str, object]], float]:
         return ([], 0.0)
 
     state_mtime = os.path.getmtime(CODEX_STATE_DB)
-    conn = sqlite3.connect(CODEX_STATE_DB)
+    try:
+        conn = _open_state_db(CODEX_STATE_DB)
+    except sqlite3.OperationalError as exc:
+        if _is_sqlite_lock_error(exc):
+            return ([], state_mtime)
+        raise
     try:
         try:
             rows = conn.execute(
@@ -233,7 +257,9 @@ def _load_state_records() -> tuple[list[dict[str, object]], float]:
                 ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC
                 """
             ).fetchall()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            if _is_sqlite_lock_error(exc):
+                return ([], state_mtime)
             try:
                 rows = conn.execute(
                     """
@@ -244,16 +270,23 @@ def _load_state_records() -> tuple[list[dict[str, object]], float]:
                     ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC
                     """
                 ).fetchall()
-            except sqlite3.OperationalError:
-                legacy_rows = conn.execute(
-                    """
-                    SELECT id, cwd, title, first_user_message, created_at_ms,
-                           updated_at_ms, created_at, updated_at
-                    FROM threads
-                    WHERE COALESCE(thread_source, '') != 'subagent'
-                    ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC
-                    """
-                ).fetchall()
+            except sqlite3.OperationalError as exc:
+                if _is_sqlite_lock_error(exc):
+                    return ([], state_mtime)
+                try:
+                    legacy_rows = conn.execute(
+                        """
+                        SELECT id, cwd, title, first_user_message, created_at_ms,
+                               updated_at_ms, created_at, updated_at
+                        FROM threads
+                        WHERE COALESCE(thread_source, '') != 'subagent'
+                        ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError as exc:
+                    if _is_sqlite_lock_error(exc):
+                        return ([], state_mtime)
+                    raise
                 rows = [
                     (
                         sid,

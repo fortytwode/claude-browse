@@ -34,6 +34,7 @@ from .query import (
 )
 
 DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
+SQLITE_BUSY_TIMEOUT_MS = 30_000
 # v2: added last_timestamp column so the list view can sort by most recent
 #     activity instead of session start time.
 # v3: split sessions_fts from a single 'corpus' column into six fielded
@@ -334,10 +335,26 @@ def _semantic_mismatch_penalty(text: str, plan: QueryPlan) -> float:
     return penalty
 
 
-def open_db(path: str = DB_PATH) -> sqlite3.Connection:
+def _connect_sqlite(path: str, *, read_only: bool = False) -> sqlite3.Connection:
+    timeout_s = SQLITE_BUSY_TIMEOUT_MS / 1000
+    if read_only:
+        uri_path = urllib.request.pathname2url(os.path.abspath(path))
+        conn = sqlite3.connect(f"file:{uri_path}?mode=ro", timeout=timeout_s, uri=True)
+    else:
+        conn = sqlite3.connect(path, timeout=timeout_s)
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    return conn
+
+
+def open_db(path: str = DB_PATH, *, read_only: bool = False) -> sqlite3.Connection:
     """Open or create the FTS index database."""
+    if read_only:
+        conn = _connect_sqlite(path, read_only=True)
+        conn.execute("PRAGMA query_only = ON")
+        return conn
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = _connect_sqlite(path)
     conn.execute("PRAGMA journal_mode=WAL")
     _init_schema(conn)
     return conn

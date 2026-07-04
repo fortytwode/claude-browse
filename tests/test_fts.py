@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import tempfile
 import time
 from pathlib import Path
@@ -39,6 +40,38 @@ def _dense_embeddings_off_by_default(monkeypatch):
     monkeypatch.delenv("CLAUDE_BROWSE_EMBEDDING_DIMENSIONS", raising=False)
     monkeypatch.delenv("CLAUDE_BROWSE_EMBEDDING_BATCH_SIZE", raising=False)
     monkeypatch.delenv("CLAUDE_BROWSE_DENSE_MIN_SCORE", raising=False)
+
+
+def test_open_db_sets_busy_timeout(tmp_path):
+    path = tmp_path / "index.db"
+    conn = fts.open_db(str(path))
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == (
+            fts.SQLITE_BUSY_TIMEOUT_MS
+        )
+    finally:
+        conn.close()
+
+
+def test_open_db_read_only_skips_schema_setup(monkeypatch, tmp_path):
+    path = tmp_path / "index.db"
+    conn = fts.open_db(str(path))
+    conn.close()
+
+    def fail_init(_conn):
+        raise AssertionError("read-only opens must not initialize schema")
+
+    monkeypatch.setattr(fts, "_init_schema", fail_init)
+    read_conn = fts.open_db(str(path), read_only=True)
+    try:
+        assert read_conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+        assert read_conn.execute("PRAGMA busy_timeout").fetchone()[0] == (
+            fts.SQLITE_BUSY_TIMEOUT_MS
+        )
+        with pytest.raises(sqlite3.OperationalError):
+            read_conn.execute("CREATE TABLE read_only_probe (id INTEGER)")
+    finally:
+        read_conn.close()
 
 
 def _seed(conn, sid: str, corpus: str, **meta) -> None:
