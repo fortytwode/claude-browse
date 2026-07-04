@@ -583,11 +583,11 @@ def _write_preview_script(
     """Write a helper script fzf calls to render session previews."""
     script = f"""#!/usr/bin/env python3
 import os
-import sqlite3
 import sys
 
 sys.path.insert(0, {package_dir!r})
 
+from claude_browse import fts
 from claude_browse.core import (
     extract_query_terms,
     highlight_terms,
@@ -601,7 +601,7 @@ ROW_META_SEP = {ROW_META_SEP!r}
 
 
 def _lookup_session(session_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = fts.open_db(DB_PATH, read_only=True)
     try:
         return conn.execute(
             '''
@@ -757,7 +757,7 @@ CURRENT_CWD = {current_cwd!r}
 LIMIT = {limit}
 
 q = os.environ.get("FZF_QUERY", "")
-conn = fts.open_db(DB_PATH)
+conn = fts.open_db(DB_PATH, read_only=True)
 ranker = "recent"
 start = time.perf_counter()
 if q.strip():
@@ -1407,7 +1407,7 @@ def _should_auto_relocate(origin_cwd: str | None, launch_cwd: str | None) -> boo
 
 
 def _load_session_by_id(session_id: str) -> dict | None:
-    conn = fts.open_db()
+    conn = fts.open_db(read_only=True)
     try:
         return fts.get_by_sid(conn, session_id)
     finally:
@@ -1479,7 +1479,7 @@ def main() -> None:
     prefixes = _folder_prefixes()
     limit = 999 if show_all else DEFAULT_LIMIT
 
-    conn = fts.open_db()
+    conn = fts.open_db(read_only=True)
     initial = fts.list_recent(conn, limit=limit)
     if cwd_filter:
         initial = [r for r in initial if (r.get("cwd") or "").startswith(cwd_filter)]

@@ -363,6 +363,7 @@ def test_write_search_script_reads_query_from_fzf_env(tmp_path):
     text = script_path.read_text()
     assert 'q = os.environ.get("FZF_QUERY", "")' in text
     assert "CURRENT_CWD = '/tmp/current'" in text
+    assert "conn = fts.open_db(DB_PATH, read_only=True)" in text
     assert "current_cwd=CURRENT_CWD" in text
     assert "search_log.log_search(" in text
     assert "elapsed_ms=(time.perf_counter() - start) * 1000" in text
@@ -382,6 +383,7 @@ def test_write_preview_script_reads_query_from_row_metadata_with_fzf_env_fallbac
     text = script_path.read_text()
     assert '(row_meta or {}).get("query", "")' in text
     assert 'or os.environ.get("FZF_QUERY", "")' in text
+    assert "conn = fts.open_db(DB_PATH, read_only=True)" in text
     assert '"match_segment_idx": row_meta.get("match_segment_idx", "")' in text
     assert "query.strip().strip" in text
     assert 'sys.argv[2]' not in text
