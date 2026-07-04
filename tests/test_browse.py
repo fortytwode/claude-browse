@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 
@@ -734,6 +735,90 @@ def test_main_empty_state_message_is_dynamic(monkeypatch, capsys):
     assert excinfo.value.code == 1
     assert "No local Claude or Copilot sessions found." in captured.out
     assert "Run `claude` or `copilot` at least once" in captured.out
+
+
+def test_main_does_not_rebuild_when_first_indexing_is_locked(monkeypatch, capsys):
+    class CountCursor:
+        def fetchone(self):
+            return (0,)
+
+    class Conn:
+        def execute(self, _sql):
+            return CountCursor()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(browse, "_check_fzf", lambda: None)
+    monkeypatch.setattr(browse, "_providers_with_local_state", lambda: ["claude"])
+    monkeypatch.setattr(browse.fts, "open_db", lambda *args, **kwargs: Conn())
+    monkeypatch.setattr(
+        browse.fts,
+        "reindex",
+        lambda _conn: (_ for _ in ()).throw(
+            sqlite3.OperationalError("database is locked")
+        ),
+    )
+    monkeypatch.setattr(
+        browse.fts,
+        "reset_db",
+        lambda: (_ for _ in ()).throw(AssertionError("must not reset on lock")),
+    )
+    monkeypatch.setattr(browse.sys, "argv", ["claude-browse"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        browse.main()
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 1
+    assert "Indexing sessions for the first time..." in captured.err
+    assert "Search index is locked by another claude-browse process" in captured.err
+    assert "Search index corrupted" not in captured.err
+
+
+def test_main_uses_existing_index_when_refresh_is_locked(monkeypatch, capsys):
+    class CountCursor:
+        def fetchone(self):
+            return (1,)
+
+    class Conn:
+        def execute(self, _sql):
+            return CountCursor()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(browse, "_check_fzf", lambda: None)
+    monkeypatch.setattr(browse, "_providers_with_local_state", lambda: ["claude"])
+    monkeypatch.setattr(browse, "_folder_prefixes", lambda: [])
+    monkeypatch.setattr(browse.fts, "open_db", lambda *args, **kwargs: Conn())
+    monkeypatch.setattr(
+        browse.fts,
+        "reindex",
+        lambda _conn: (_ for _ in ()).throw(
+            sqlite3.OperationalError("database is locked")
+        ),
+    )
+    monkeypatch.setattr(
+        browse.fts,
+        "reset_db",
+        lambda: (_ for _ in ()).throw(AssertionError("must not reset on lock")),
+    )
+    monkeypatch.setattr(browse.fts, "list_recent", lambda _conn, limit: [_info()])
+    monkeypatch.setattr(
+        browse.subprocess,
+        "run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 1, "stdout": ""})(),
+    )
+    monkeypatch.setattr(browse.sys, "argv", ["claude-browse"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        browse.main()
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 0
+    assert "using the existing index without refreshing" in captured.err
+    assert "Search index corrupted" not in captured.err
 
 
 def test_main_list_providers_prints_without_fzf(monkeypatch, capsys):

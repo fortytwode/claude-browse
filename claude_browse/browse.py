@@ -1407,6 +1407,11 @@ def _should_auto_relocate(origin_cwd: str | None, launch_cwd: str | None) -> boo
     return not origin or origin != launch
 
 
+def _is_sqlite_lock_error(exc: sqlite3.Error) -> bool:
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
 def _load_session_by_id(session_id: str) -> dict | None:
     conn = fts.open_db(read_only=True)
     try:
@@ -1475,20 +1480,37 @@ def main() -> None:
     try:
         added, updated, removed = fts.reindex(conn)
     except sqlite3.DatabaseError as exc:
-        # The index is a derived cache over the session JSONL files -- when
-        # it corrupts (observed live: 'UNIQUE constraint failed:
-        # semantic_terms.term' from B-tree pages with out-of-order rowids,
-        # likely a mid-write kill under many concurrent sessions), the right
-        # move is a transparent rebuild from source, never a startup crash.
-        print(
-            f"Search index corrupted ({exc}); rebuilding from scratch...",
-            file=sys.stderr,
-        )
-        conn.close()
-        fts.reset_db()
-        conn = fts.open_db()
-        added, updated, removed = fts.reindex(conn)
-        print(f"  rebuilt: {added} sessions reindexed", file=sys.stderr)
+        if _is_sqlite_lock_error(exc):
+            if total_pre == 0:
+                print(
+                    "Search index is locked by another claude-browse process, "
+                    "probably because that process is building it. Not "
+                    "rebuilding from scratch; try again after it finishes.",
+                    file=sys.stderr,
+                )
+                conn.close()
+                sys.exit(1)
+            print(
+                "Search index is locked by another claude-browse process; "
+                "using the existing index without refreshing.",
+                file=sys.stderr,
+            )
+            added = updated = removed = 0
+        else:
+            # The index is a derived cache over the session JSONL files -- when
+            # it corrupts (observed live: 'UNIQUE constraint failed:
+            # semantic_terms.term' from B-tree pages with out-of-order rowids,
+            # likely a mid-write kill under many concurrent sessions), the right
+            # move is a transparent rebuild from source, never a startup crash.
+            print(
+                f"Search index corrupted ({exc}); rebuilding from scratch...",
+                file=sys.stderr,
+            )
+            conn.close()
+            fts.reset_db()
+            conn = fts.open_db()
+            added, updated, removed = fts.reindex(conn)
+            print(f"  rebuilt: {added} sessions reindexed", file=sys.stderr)
     if added + updated + removed > 0 and total_pre == 0:
         print(f"  indexed {added} sessions", file=sys.stderr)
     conn.close()
