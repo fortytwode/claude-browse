@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -955,3 +956,180 @@ def test_copilot_provider_lists_index_records(monkeypatch, tmp_path):
     assert records[0]["cwd"] == "/home/alice/team-operations"
     assert "faq section" in records[0]["last_msg"].lower()
     assert "hero section" in records[0]["fields"]["asst_text"]
+
+
+def _make_codex_corpus(tmp_path, *, updated_ms=1_776_000_600_000):
+    """State DB + history + one session file with pinned mtimes."""
+    state_path = tmp_path / "state.sqlite"
+    history_path = tmp_path / "history.jsonl"
+    sessions_dir = tmp_path / "sessions" / "2026" / "05" / "12"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    session_path = sessions_dir / (
+        "rollout-2026-05-12T09-05-25-019e-test-aaaa-bbbb-cccccccccccc.jsonl"
+    )
+    sid = "019e-test-aaaa-bbbb-cccccccccccc"
+
+    if state_path.exists():
+        state_path.unlink()
+    conn = sqlite3.connect(state_path)
+    conn.execute(
+        """
+        CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            cwd TEXT NOT NULL,
+            title TEXT NOT NULL,
+            first_user_message TEXT NOT NULL DEFAULT '',
+            created_at_ms INTEGER,
+            updated_at_ms INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            thread_source TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO threads (
+            id, path, cwd, title, first_user_message, created_at_ms, updated_at_ms,
+            created_at, updated_at, thread_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            sid,
+            str(session_path),
+            "/Users/alice/code/codex-app",
+            "Fix onboarding bug",
+            "Please debug the onboarding flow",
+            1_776_000_000_000,
+            updated_ms,
+            1_776_000_000,
+            updated_ms // 1000,
+            "user",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    history_path.write_text(
+        '{"session_id":"%s","ts":1776000000,"text":"Please debug the onboarding flow"}\n'
+        '{"session_id":"%s","ts":1776000120,"text":"Now switch to paywall copy"}\n'
+        % (sid, sid)
+    )
+    session_path.write_text(
+        json.dumps({
+            "timestamp": "2026-05-12T08:00:00.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "Please debug the onboarding flow",
+            },
+        }) + "\n"
+    )
+    # Pin the session file mtime below the state row's freshness so the
+    # per-session components are deterministic in the gate math.
+    os.utime(session_path, (1_776_000_000, 1_776_000_000))
+    return sid, state_path, history_path, session_path
+
+
+def _patch_codex_paths(monkeypatch, tmp_path, state_path, history_path):
+    monkeypatch.setattr(codex_provider, "CODEX_STATE_DB", str(state_path))
+    monkeypatch.setattr(codex_provider, "CODEX_HISTORY_PATH", str(history_path))
+    monkeypatch.setattr(
+        codex_provider, "CODEX_SESSIONS_DIR", str(tmp_path / "sessions")
+    )
+    codex_provider._CODEX_HISTORY_CACHE["mtime"] = None
+    codex_provider._CODEX_HISTORY_CACHE["entries"] = {}
+    codex_provider._CODEX_SESSION_TURNS_CACHE["entries"] = {}
+
+
+def test_codex_gate_stubs_unchanged_sessions_without_parsing(monkeypatch, tmp_path):
+    sid, state_path, history_path, session_path = _make_codex_corpus(tmp_path)
+    _patch_codex_paths(monkeypatch, tmp_path, state_path, history_path)
+    spec = get_provider("codex")
+
+    baseline = spec.list_index_records()
+    assert len(baseline) == 1
+    stored_mtime = baseline[0]["mtime"]
+    known = {str(session_path): (sid, stored_mtime)}
+
+    parse_calls: list[str] = []
+    real_meta = codex_provider._load_session_metadata
+
+    def counting_meta(path):
+        parse_calls.append(path)
+        return real_meta(path)
+
+    monkeypatch.setattr(codex_provider, "_load_session_metadata", counting_meta)
+
+    records = spec.list_index_records(known_sessions=known)
+    assert parse_calls == [], "unchanged session file must not be parsed"
+    assert len(records) == 1
+    stub = records[0]
+    assert stub.get("unchanged") is True
+    assert stub["path"] == str(session_path)
+    assert stub["provider"] == "codex"
+    assert abs(float(stub["mtime"]) - float(stored_mtime)) <= 0.001
+
+
+def test_codex_gate_reparses_when_history_advances(monkeypatch, tmp_path):
+    sid, state_path, history_path, session_path = _make_codex_corpus(tmp_path)
+    _patch_codex_paths(monkeypatch, tmp_path, state_path, history_path)
+    spec = get_provider("codex")
+
+    baseline = spec.list_index_records()
+    known = {str(session_path): (sid, baseline[0]["mtime"])}
+
+    # A new history entry for this sid, newer than every stored component.
+    with open(history_path, "a") as f:
+        f.write(
+            json.dumps({"session_id": sid, "ts": 1_776_000_999, "text": "one more thing"})
+            + "\n"
+        )
+    codex_provider._CODEX_HISTORY_CACHE["mtime"] = None
+    codex_provider._CODEX_HISTORY_CACHE["entries"] = {}
+
+    records = spec.list_index_records(known_sessions=known)
+    assert len(records) == 1
+    assert records[0].get("unchanged") is None, "history advance must force a re-parse"
+    assert records[0]["session_id"] == sid
+    assert float(records[0]["mtime"]) > float(baseline[0]["mtime"])
+
+
+def test_codex_gate_reparses_when_state_row_advances(monkeypatch, tmp_path):
+    sid, state_path, history_path, session_path = _make_codex_corpus(tmp_path)
+    _patch_codex_paths(monkeypatch, tmp_path, state_path, history_path)
+    spec = get_provider("codex")
+
+    baseline = spec.list_index_records()
+    known = {str(session_path): (sid, baseline[0]["mtime"])}
+
+    conn = sqlite3.connect(state_path)
+    conn.execute(
+        "UPDATE threads SET updated_at_ms = ?, updated_at = ? WHERE id = ?",
+        (1_776_000_800_000, 1_776_000_800, sid),
+    )
+    conn.commit()
+    conn.close()
+
+    records = spec.list_index_records(known_sessions=known)
+    assert len(records) == 1
+    assert records[0].get("unchanged") is None, "state advance must force a re-parse"
+    assert float(records[0]["mtime"]) > float(baseline[0]["mtime"])
+
+
+def test_codex_gate_reparses_when_session_file_advances(monkeypatch, tmp_path):
+    sid, state_path, history_path, session_path = _make_codex_corpus(tmp_path)
+    _patch_codex_paths(monkeypatch, tmp_path, state_path, history_path)
+    spec = get_provider("codex")
+
+    baseline = spec.list_index_records()
+    known = {str(session_path): (sid, baseline[0]["mtime"])}
+
+    os.utime(session_path, (1_776_000_900, 1_776_000_900))
+    codex_provider._CODEX_SESSION_TURNS_CACHE["entries"] = {}
+
+    records = spec.list_index_records(known_sessions=known)
+    assert len(records) == 1
+    assert records[0].get("unchanged") is None, "session mtime advance must re-parse"
+    assert float(records[0]["mtime"]) > float(baseline[0]["mtime"])

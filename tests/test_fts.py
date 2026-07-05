@@ -2045,7 +2045,10 @@ def test_reset_db_quarantines_corrupt_file_and_allows_fresh_open(tmp_path):
     assert not os.path.exists(db_path + "-wal")
     assert not os.path.exists(db_path + "-shm")
     quarantined = [p for p in os.listdir(tmp_path) if ".corrupt-" in p]
-    assert len(quarantined) == 1  # kept for forensics, not deleted
+    # db + renamed -wal/-shm siblings, kept together for forensics.
+    assert len(quarantined) == 3
+    assert sum(1 for p in quarantined if p.endswith("-wal")) == 1
+    assert sum(1 for p in quarantined if p.endswith("-shm")) == 1
 
     conn2 = fts.open_db(db_path)  # fresh open works
     assert conn2.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
@@ -2125,3 +2128,70 @@ def test_reindex_survives_reader_pinning_the_wal(tmp_path, monkeypatch):
     finally:
         reader.close()
         conn.close()
+
+
+def test_prune_quarantines_keeps_newest_recent_generation_only(tmp_path):
+    db_path = str(tmp_path / "index.db")
+    old_stamp = time.strftime(
+        "%Y%m%d-%H%M%S", time.localtime(time.time() - 10 * 86400)
+    )
+    fresh_stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time() - 60))
+    older_fresh_stamp = time.strftime(
+        "%Y%m%d-%H%M%S", time.localtime(time.time() - 3600)
+    )
+    for stamp in (old_stamp, older_fresh_stamp, fresh_stamp):
+        Path(f"{db_path}.corrupt-{stamp}").write_bytes(b"x")
+        Path(f"{db_path}.corrupt-{stamp}-wal").write_bytes(b"x")
+
+    fts._prune_quarantines(db_path)
+
+    remaining = sorted(p for p in os.listdir(tmp_path) if ".corrupt-" in p)
+    # Only the newest generation survives (db + wal); the aged-out and
+    # over-quota generations are gone.
+    assert remaining == [
+        f"index.db.corrupt-{fresh_stamp}",
+        f"index.db.corrupt-{fresh_stamp}-wal",
+    ]
+
+
+def test_prune_quarantines_drops_even_newest_when_aged_out(tmp_path):
+    db_path = str(tmp_path / "index.db")
+    old_stamp = time.strftime(
+        "%Y%m%d-%H%M%S", time.localtime(time.time() - 10 * 86400)
+    )
+    Path(f"{db_path}.corrupt-{old_stamp}").write_bytes(b"x")
+
+    fts._prune_quarantines(db_path)
+
+    assert [p for p in os.listdir(tmp_path) if ".corrupt-" in p] == []
+
+
+def test_default_db_path_is_per_host():
+    import platform as _platform
+
+    path = fts._default_db_path()
+    host = _platform.node().split(".")[0] or "local"
+    import re as _re
+
+    safe_host = _re.sub(r"[^A-Za-z0-9_-]", "-", host)
+    assert path.endswith(f"claude-browse-index.{safe_host}.db")
+
+
+def test_open_db_reclaims_legacy_unsuffixed_cache(tmp_path, monkeypatch):
+    legacy = tmp_path / "claude-browse-index.db"
+    legacy.write_bytes(b"x")
+    Path(str(legacy) + "-wal").write_bytes(b"x")
+    Path(str(legacy) + "-shm").write_bytes(b"x")
+    Path(str(legacy) + ".corrupt-20260704-101126").write_bytes(b"x")
+    per_host = tmp_path / "claude-browse-index.testhost.db"
+    monkeypatch.setattr(fts, "DB_PATH", str(per_host))
+    monkeypatch.setattr(fts, "_LEGACY_DB_PATH", str(legacy))
+
+    conn = fts.open_db(str(per_host))
+    conn.close()
+
+    assert not legacy.exists()
+    assert not os.path.exists(str(legacy) + "-wal")
+    assert not os.path.exists(str(legacy) + "-shm")
+    assert not os.path.exists(str(legacy) + ".corrupt-20260704-101126")
+    assert per_host.exists()

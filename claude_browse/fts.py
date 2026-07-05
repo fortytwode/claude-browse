@@ -10,10 +10,12 @@ deletable any time; the next claude-browse run rebuilds from JSONL.
 
 from __future__ import annotations
 
+import glob as _glob
 import hashlib
 import json
 import math
 import os
+import platform
 import re
 import sqlite3
 import struct
@@ -33,8 +35,30 @@ from .query import (
     term_spans,
 )
 
-DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
+def _default_db_path() -> str:
+    """Per-host index path.
+
+    The index is a machine-local derived cache. If ~/.claude/cache is ever
+    synced between machines (Dropbox/iCloud/Syncthing), a shared SQLite
+    file gets its db/-wal pages interleaved by two hosts and corrupts;
+    flock-based writer election cannot reach across machines. A hostname
+    suffix makes each host's index a distinct file. Cost: one rebuild per
+    host, once.
+    """
+    host = platform.node().split(".")[0] or "local"
+    safe_host = re.sub(r"[^A-Za-z0-9_-]", "-", host)
+    return os.path.expanduser(
+        f"~/.claude/cache/claude-browse-index.{safe_host}.db"
+    )
+
+
+DB_PATH = _default_db_path()
+# Pre-per-host filenames, removed on first open to reclaim gigabytes of
+# dead cache. Exact names only -- never glob the user's cache dir broadly.
+_LEGACY_DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
 SQLITE_BUSY_TIMEOUT_MS = 30_000
+QUARANTINE_KEEP = 1
+QUARANTINE_MAX_AGE_S = 7 * 86400
 # v2: added last_timestamp column so the list view can sort by most recent
 #     activity instead of session start time.
 # v3: split sessions_fts from a single 'corpus' column into six fielded
@@ -354,6 +378,8 @@ def open_db(path: str = DB_PATH, *, read_only: bool = False) -> sqlite3.Connecti
         return conn
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    if path == DB_PATH:
+        _cleanup_legacy_cache()
     conn = _connect_sqlite(path)
     conn.execute("PRAGMA journal_mode=WAL")
     # WAL + NORMAL is structurally crash-safe (a kill can lose the last
@@ -364,6 +390,25 @@ def open_db(path: str = DB_PATH, *, read_only: bool = False) -> sqlite3.Connecti
     conn.execute("PRAGMA wal_autocheckpoint=1000")
     _init_schema(conn)
     return conn
+
+
+def _cleanup_legacy_cache() -> None:
+    """Reclaim the pre-per-host index files (exact known names only).
+
+    The un-suffixed DB grew past 1 GB with a similarly sized WAL and
+    quarantine copies; it is dead weight once the per-host path is live.
+    """
+    candidates = [
+        _LEGACY_DB_PATH,
+        _LEGACY_DB_PATH + "-wal",
+        _LEGACY_DB_PATH + "-shm",
+        *_glob.glob(_glob.escape(_LEGACY_DB_PATH) + ".corrupt-*"),
+    ]
+    for candidate in candidates:
+        try:
+            os.remove(candidate)
+        except OSError:
+            pass
 
 
 def checkpoint_wal(conn: sqlite3.Connection) -> None:
@@ -394,11 +439,17 @@ def reset_db(path: str = DB_PATH) -> None:
     The DB is a derived cache over session JSONL files, so recovery from
     corruption (observed live: B-tree rowids out of order surfacing as a
     spurious UNIQUE-constraint failure during reindex) is: move the bad
-    file aside for forensics, drop the WAL/SHM siblings, rebuild from
-    source. Never crash the tool over a cache.
+    file aside for forensics and rebuild from source. Never crash the
+    tool over a cache.
+
+    The -wal/-shm sidecars are quarantined by rename, not deleted: removing
+    a live WAL from under another process's open connection is itself a
+    corruption vector, and the renamed trio stays coherent for forensics.
+    Callers must hold the reindex lock so two processes cannot both
+    quarantine and mass-rebuild the same index.
     """
+    quarantine = f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
     if os.path.exists(path):
-        quarantine = f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
         try:
             os.replace(path, quarantine)
         except OSError:
@@ -407,7 +458,50 @@ def reset_db(path: str = DB_PATH) -> None:
         sidecar = f"{path}{suffix}"
         if os.path.exists(sidecar):
             try:
-                os.remove(sidecar)
+                os.replace(sidecar, f"{quarantine}{suffix}")
+            except OSError:
+                try:
+                    os.remove(sidecar)
+                except OSError:
+                    pass
+    _prune_quarantines(path)
+
+
+def _prune_quarantines(path: str) -> None:
+    """Cap quarantined corrupt-index copies (each is a full-size DB).
+
+    Keeps the newest QUARANTINE_KEEP generations, and even those only up to
+    QUARANTINE_MAX_AGE_S -- forensic value decays fast and the copies cost
+    gigabytes. A generation is the db plus its renamed -wal/-shm siblings.
+    """
+    prefix = f"{path}.corrupt-"
+    entries = _glob.glob(_glob.escape(prefix) + "*")
+    if not entries:
+        return
+
+    def generation(entry: str) -> str:
+        stamp = entry[len(prefix):]
+        for suffix in ("-wal", "-shm"):
+            if stamp.endswith(suffix):
+                stamp = stamp[: -len(suffix)]
+        return stamp
+
+    keep: set[str] = set()
+    now = time.time()
+    stamps = sorted({generation(entry) for entry in entries}, reverse=True)
+    for idx, stamp in enumerate(stamps):
+        if idx >= QUARANTINE_KEEP:
+            break
+        try:
+            born = time.mktime(time.strptime(stamp, "%Y%m%d-%H%M%S"))
+        except ValueError:
+            continue
+        if now - born <= QUARANTINE_MAX_AGE_S:
+            keep.add(stamp)
+    for entry in entries:
+        if generation(entry) not in keep:
+            try:
+                os.remove(entry)
             except OSError:
                 pass
 
