@@ -10,6 +10,7 @@ deletable any time; the next claude-browse run rebuilds from JSONL.
 
 from __future__ import annotations
 
+import errno
 import glob as _glob
 import hashlib
 import json
@@ -23,6 +24,12 @@ import time
 import urllib.error
 import urllib.request
 from collections import Counter
+from collections.abc import Callable
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX
+    fcntl = None  # type: ignore[assignment]
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -59,6 +66,8 @@ _LEGACY_DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 QUARANTINE_KEEP = 1
 QUARANTINE_MAX_AGE_S = 7 * 86400
+REINDEX_LOCK_SUFFIX = ".reindex.lock"
+REINDEX_WAIT_TIMEOUT_S = 15 * 60
 # v2: added last_timestamp column so the list view can sort by most recent
 #     activity instead of session start time.
 # v3: split sessions_fts from a single 'corpus' column into six fielded
@@ -392,6 +401,78 @@ def open_db(path: str = DB_PATH, *, read_only: bool = False) -> sqlite3.Connecti
     return conn
 
 
+def acquire_reindex_lock(
+    db_path: str,
+    *,
+    block: bool = False,
+    poll_interval: float = 1.0,
+    timeout_s: float = REINDEX_WAIT_TIMEOUT_S,
+    on_wait: Callable[[], None] | None = None,
+) -> int | None:
+    """Elect the single reindex writer for db_path.
+
+    Returns an fd to hold for the duration of the reindex, or None when
+    another process holds the lock (and, with block=True, the wait timed
+    out). flock releases automatically on process death -- including
+    SIGKILL -- so a crashed winner never leaves a stale lock behind.
+
+    When the lockfile cannot be created or flock is unsupported on the
+    filesystem, returns an fd (or -1) and the caller proceeds unguarded --
+    exactly the pre-election behavior, never worse.
+    """
+    lock_path = db_path + REINDEX_LOCK_SUFFIX
+    try:
+        parent = os.path.dirname(lock_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError:
+        return -1
+    if fcntl is None:
+        return fd
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                # flock unsupported here (some network filesystems):
+                # proceed unguarded rather than refusing to index.
+                return fd
+            if not block or time.monotonic() >= deadline:
+                os.close(fd)
+                return None
+            if on_wait is not None:
+                on_wait()
+            time.sleep(poll_interval)
+
+
+def release_reindex_lock(fd: int | None) -> None:
+    if fd is None or fd < 0:
+        return
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _conn_db_path(conn: sqlite3.Connection) -> str:
+    """File backing the connection's main database ('' for in-memory)."""
+    try:
+        for _seq, name, file in conn.execute("PRAGMA database_list"):
+            if name == "main":
+                return file or ""
+    except sqlite3.Error:
+        pass
+    return ""
+
+
 def _cleanup_legacy_cache() -> None:
     """Reclaim the pre-per-host index files (exact known names only).
 
@@ -644,15 +725,73 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def reindex(conn: sqlite3.Connection) -> tuple[int, int, int]:
+def reindex(
+    conn: sqlite3.Connection,
+    *,
+    block: bool = False,
+    on_wait: Callable[[], None] | None = None,
+) -> tuple[int, int, int] | None:
     """Sync the index against on-disk session files.
 
-    Reindexes only files whose mtime changed since the last run, so steady-
-    state startup is fast (just a stat() per file). First run is a full
-    walk and may take several seconds for hundreds of sessions.
+    Exactly one process reindexes at a time: an flock on a sidecar
+    lockfile (derived from the connection's database path) elects the
+    writer. Losers return None immediately -- callers proceed on the
+    existing index -- or, with block=True, wait for the winner and then
+    reindex themselves (a fast no-op when the winner finished; a full
+    takeover when it was killed, since flock dies with its process).
 
-    Returns (added, updated, removed) counts for caller diagnostics.
+    Returns (added, updated, removed) counts, or None when the election
+    was lost.
     """
+    db_path = _conn_db_path(conn)
+    lock_fd = -1
+    if db_path:
+        lock_fd = acquire_reindex_lock(db_path, block=block, on_wait=on_wait)
+        if lock_fd is None:
+            return None
+    try:
+        return _reindex_locked(conn)
+    finally:
+        release_reindex_lock(lock_fd)
+
+
+def rebuild_from_scratch(
+    db_path: str = DB_PATH,
+) -> tuple[sqlite3.Connection, tuple[int, int, int] | None]:
+    """Corruption recovery: quarantine + fresh open + reindex, under the lock.
+
+    Holding the reindex lock across reset_db() is what prevents the
+    observed feedback loop where two processes both diagnose corruption
+    and both mass-rebuild. If another process is already rebuilding, wait
+    for it and use whatever index it produced.
+    """
+    def _file_id(path: str) -> tuple[int, int] | None:
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (st.st_dev, st.st_ino)
+
+    pre_id = _file_id(db_path)
+    lock_fd = acquire_reindex_lock(db_path, block=True)
+    if lock_fd is None:
+        conn = open_db(db_path)
+        return conn, None
+    try:
+        # If the file's identity changed while we waited, another process
+        # already quarantined and rebuilt -- do not reset its fresh index.
+        if pre_id is not None and _file_id(db_path) == pre_id:
+            reset_db(db_path)
+        conn = open_db(db_path)
+        counts = _reindex_locked(conn)
+        return conn, counts
+    finally:
+        release_reindex_lock(lock_fd)
+
+
+def _reindex_locked(conn: sqlite3.Connection) -> tuple[int, int, int]:
+    """The reindex body. Callers must hold the reindex lock (or be the
+    sole process, e.g. tests on an in-memory/tmp database)."""
     records = _dedupe_records_by_session_id(list_index_records())
     record_map: dict[str, dict] = {r["path"]: r for r in records}
     current_sids = {str(r.get("session_id") or "") for r in records}

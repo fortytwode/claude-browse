@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping
 from datetime import datetime
 
@@ -1428,6 +1429,27 @@ def _is_sqlite_lock_error(exc: sqlite3.Error) -> bool:
     return "locked" in message or "busy" in message
 
 
+def _make_wait_progress():
+    """Elapsed-time ticker for waiting on another window's index build.
+
+    Must stay visible: users SIGKILL anything that looks hung, and
+    mid-write kills are the original corruption cause.
+    """
+    started = time.monotonic()
+
+    def tick() -> None:
+        elapsed = int(time.monotonic() - started)
+        if elapsed and elapsed % 5 == 0:
+            print(
+                f"\r  still waiting ({elapsed}s)...",
+                end="",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    return tick
+
+
 def _load_session_by_id(session_id: str) -> dict | None:
     conn = fts.open_db(read_only=True)
     try:
@@ -1494,21 +1516,60 @@ def main() -> None:
     if total_pre == 0:
         print("Indexing sessions for the first time...", file=sys.stderr)
     try:
-        added, updated, removed = fts.reindex(conn)
+        result = fts.reindex(conn)
+        if result is None and total_pre == 0:
+            # Cold start lost the writer election: another window is
+            # building the very index we need. Wait for it visibly -- a
+            # silent exit here is how windows used to just disappear.
+            print(
+                "Another claude-browse window is building the search index; "
+                "waiting for it to finish...",
+                file=sys.stderr,
+            )
+            probe = fts.acquire_reindex_lock(
+                fts.DB_PATH, block=True, on_wait=_make_wait_progress()
+            )
+            if probe is None:
+                print(
+                    "\nTimed out waiting for the other window's index build; "
+                    "try again.",
+                    file=sys.stderr,
+                )
+                conn.close()
+                sys.exit(1)
+            fts.release_reindex_lock(probe)
+            print("", file=sys.stderr)
+            # Reopen: the winner may have quarantined/replaced the DB file,
+            # leaving this connection on a stale inode.
+            conn.close()
+            conn = fts.open_db()
+            # No-op if the winner finished; full takeover if it was killed
+            # (flock releases with its process).
+            result = fts.reindex(conn)
+        if result is None:
+            print(
+                "Another claude-browse window is refreshing the search index; "
+                "using the current copy.",
+                file=sys.stderr,
+            )
+            added = updated = removed = 0
+        else:
+            added, updated, removed = result
     except sqlite3.DatabaseError as exc:
         if _is_sqlite_lock_error(exc):
+            # SQLITE_BUSY that survived the writer election (e.g. a stray
+            # non-elected writer). Degrade like an election loss.
             if total_pre == 0:
                 print(
-                    "Search index is locked by another claude-browse process, "
-                    "probably because that process is building it. Not "
-                    "rebuilding from scratch; try again after it finishes.",
+                    "Search index is locked by another process; try again "
+                    "after it finishes.",
                     file=sys.stderr,
                 )
                 conn.close()
                 sys.exit(1)
             print(
-                "Search index is locked by another claude-browse process; "
-                "using the existing index without refreshing.",
+                "Search index is locked by another process; using the "
+                "existing index without refreshing.",
                 file=sys.stderr,
             )
             added = updated = removed = 0
@@ -1518,14 +1579,15 @@ def main() -> None:
             # semantic_terms.term' from B-tree pages with out-of-order rowids,
             # likely a mid-write kill under many concurrent sessions), the right
             # move is a transparent rebuild from source, never a startup crash.
+            # rebuild_from_scratch quarantines under the reindex lock so two
+            # windows cannot both diagnose corruption and both mass-rebuild.
             print(
                 f"Search index corrupted ({exc}); rebuilding from scratch...",
                 file=sys.stderr,
             )
             conn.close()
-            fts.reset_db()
-            conn = fts.open_db()
-            added, updated, removed = fts.reindex(conn)
+            conn, counts = fts.rebuild_from_scratch()
+            added, updated, removed = counts or (0, 0, 0)
             print(f"  rebuilt: {added} sessions reindexed", file=sys.stderr)
     if added + updated + removed > 0 and total_pre == 0:
         print(f"  indexed {added} sessions", file=sys.stderr)
