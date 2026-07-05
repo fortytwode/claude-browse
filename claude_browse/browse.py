@@ -1429,6 +1429,52 @@ def _is_sqlite_lock_error(exc: sqlite3.Error) -> bool:
     return "locked" in message or "busy" in message
 
 
+def _spawn_background_index_refresh() -> None:
+    """Fire-and-forget child that syncs the index while fzf paints.
+
+    Detached (new session, no inherited stdio) so it survives the picker
+    closing and can't scribble on the terminal. Failure to spawn is
+    non-fatal: the picker still works on the existing index and the next
+    launch tries again.
+    """
+    try:
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "from claude_browse.browse import _refresh_index_once; "
+                "_refresh_index_once()",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        pass
+
+
+def _refresh_index_once() -> None:
+    """Background-refresh entry: sync the index, healing corruption.
+
+    Runs in the detached child spawned at warm launch. An election loss
+    (None) means another window's refresher is already at it. Corruption
+    goes through the same locked quarantine+rebuild as a cold launch --
+    without this, a warm-start world would never repair a corrupt index.
+    """
+    conn = fts.open_db()
+    try:
+        try:
+            fts.reindex(conn)
+        except sqlite3.DatabaseError as exc:
+            if _is_sqlite_lock_error(exc):
+                return
+            conn.close()
+            conn, _counts = fts.rebuild_from_scratch()
+    finally:
+        conn.close()
+
+
 def _make_wait_progress():
     """Elapsed-time ticker for waiting on another window's index build.
 
@@ -1513,53 +1559,57 @@ def main() -> None:
 
     conn = fts.open_db()
     total_pre = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-    if total_pre == 0:
+
+    if total_pre > 0:
+        # Warm start: paint immediately from the existing index and refresh
+        # it in a detached child. A launch must never sit blank behind a
+        # reindex -- one large active session can take minutes to re-index,
+        # and that wait (not just the losers' silent exits) was the
+        # "windows show nothing" complaint. The writer election makes
+        # concurrent refreshers from several windows safe: one wins, the
+        # rest exit as no-ops. Per-keystroke search reloads re-query the
+        # DB, so results freshen while the picker is already open.
+        conn.close()
+        _spawn_background_index_refresh()
+        added = updated = removed = 0
+    else:
         print("Indexing sessions for the first time...", file=sys.stderr)
-    try:
-        result = fts.reindex(conn)
-        if result is None and total_pre == 0:
-            # Cold start lost the writer election: another window is
-            # building the very index we need. Wait for it visibly -- a
-            # silent exit here is how windows used to just disappear.
-            print(
-                "Another claude-browse window is building the search index; "
-                "waiting for it to finish...",
-                file=sys.stderr,
-            )
-            probe = fts.acquire_reindex_lock(
-                fts.DB_PATH, block=True, on_wait=_make_wait_progress()
-            )
-            if probe is None:
+        try:
+            result = fts.reindex(conn)
+            if result is None:
+                # Cold start lost the writer election: another window is
+                # building the very index we need. Wait for it visibly -- a
+                # silent exit here is how windows used to just disappear.
                 print(
-                    "\nTimed out waiting for the other window's index build; "
-                    "try again.",
+                    "Another claude-browse window is building the search "
+                    "index; waiting for it to finish...",
                     file=sys.stderr,
                 )
+                probe = fts.acquire_reindex_lock(
+                    fts.DB_PATH, block=True, on_wait=_make_wait_progress()
+                )
+                if probe is None:
+                    print(
+                        "\nTimed out waiting for the other window's index "
+                        "build; try again.",
+                        file=sys.stderr,
+                    )
+                    conn.close()
+                    sys.exit(1)
+                fts.release_reindex_lock(probe)
+                print("", file=sys.stderr)
+                # Reopen: the winner may have quarantined/replaced the DB
+                # file, leaving this connection on a stale inode.
                 conn.close()
-                sys.exit(1)
-            fts.release_reindex_lock(probe)
-            print("", file=sys.stderr)
-            # Reopen: the winner may have quarantined/replaced the DB file,
-            # leaving this connection on a stale inode.
-            conn.close()
-            conn = fts.open_db()
-            # No-op if the winner finished; full takeover if it was killed
-            # (flock releases with its process).
-            result = fts.reindex(conn)
-        if result is None:
-            print(
-                "Another claude-browse window is refreshing the search index; "
-                "using the current copy.",
-                file=sys.stderr,
-            )
-            added = updated = removed = 0
-        else:
-            added, updated, removed = result
-    except sqlite3.DatabaseError as exc:
-        if _is_sqlite_lock_error(exc):
-            # SQLITE_BUSY that survived the writer election (e.g. a stray
-            # non-elected writer). Degrade like an election loss.
-            if total_pre == 0:
+                conn = fts.open_db()
+                # No-op if the winner finished; full takeover if it was
+                # killed (flock releases with its process).
+                result = fts.reindex(conn)
+            added, updated, removed = result or (0, 0, 0)
+        except sqlite3.DatabaseError as exc:
+            if _is_sqlite_lock_error(exc):
+                # SQLITE_BUSY that survived the writer election (e.g. a
+                # stray non-elected writer).
                 print(
                     "Search index is locked by another process; try again "
                     "after it finishes.",
@@ -1567,20 +1617,14 @@ def main() -> None:
                 )
                 conn.close()
                 sys.exit(1)
-            print(
-                "Search index is locked by another process; using the "
-                "existing index without refreshing.",
-                file=sys.stderr,
-            )
-            added = updated = removed = 0
-        else:
-            # The index is a derived cache over the session JSONL files -- when
-            # it corrupts (observed live: 'UNIQUE constraint failed:
-            # semantic_terms.term' from B-tree pages with out-of-order rowids,
-            # likely a mid-write kill under many concurrent sessions), the right
-            # move is a transparent rebuild from source, never a startup crash.
-            # rebuild_from_scratch quarantines under the reindex lock so two
-            # windows cannot both diagnose corruption and both mass-rebuild.
+            # The index is a derived cache over the session JSONL files --
+            # when it corrupts (observed live: 'UNIQUE constraint failed:
+            # semantic_terms.term' from B-tree pages with out-of-order
+            # rowids, likely a mid-write kill under many concurrent
+            # sessions), the right move is a transparent rebuild from
+            # source, never a startup crash. rebuild_from_scratch
+            # quarantines under the reindex lock so two windows cannot both
+            # diagnose corruption and both mass-rebuild.
             print(
                 f"Search index corrupted ({exc}); rebuilding from scratch...",
                 file=sys.stderr,
@@ -1589,9 +1633,9 @@ def main() -> None:
             conn, counts = fts.rebuild_from_scratch()
             added, updated, removed = counts or (0, 0, 0)
             print(f"  rebuilt: {added} sessions reindexed", file=sys.stderr)
-    if added + updated + removed > 0 and total_pre == 0:
-        print(f"  indexed {added} sessions", file=sys.stderr)
-    conn.close()
+        if added + updated + removed > 0:
+            print(f"  indexed {added} sessions", file=sys.stderr)
+        conn.close()
 
     prefixes = _folder_prefixes()
     limit = 999 if show_all else DEFAULT_LIMIT
