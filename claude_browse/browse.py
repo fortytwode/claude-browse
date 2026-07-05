@@ -584,6 +584,7 @@ def _write_preview_script(
     """Write a helper script fzf calls to render session previews."""
     script = f"""#!/usr/bin/env python3
 import os
+import sqlite3
 import sys
 
 sys.path.insert(0, {package_dir!r})
@@ -602,7 +603,11 @@ ROW_META_SEP = {ROW_META_SEP!r}
 
 
 def _lookup_session(session_id):
-    conn = fts.open_db(DB_PATH, read_only=True)
+    try:
+        conn = fts.open_db(DB_PATH, read_only=True)
+    except sqlite3.Error:
+        # Index mid-rebuild (quarantine window) -- treat as not-found.
+        return None
     try:
         return conn.execute(
             '''
@@ -741,6 +746,7 @@ def _write_search_script(
     """Write the keystroke-driven search helper invoked by fzf change:reload."""
     script = f"""#!/usr/bin/env python3
 import os
+import sqlite3
 import sys
 import time
 sys.path.insert(0, {package_dir!r})
@@ -758,25 +764,35 @@ CURRENT_CWD = {current_cwd!r}
 LIMIT = {limit}
 
 q = os.environ.get("FZF_QUERY", "")
-conn = fts.open_db(DB_PATH, read_only=True)
+try:
+    conn = fts.open_db(DB_PATH, read_only=True)
+except sqlite3.Error:
+    # The index is mid-rebuild (quarantine window) -- degrade, don't traceback.
+    print("(search index rebuilding -- type another key to retry)")
+    sys.exit(0)
 ranker = "recent"
 start = time.perf_counter()
-if q.strip():
-    # ranker_v1: multi-column BM25 + exp-decay recency. See fts.search_ranked.
-    # Set CLAUDE_BROWSE_RANKER=current to fall back to recency-only.
-    import os as _os
-    if _os.environ.get("CLAUDE_BROWSE_RANKER") == "current":
-        ranker = "current"
-        results = fts.search(conn, q, limit=LIMIT)
+try:
+    if q.strip():
+        # ranker_v1: multi-column BM25 + exp-decay recency. See fts.search_ranked.
+        # Set CLAUDE_BROWSE_RANKER=current to fall back to recency-only.
+        import os as _os
+        if _os.environ.get("CLAUDE_BROWSE_RANKER") == "current":
+            ranker = "current"
+            results = fts.search(conn, q, limit=LIMIT)
+        else:
+            ranker = "v1"
+            results = fts.search_ranked(conn, q, limit=LIMIT, current_cwd=CURRENT_CWD)
     else:
-        ranker = "v1"
-        results = fts.search_ranked(conn, q, limit=LIMIT, current_cwd=CURRENT_CWD)
-else:
-    results = fts.list_recent(conn, limit=LIMIT)
-    if not CWD_FILTER:
-        # Match the initial paint: float current-folder threads to the top when
-        # the query is empty (including after the user types then clears it).
-        results = _folder_first_order(results, CURRENT_CWD)
+        results = fts.list_recent(conn, limit=LIMIT)
+        if not CWD_FILTER:
+            # Match the initial paint: float current-folder threads to the top when
+            # the query is empty (including after the user types then clears it).
+            results = _folder_first_order(results, CURRENT_CWD)
+finally:
+    # A leaked read connection pins the WAL against checkpoints for the
+    # process lifetime; close before the (non-DB) logging work below.
+    conn.close()
 
 if CWD_FILTER:
     results = [r for r in results if (r.get("cwd") or "").startswith(CWD_FILTER)]

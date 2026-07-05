@@ -2050,3 +2050,78 @@ def test_reset_db_quarantines_corrupt_file_and_allows_fresh_open(tmp_path):
     conn2 = fts.open_db(db_path)  # fresh open works
     assert conn2.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
     conn2.close()
+
+
+# --- WAL hygiene ------------------------------------------------------------
+
+
+def _login_flow_record(target) -> dict:
+    return {
+        "path": str(target),
+        "provider": "claude",
+        "session_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "first_msg": "the login page crashes when I click continue",
+        "last_msg": "email validation should happen before the redirect",
+        "timestamp": "2026-04-01T10:00:00Z",
+        "last_timestamp": "2026-04-01T10:10:00Z",
+        "cwd": "/Users/alice/code/webapp",
+        "name": "Debug login flow",
+        "msg_count": 4,
+        "mtime": os.path.getmtime(target),
+        "fields": {
+            "cwd": "/users/alice/code/webapp",
+            "title": "debug login flow",
+            "first_msg": "the login page crashes when i click continue",
+            "user_text": "email validation should happen before the redirect",
+            "asst_text": "the login handler short-circuits on missing email validation",
+            "boilerplate": "",
+        },
+    }
+
+
+def test_open_db_write_path_is_wal_with_normal_sync(tmp_path):
+    conn = fts.open_db(str(tmp_path / "index.db"))
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        # 1 == NORMAL: crash-safe in WAL mode without per-commit fsync.
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_reindex_truncates_wal(tmp_path, monkeypatch):
+    path = tmp_path / "index.db"
+    conn = fts.open_db(str(path))
+    sessions_dir = tmp_path / "projects" / "demo"
+    sessions_dir.mkdir(parents=True)
+    target = sessions_dir / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+    shutil.copy(FIXTURES / "sample_session.jsonl", target)
+    monkeypatch.setattr(fts, "list_index_records", lambda: [_login_flow_record(target)])
+
+    fts.reindex(conn)
+
+    wal = str(path) + "-wal"
+    assert os.path.exists(wal)
+    assert os.path.getsize(wal) == 0, "reindex must leave the WAL truncated"
+    conn.close()
+
+
+def test_reindex_survives_reader_pinning_the_wal(tmp_path, monkeypatch):
+    path = tmp_path / "index.db"
+    conn = fts.open_db(str(path))
+    conn.commit()
+    sessions_dir = tmp_path / "projects" / "demo"
+    sessions_dir.mkdir(parents=True)
+    target = sessions_dir / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+    shutil.copy(FIXTURES / "sample_session.jsonl", target)
+    monkeypatch.setattr(fts, "list_index_records", lambda: [_login_flow_record(target)])
+
+    reader = fts.open_db(str(path), read_only=True)
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM sessions").fetchone()
+    try:
+        result = fts.reindex(conn)
+        assert result is not None, "a pinned WAL must not fail the reindex"
+    finally:
+        reader.close()
+        conn.close()

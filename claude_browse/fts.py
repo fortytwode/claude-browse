@@ -356,8 +356,36 @@ def open_db(path: str = DB_PATH, *, read_only: bool = False) -> sqlite3.Connecti
     os.makedirs(os.path.dirname(path), exist_ok=True)
     conn = _connect_sqlite(path)
     conn.execute("PRAGMA journal_mode=WAL")
+    # WAL + NORMAL is structurally crash-safe (a kill can lose the last
+    # transaction but cannot corrupt the file); FULL's per-commit fsync is
+    # pointless for a derived cache. OFF is excluded — it permits real
+    # corruption, which is the recurring symptom being fixed.
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA wal_autocheckpoint=1000")
     _init_schema(conn)
     return conn
+
+
+def checkpoint_wal(conn: sqlite3.Connection) -> None:
+    """Best-effort WAL truncation after a reindex. Never raises.
+
+    Passive auto-checkpoints get pinned by concurrent readers (fzf helpers
+    open per-keystroke read connections) and never shrink the file, which
+    is how the WAL once grew to ~1 GB. TRUNCATE with a short budget lands
+    between keystrokes on most launches; PASSIVE at least recycles frames.
+    """
+    try:
+        conn.execute("PRAGMA busy_timeout = 2000")
+        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if row and row[0] == 1:
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    except sqlite3.Error:
+        pass
+    finally:
+        try:
+            conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        except sqlite3.Error:
+            pass
 
 
 def reset_db(path: str = DB_PATH) -> None:
@@ -576,6 +604,7 @@ def reindex(conn: sqlite3.Connection) -> tuple[int, int, int]:
     if _dense_embeddings_enabled():
         _sync_dense_embeddings(conn)
     conn.commit()
+    checkpoint_wal(conn)
     return (added, updated, removed)
 
 
