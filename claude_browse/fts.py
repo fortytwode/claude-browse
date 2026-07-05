@@ -820,14 +820,22 @@ def _reindex_locked(conn: sqlite3.Connection) -> tuple[int, int, int]:
     now = time.time()
     changes_since_commit = 0
 
+    # Cold build (empty index): per-window df upserts would be millions of
+    # random writes into an ever-growing semantic_terms B-tree -- an order
+    # of magnitude slower than one GROUP BY over the finished postings.
+    # Skip df tracking and let the _semantic_terms_missing bootstrap below
+    # populate the table in a single pass. Steady state keeps exact
+    # incremental deltas.
+    bootstrap = not existing
+
     for path, record in record_map.items():
         prev = existing.get(path)
         if prev is None:
-            if _index_record(conn, record, now):
+            if _index_record(conn, record, now, track_term_df=not bootstrap):
                 added += 1
                 changes_since_commit += 1
         elif abs(prev[1] - record["mtime"]) > 0.001:
-            if _index_record(conn, record, now):
+            if _index_record(conn, record, now, track_term_df=not bootstrap):
                 updated += 1
                 changes_since_commit += 1
         if changes_since_commit >= 10:
@@ -888,7 +896,7 @@ def _dedupe_records_by_session_id(records: list[dict]) -> list[dict]:
 
 
 def _index_record(
-    conn: sqlite3.Connection, record: dict, now: float
+    conn: sqlite3.Connection, record: dict, now: float, *, track_term_df: bool = True
 ) -> bool:
     """Upsert one normalized session record into the index.
 
@@ -950,7 +958,7 @@ def _index_record(
             fields["boilerplate"],
         ),
     )
-    _reindex_segments_for_record(conn, record)
+    _reindex_segments_for_record(conn, record, track_term_df=track_term_df)
     return True
 
 
@@ -1643,6 +1651,8 @@ def _delete_semantic_windows_for_sid(conn: sqlite3.Connection, sid: str) -> None
 def _reindex_semantic_windows_from_segments(
     conn: sqlite3.Connection,
     sid: str,
+    *,
+    track_term_df: bool = True,
 ) -> None:
     _delete_semantic_windows_for_sid(conn, sid)
     rows = conn.execute(
@@ -1695,13 +1705,14 @@ def _reindex_semantic_windows_from_segments(
                 for term, weight in features.items()
             ],
         )
-        conn.executemany(
-            """
-            INSERT INTO semantic_terms (term, df) VALUES (?, 1)
-            ON CONFLICT(term) DO UPDATE SET df = df + 1
-            """,
-            [(term,) for term in features],
-        )
+        if track_term_df:
+            conn.executemany(
+                """
+                INSERT INTO semantic_terms (term, df) VALUES (?, 1)
+                ON CONFLICT(term) DO UPDATE SET df = df + 1
+                """,
+                [(term,) for term in features],
+            )
 
 
 def _refresh_semantic_index(conn: sqlite3.Connection) -> None:
@@ -1727,6 +1738,8 @@ def _semantic_terms_missing(conn: sqlite3.Connection) -> bool:
 def _reindex_segments_for_record(
     conn: sqlite3.Connection,
     record: dict,
+    *,
+    track_term_df: bool = True,
 ) -> None:
     sid = str(record["session_id"])
     _delete_segments_for_sid(conn, sid)
@@ -1759,7 +1772,7 @@ def _reindex_segments_for_record(
             """,
             (rowid, sid, role, idx, ts, text),
         )
-    _reindex_semantic_windows_from_segments(conn, sid)
+    _reindex_semantic_windows_from_segments(conn, sid, track_term_df=track_term_df)
 
 
 def _semantic_query_features(
