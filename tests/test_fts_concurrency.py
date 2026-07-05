@@ -78,7 +78,7 @@ sys.path.insert(0, {repo!r})
 from claude_browse import fts
 
 records = json.load(open({records_json!r}))
-fts.list_index_records = lambda: records
+fts.list_index_records = lambda known_sessions=None: records
 
 if os.environ.get("SLOW_REINDEX") == "1":
     _real = fts._reindex_locked
@@ -181,7 +181,7 @@ def test_sigkill_mid_reindex_releases_lock_and_leaves_recoverable_db(tmp_path):
     import claude_browse.fts as fts_mod
 
     original = fts_mod.list_index_records
-    fts_mod.list_index_records = lambda: records
+    fts_mod.list_index_records = lambda known_sessions=None: records
     try:
         result = fts.reindex(conn)
     finally:

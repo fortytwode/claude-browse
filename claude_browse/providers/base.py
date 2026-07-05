@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -77,8 +78,27 @@ class ProviderSpec:
             cmd.append(prompt)
         return cmd
 
-    def list_index_records(self) -> list[IndexRecord]:
+    def list_index_records(
+        self, known_sessions: dict[str, tuple[str, float]] | None = None
+    ) -> list[IndexRecord]:
+        """List records, passing already-indexed (sid, mtime) by path.
+
+        Providers that accept known_sessions stat-gate their work: an
+        unchanged session yields a cheap stub record ({path, provider,
+        mtime, unchanged: True}) instead of a full file parse. External
+        providers with the older no-arg reader signature keep working --
+        they just parse everything, as before.
+        """
+        if known_sessions is not None and self._reader_accepts_known_sessions():
+            return self.list_index_records_reader(known_sessions=known_sessions)
         return self.list_index_records_reader()
+
+    def _reader_accepts_known_sessions(self) -> bool:
+        try:
+            params = inspect.signature(self.list_index_records_reader).parameters
+        except (TypeError, ValueError):
+            return False
+        return "known_sessions" in params
 
     def has_local_state(self) -> bool:
         if self.has_local_state_reader is None:

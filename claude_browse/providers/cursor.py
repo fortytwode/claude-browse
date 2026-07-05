@@ -5,7 +5,10 @@ from __future__ import annotations
 from .base import ProviderSpec
 
 
-def list_index_records() -> list[dict[str, object]]:
+def list_index_records(
+    known_sessions: dict[str, tuple[str, float]] | None = None,
+) -> list[dict[str, object]]:
+    del known_sessions
     return []
 
 

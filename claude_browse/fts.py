@@ -791,14 +791,29 @@ def rebuild_from_scratch(
 
 def _reindex_locked(conn: sqlite3.Connection) -> tuple[int, int, int]:
     """The reindex body. Callers must hold the reindex lock (or be the
-    sole process, e.g. tests on an in-memory/tmp database)."""
-    records = _dedupe_records_by_session_id(list_index_records())
-    record_map: dict[str, dict] = {r["path"]: r for r in records}
-    current_sids = {str(r.get("session_id") or "") for r in records}
+    sole process, e.g. tests on an in-memory/tmp database).
 
+    Stored (sid, mtime) pairs are fetched first and passed down to the
+    providers, which stat-gate their work: an unchanged session file is
+    never read or parsed, only stat()ed, and comes back as a stub record
+    marked unchanged. Steady-state startup therefore really is a stat per
+    file; only changed/new sessions pay the parse and the DB write.
+    """
     existing: dict[str, tuple[str, float]] = {
         row[0]: (row[1], row[2])
         for row in conn.execute("SELECT path, sid, mtime FROM sessions")
+    }
+
+    all_records = list_index_records(known_sessions=existing)
+    stub_paths = {r["path"] for r in all_records if r.get("unchanged")}
+    records = _dedupe_records_by_session_id(
+        [r for r in all_records if not r.get("unchanged")]
+    )
+    record_map: dict[str, dict] = {r["path"]: r for r in records}
+    current_sids = {str(r.get("session_id") or "") for r in records}
+    # Stubs carry no sid; their identity is whatever the index already has.
+    current_sids |= {
+        existing[path][0] for path in stub_paths if path in existing
     }
 
     added = updated = removed = 0
@@ -820,6 +835,8 @@ def _reindex_locked(conn: sqlite3.Connection) -> tuple[int, int, int]:
             changes_since_commit = 0
 
     for path, (sid, _) in existing.items():
+        if path in stub_paths:
+            continue
         if path not in record_map and sid not in current_sids:
             conn.execute("DELETE FROM sessions WHERE sid = ?", (sid,))
             conn.execute("DELETE FROM sessions_fts WHERE sid = ?", (sid,))

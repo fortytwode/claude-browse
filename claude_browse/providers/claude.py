@@ -208,9 +208,26 @@ def _list_history_session_files() -> list[str]:
     return files
 
 
-def list_index_records() -> list[dict[str, object]]:
+def list_index_records(
+    known_sessions: dict[str, tuple[str, float]] | None = None,
+) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for filepath in list_session_files():
+        try:
+            mtime = os.path.getmtime(filepath)
+        except OSError:
+            continue
+        if known_sessions is not None and filepath in known_sessions:
+            _sid, known_mtime = known_sessions[filepath]
+            if abs(mtime - float(known_mtime)) <= 0.001:
+                # Already indexed and untouched: a stat is all it costs.
+                records.append({
+                    "path": filepath,
+                    "provider": "claude",
+                    "mtime": known_mtime,
+                    "unchanged": True,
+                })
+                continue
         info = get_session_info(filepath)
         if not info or not info.get("session_id") or not info.get("first_msg"):
             continue
@@ -218,7 +235,7 @@ def list_index_records() -> list[dict[str, object]]:
             **info,
             "provider": "claude",
             "cwd": canonicalize_path(info.get("cwd")),
-            "mtime": os.path.getmtime(filepath),
+            "mtime": mtime,
             "fields": extract_fielded_corpus(filepath),
         })
     return records

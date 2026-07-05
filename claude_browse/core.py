@@ -77,11 +77,19 @@ def _list_codex_index_records() -> list[dict]:
     return get_provider("codex").list_index_records()
 
 
-def list_index_records() -> list[dict]:
-    """Return every source-capable provider session in one normalized record shape."""
+def list_index_records(
+    known_sessions: dict[str, tuple[str, float]] | None = None,
+) -> list[dict]:
+    """Return every source-capable provider session in one normalized record shape.
+
+    known_sessions maps already-indexed path -> (sid, mtime); providers use
+    it to skip parsing unchanged files and emit stub records instead.
+    """
     records: list[dict] = []
     for provider in provider_ids(source_capable=True):
-        records.extend(get_provider(provider).list_index_records())
+        records.extend(
+            get_provider(provider).list_index_records(known_sessions=known_sessions)
+        )
     return records
 
 

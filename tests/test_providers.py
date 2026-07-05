@@ -667,8 +667,6 @@ def test_codex_provider_keeps_agent_instructions_out_of_title_and_first_msg(tmp_
             "last_timestamp": "2026-05-12T08:02:00.000Z",
         },
         {},
-        0.0,
-        0.0,
     )
 
     assert record is not None
@@ -704,8 +702,6 @@ def test_codex_history_only_record_preserves_instruction_boilerplate():
                 {"text": "Please review the CFO weekly report.", "ts": 1_776_000_120},
             ]
         },
-        1.0,
-        0.0,
     )
 
     assert record is not None

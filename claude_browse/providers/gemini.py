@@ -160,10 +160,26 @@ def _parse_session(chat_path: str, alias_roots: dict[str, str]) -> dict[str, obj
     }
 
 
-def list_index_records() -> list[dict[str, object]]:
+def list_index_records(
+    known_sessions: dict[str, tuple[str, float]] | None = None,
+) -> list[dict[str, object]]:
     alias_roots = _project_roots_by_alias()
     records: list[dict[str, object]] = []
     for chat_path in _session_files():
+        if known_sessions is not None and chat_path in known_sessions:
+            _sid, known_mtime = known_sessions[chat_path]
+            try:
+                mtime = os.path.getmtime(chat_path)
+            except OSError:
+                continue
+            if abs(mtime - float(known_mtime)) <= 0.001:
+                records.append({
+                    "path": chat_path,
+                    "provider": "gemini",
+                    "mtime": known_mtime,
+                    "unchanged": True,
+                })
+                continue
         record = _parse_session(chat_path, alias_roots)
         if record:
             records.append(record)
