@@ -2284,3 +2284,47 @@ def test_reindex_never_parses_unchanged_files(db, tmp_path, monkeypatch):
     os.remove(paths[2])
     added, updated, removed = fts.reindex(db)
     assert (added, updated, removed) == (0, 0, 1)
+
+
+def test_incremental_semantic_terms_match_full_rebuild(db, tmp_path, monkeypatch):
+    """The per-session df deltas must produce exactly the same
+    semantic_terms content as the whole-corpus GROUP BY rebuild they
+    replaced -- across adds, updates, and removals."""
+    sessions_dir = tmp_path / "projects" / "demo"
+    sessions_dir.mkdir(parents=True)
+    paths = [_write_claude_session(sessions_dir, i) for i in range(4)]
+
+    from claude_browse.providers import claude as claude_provider
+
+    monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setattr(claude_provider, "HISTORY_PATH", str(tmp_path / "no-history"))
+    monkeypatch.setattr(
+        fts,
+        "list_index_records",
+        lambda known_sessions=None: claude_provider.list_index_records(
+            known_sessions=known_sessions
+        ),
+    )
+
+    fts.reindex(db)
+
+    # Update one session's content and remove another.
+    paths[0].write_text(
+        paths[0].read_text()
+        + '{"sessionId": "aaaaaaaa-bbbb-cccc-dddd-000000000000", '
+        '"timestamp": "2026-04-01T11:00:00Z", '
+        '"message": {"role": "user", "content": '
+        '"completely different follow-up about the paywall experiments"}}\n'
+    )
+    bumped = time.time() + 5
+    os.utime(paths[0], (bumped, bumped))
+    os.remove(paths[3])
+    fts.reindex(db)
+
+    incremental = sorted(
+        db.execute("SELECT term, df FROM semantic_terms").fetchall()
+    )
+    fts._refresh_semantic_index(db)
+    rebuilt = sorted(db.execute("SELECT term, df FROM semantic_terms").fetchall())
+    assert incremental == rebuilt
+    assert incremental, "corpus must actually have semantic terms"

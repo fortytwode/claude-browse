@@ -849,7 +849,13 @@ def _reindex_locked(conn: sqlite3.Connection) -> tuple[int, int, int]:
 
     if changes_since_commit:
         conn.commit()
-    if added or updated or removed or _semantic_terms_missing(conn):
+    if added or updated or removed:
+        # df counts are maintained incrementally alongside the postings;
+        # only rows that decremented to zero need sweeping.
+        conn.execute("DELETE FROM semantic_terms WHERE df <= 0")
+    if _semantic_terms_missing(conn):
+        # Bootstrap / self-heal only: e.g. an index built before the
+        # incremental df counters, or terms wiped by a partial recovery.
         _refresh_semantic_index(conn)
     if _dense_embeddings_enabled():
         _sync_dense_embeddings(conn)
@@ -1610,6 +1616,19 @@ def _delete_semantic_windows_for_sid(conn: sqlite3.Connection, sid: str) -> None
     ]
     if rowids:
         placeholders = ",".join("?" for _ in rowids)
+        # Each posting row is exactly one df unit (PK is (term, window_id)),
+        # so decrementing by the per-term posting count keeps semantic_terms
+        # exact without the whole-corpus rebuild. Same transaction as the
+        # posting deletes, so a mid-write kill can't split them.
+        for term, count in conn.execute(
+            f"SELECT term, COUNT(*) FROM semantic_postings "
+            f"WHERE window_id IN ({placeholders}) GROUP BY term",
+            rowids,
+        ).fetchall():
+            conn.execute(
+                "UPDATE semantic_terms SET df = df - ? WHERE term = ?",
+                (count, term),
+            )
         conn.execute(
             f"DELETE FROM semantic_postings WHERE window_id IN ({placeholders})",
             rowids,
@@ -1675,6 +1694,13 @@ def _reindex_semantic_windows_from_segments(
                 (term, window_id, weight)
                 for term, weight in features.items()
             ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO semantic_terms (term, df) VALUES (?, 1)
+            ON CONFLICT(term) DO UPDATE SET df = df + 1
+            """,
+            [(term,) for term in features],
         )
 
 
