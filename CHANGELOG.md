@@ -49,6 +49,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `~/.copilot/session-state/`.
 
 ### Fixed
+- **Concurrent launches no longer fight over (or corrupt) the search
+  index.** Previously every launch ran a read-write reindex, so N windows
+  opened at once meant N contending SQLite writers: one ground through a
+  slow rebuild while the others either died silently (cold start) or
+  served a stale index, and mid-write kills under that contention
+  corrupted the database twice in one week. A flock-based single-writer
+  election now picks exactly one reindexer per launch wave; other windows
+  proceed instantly on the existing index, and a cold-start window waits
+  visibly for the builder (taking over automatically if it is killed,
+  since the lock dies with its process). Corruption recovery runs under
+  the same lock with an inode check, so two windows can no longer both
+  quarantine and mass-rebuild.
+- **Warm launches are fast again: unchanged sessions are stat()ed, never
+  parsed.** Despite the old docstring's claim, every launch fully
+  JSON-parsed every session file on disk. Providers now stat-gate against
+  the stored mtimes; CodeX freshness switched from global file mtimes
+  (which made every codex thread look changed after any codex activity)
+  to per-thread `updated_at`/history timestamps. First launch after
+  upgrade re-parses once, then steady state is a stat per file.
+- **The write-ahead log is bounded.** Nothing ever checkpointed the index
+  WAL and the fzf search helper leaked a read connection that pinned
+  passive checkpoints -- the WAL grew to ~1 GB. Reindex now ends with a
+  best-effort `wal_checkpoint(TRUNCATE)`, write connections use
+  WAL-crash-safe `synchronous=NORMAL`, and the helper closes its
+  connection per keystroke.
+- **`semantic_terms` updates are incremental.** A one-session change used
+  to rewrite the whole term table via a corpus-wide GROUP BY (also the
+  statement where the corruption surfaced); df counts now ride the same
+  transaction as their postings as exact per-session deltas.
+- **The index cache is per-host** (`claude-browse-index.<hostname>.db`).
+  If `~/.claude/cache` is ever file-synced between machines, a shared
+  SQLite file corrupts regardless of local locking. Legacy un-suffixed
+  index files (including >1 GB quarantine copies) are reclaimed on first
+  open, and future quarantines are pruned (newest generation, 7 days).
 - Diagnostic-row suppression no longer hides whole sessions that merely
   *mention* the tool. The old filter branded any session with
   "claude-browse"/"codex-browse" (or other self-referential cues) anywhere in

@@ -1717,7 +1717,7 @@ def test_reindex_picks_up_new_files(db, tmp_path, monkeypatch):
     monkeypatch.setattr(
         fts,
         "list_index_records",
-        lambda: [{
+        lambda known_sessions=None: [{
             "path": str(target),
             "provider": "claude",
             "session_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -1759,7 +1759,7 @@ def test_reindex_skips_unchanged(db, tmp_path, monkeypatch):
     monkeypatch.setattr(
         fts,
         "list_index_records",
-        lambda: [{
+        lambda known_sessions=None: [{
             "path": str(target),
             "provider": "claude",
             "session_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -1796,7 +1796,7 @@ def test_reindex_removes_deleted_files(db, tmp_path, monkeypatch):
     monkeypatch.setattr(
         fts,
         "list_index_records",
-        lambda: [{
+        lambda known_sessions=None: [{
             "path": str(target),
             "provider": "claude",
             "session_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -1821,7 +1821,7 @@ def test_reindex_removes_deleted_files(db, tmp_path, monkeypatch):
     fts.reindex(db)
     assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
 
-    monkeypatch.setattr(fts, "list_index_records", lambda: [])
+    monkeypatch.setattr(fts, "list_index_records", lambda known_sessions=None: [])
     _, _, removed = fts.reindex(db)
     assert removed == 1
     assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
@@ -1865,14 +1865,14 @@ def test_reindex_keeps_session_when_same_sid_moves_paths(db, tmp_path, monkeypat
     monkeypatch.setattr(
         fts,
         "list_index_records",
-        lambda: _record(str(old_target), os.path.getmtime(old_target)),
+        lambda known_sessions=None: _record(str(old_target), os.path.getmtime(old_target)),
     )
     fts.reindex(db)
 
     monkeypatch.setattr(
         fts,
         "list_index_records",
-        lambda: _record(str(new_target), os.path.getmtime(new_target)),
+        lambda known_sessions=None: _record(str(new_target), os.path.getmtime(new_target)),
     )
     added, updated, removed = fts.reindex(db)
 
@@ -1918,7 +1918,7 @@ def test_reindex_dedupes_duplicate_session_ids(db, tmp_path, monkeypatch):
         _record(old_path, "2026-04-01T10:00:00Z", 1.0),
         _record(new_path, "2026-04-01T10:10:00Z", 2.0),
     ]
-    monkeypatch.setattr(fts, "list_index_records", lambda: records)
+    monkeypatch.setattr(fts, "list_index_records", lambda known_sessions=None: records)
 
     added, updated, removed = fts.reindex(db)
     added2, updated2, removed2 = fts.reindex(db)
@@ -2045,8 +2045,286 @@ def test_reset_db_quarantines_corrupt_file_and_allows_fresh_open(tmp_path):
     assert not os.path.exists(db_path + "-wal")
     assert not os.path.exists(db_path + "-shm")
     quarantined = [p for p in os.listdir(tmp_path) if ".corrupt-" in p]
-    assert len(quarantined) == 1  # kept for forensics, not deleted
+    # db + renamed -wal/-shm siblings, kept together for forensics.
+    assert len(quarantined) == 3
+    assert sum(1 for p in quarantined if p.endswith("-wal")) == 1
+    assert sum(1 for p in quarantined if p.endswith("-shm")) == 1
 
     conn2 = fts.open_db(db_path)  # fresh open works
     assert conn2.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
     conn2.close()
+
+
+# --- WAL hygiene ------------------------------------------------------------
+
+
+def _login_flow_record(target) -> dict:
+    return {
+        "path": str(target),
+        "provider": "claude",
+        "session_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "first_msg": "the login page crashes when I click continue",
+        "last_msg": "email validation should happen before the redirect",
+        "timestamp": "2026-04-01T10:00:00Z",
+        "last_timestamp": "2026-04-01T10:10:00Z",
+        "cwd": "/Users/alice/code/webapp",
+        "name": "Debug login flow",
+        "msg_count": 4,
+        "mtime": os.path.getmtime(target),
+        "fields": {
+            "cwd": "/users/alice/code/webapp",
+            "title": "debug login flow",
+            "first_msg": "the login page crashes when i click continue",
+            "user_text": "email validation should happen before the redirect",
+            "asst_text": "the login handler short-circuits on missing email validation",
+            "boilerplate": "",
+        },
+    }
+
+
+def test_open_db_write_path_is_wal_with_normal_sync(tmp_path):
+    conn = fts.open_db(str(tmp_path / "index.db"))
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        # 1 == NORMAL: crash-safe in WAL mode without per-commit fsync.
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_reindex_truncates_wal(tmp_path, monkeypatch):
+    path = tmp_path / "index.db"
+    conn = fts.open_db(str(path))
+    sessions_dir = tmp_path / "projects" / "demo"
+    sessions_dir.mkdir(parents=True)
+    target = sessions_dir / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+    shutil.copy(FIXTURES / "sample_session.jsonl", target)
+    monkeypatch.setattr(fts, "list_index_records", lambda known_sessions=None: [_login_flow_record(target)])
+
+    fts.reindex(conn)
+
+    wal = str(path) + "-wal"
+    assert os.path.exists(wal)
+    assert os.path.getsize(wal) == 0, "reindex must leave the WAL truncated"
+    conn.close()
+
+
+def test_reindex_survives_reader_pinning_the_wal(tmp_path, monkeypatch):
+    path = tmp_path / "index.db"
+    conn = fts.open_db(str(path))
+    conn.commit()
+    sessions_dir = tmp_path / "projects" / "demo"
+    sessions_dir.mkdir(parents=True)
+    target = sessions_dir / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+    shutil.copy(FIXTURES / "sample_session.jsonl", target)
+    monkeypatch.setattr(fts, "list_index_records", lambda known_sessions=None: [_login_flow_record(target)])
+
+    reader = fts.open_db(str(path), read_only=True)
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM sessions").fetchone()
+    try:
+        result = fts.reindex(conn)
+        assert result is not None, "a pinned WAL must not fail the reindex"
+    finally:
+        reader.close()
+        conn.close()
+
+
+def test_prune_quarantines_keeps_newest_recent_generation_only(tmp_path):
+    db_path = str(tmp_path / "index.db")
+    old_stamp = time.strftime(
+        "%Y%m%d-%H%M%S", time.localtime(time.time() - 10 * 86400)
+    )
+    fresh_stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time() - 60))
+    older_fresh_stamp = time.strftime(
+        "%Y%m%d-%H%M%S", time.localtime(time.time() - 3600)
+    )
+    for stamp in (old_stamp, older_fresh_stamp, fresh_stamp):
+        Path(f"{db_path}.corrupt-{stamp}").write_bytes(b"x")
+        Path(f"{db_path}.corrupt-{stamp}-wal").write_bytes(b"x")
+
+    fts._prune_quarantines(db_path)
+
+    remaining = sorted(p for p in os.listdir(tmp_path) if ".corrupt-" in p)
+    # Only the newest generation survives (db + wal); the aged-out and
+    # over-quota generations are gone.
+    assert remaining == [
+        f"index.db.corrupt-{fresh_stamp}",
+        f"index.db.corrupt-{fresh_stamp}-wal",
+    ]
+
+
+def test_prune_quarantines_drops_even_newest_when_aged_out(tmp_path):
+    db_path = str(tmp_path / "index.db")
+    old_stamp = time.strftime(
+        "%Y%m%d-%H%M%S", time.localtime(time.time() - 10 * 86400)
+    )
+    Path(f"{db_path}.corrupt-{old_stamp}").write_bytes(b"x")
+
+    fts._prune_quarantines(db_path)
+
+    assert [p for p in os.listdir(tmp_path) if ".corrupt-" in p] == []
+
+
+def test_default_db_path_is_per_host():
+    import platform as _platform
+
+    path = fts._default_db_path()
+    host = _platform.node().split(".")[0] or "local"
+    import re as _re
+
+    safe_host = _re.sub(r"[^A-Za-z0-9_-]", "-", host)
+    assert path.endswith(f"claude-browse-index.{safe_host}.db")
+
+
+def test_open_db_reclaims_legacy_unsuffixed_cache(tmp_path, monkeypatch):
+    legacy = tmp_path / "claude-browse-index.db"
+    legacy.write_bytes(b"x")
+    Path(str(legacy) + "-wal").write_bytes(b"x")
+    Path(str(legacy) + "-shm").write_bytes(b"x")
+    Path(str(legacy) + ".corrupt-20260704-101126").write_bytes(b"x")
+    per_host = tmp_path / "claude-browse-index.testhost.db"
+    monkeypatch.setattr(fts, "DB_PATH", str(per_host))
+    monkeypatch.setattr(fts, "_LEGACY_DB_PATH", str(legacy))
+
+    conn = fts.open_db(str(per_host))
+    conn.close()
+
+    assert not legacy.exists()
+    assert not os.path.exists(str(legacy) + "-wal")
+    assert not os.path.exists(str(legacy) + "-shm")
+    assert not os.path.exists(str(legacy) + ".corrupt-20260704-101126")
+    assert per_host.exists()
+
+
+# --- stat-gate --------------------------------------------------------------
+
+
+def _write_claude_session(sessions_dir: Path, i: int) -> Path:
+    import json as _json
+
+    sid = f"aaaaaaaa-bbbb-cccc-dddd-{i:012d}"
+    path = sessions_dir / f"{sid}.jsonl"
+    turns = [
+        {
+            "sessionId": sid,
+            "cwd": "/Users/alice/code/webapp",
+            "timestamp": "2026-04-01T10:00:00Z",
+            "message": {
+                "role": "user",
+                "content": f"debug the login flow number {i} crashing on continue",
+            },
+        },
+        {
+            "sessionId": sid,
+            "timestamp": "2026-04-01T10:05:00Z",
+            "message": {
+                "role": "assistant",
+                "content": f"handler {i} short-circuits on missing email validation",
+            },
+        },
+    ]
+    path.write_text("\n".join(_json.dumps(t) for t in turns) + "\n")
+    return path
+
+
+def test_reindex_never_parses_unchanged_files(db, tmp_path, monkeypatch):
+    """Steady-state reindex must be a stat() per file, not a full parse.
+    (The docstring always claimed this; before the stat-gate it was false
+    and warm launches paid a full JSON parse of every session on disk.)"""
+    from claude_browse.providers import claude as claude_provider
+
+    sessions_dir = tmp_path / "projects" / "demo"
+    sessions_dir.mkdir(parents=True)
+    paths = [_write_claude_session(sessions_dir, i) for i in range(3)]
+
+    info_calls: list[str] = []
+    corpus_calls: list[str] = []
+    real_info = claude_provider.get_session_info
+    real_corpus = claude_provider.extract_fielded_corpus
+    monkeypatch.setattr(
+        claude_provider,
+        "get_session_info",
+        lambda p: info_calls.append(p) or real_info(p),
+    )
+    monkeypatch.setattr(
+        claude_provider,
+        "extract_fielded_corpus",
+        lambda p: corpus_calls.append(p) or real_corpus(p),
+    )
+    monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setattr(claude_provider, "HISTORY_PATH", str(tmp_path / "no-history"))
+    monkeypatch.setattr(
+        fts,
+        "list_index_records",
+        lambda known_sessions=None: claude_provider.list_index_records(
+            known_sessions=known_sessions
+        ),
+    )
+
+    added, _, _ = fts.reindex(db)
+    assert added == 3
+    assert len(info_calls) == 3  # first run parses everything once
+
+    info_calls.clear()
+    corpus_calls.clear()
+    assert fts.reindex(db) == (0, 0, 0)
+    assert info_calls == [], "unchanged files must not be re-parsed"
+    assert corpus_calls == []
+
+    # Touching exactly one file re-parses exactly that file.
+    bumped = time.time() + 5
+    os.utime(paths[1], (bumped, bumped))
+    info_calls.clear()
+    added, updated, removed = fts.reindex(db)
+    assert (added, updated, removed) == (0, 1, 0)
+    assert info_calls == [str(paths[1])]
+
+    # Deleting a file still removes its session despite the stat-gate.
+    os.remove(paths[2])
+    added, updated, removed = fts.reindex(db)
+    assert (added, updated, removed) == (0, 0, 1)
+
+
+def test_incremental_semantic_terms_match_full_rebuild(db, tmp_path, monkeypatch):
+    """The per-session df deltas must produce exactly the same
+    semantic_terms content as the whole-corpus GROUP BY rebuild they
+    replaced -- across adds, updates, and removals."""
+    sessions_dir = tmp_path / "projects" / "demo"
+    sessions_dir.mkdir(parents=True)
+    paths = [_write_claude_session(sessions_dir, i) for i in range(4)]
+
+    from claude_browse.providers import claude as claude_provider
+
+    monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setattr(claude_provider, "HISTORY_PATH", str(tmp_path / "no-history"))
+    monkeypatch.setattr(
+        fts,
+        "list_index_records",
+        lambda known_sessions=None: claude_provider.list_index_records(
+            known_sessions=known_sessions
+        ),
+    )
+
+    fts.reindex(db)
+
+    # Update one session's content and remove another.
+    paths[0].write_text(
+        paths[0].read_text()
+        + '{"sessionId": "aaaaaaaa-bbbb-cccc-dddd-000000000000", '
+        '"timestamp": "2026-04-01T11:00:00Z", '
+        '"message": {"role": "user", "content": '
+        '"completely different follow-up about the paywall experiments"}}\n'
+    )
+    bumped = time.time() + 5
+    os.utime(paths[0], (bumped, bumped))
+    os.remove(paths[3])
+    fts.reindex(db)
+
+    incremental = sorted(
+        db.execute("SELECT term, df FROM semantic_terms").fetchall()
+    )
+    fts._refresh_semantic_index(db)
+    rebuilt = sorted(db.execute("SELECT term, df FROM semantic_terms").fetchall())
+    assert incremental == rebuilt
+    assert incremental, "corpus must actually have semantic terms"

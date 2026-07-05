@@ -10,10 +10,13 @@ deletable any time; the next claude-browse run rebuilds from JSONL.
 
 from __future__ import annotations
 
+import errno
+import glob as _glob
 import hashlib
 import json
 import math
 import os
+import platform
 import re
 import sqlite3
 import struct
@@ -21,6 +24,12 @@ import time
 import urllib.error
 import urllib.request
 from collections import Counter
+from collections.abc import Callable
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX
+    fcntl = None  # type: ignore[assignment]
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -33,8 +42,32 @@ from .query import (
     term_spans,
 )
 
-DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
+def _default_db_path() -> str:
+    """Per-host index path.
+
+    The index is a machine-local derived cache. If ~/.claude/cache is ever
+    synced between machines (Dropbox/iCloud/Syncthing), a shared SQLite
+    file gets its db/-wal pages interleaved by two hosts and corrupts;
+    flock-based writer election cannot reach across machines. A hostname
+    suffix makes each host's index a distinct file. Cost: one rebuild per
+    host, once.
+    """
+    host = platform.node().split(".")[0] or "local"
+    safe_host = re.sub(r"[^A-Za-z0-9_-]", "-", host)
+    return os.path.expanduser(
+        f"~/.claude/cache/claude-browse-index.{safe_host}.db"
+    )
+
+
+DB_PATH = _default_db_path()
+# Pre-per-host filenames, removed on first open to reclaim gigabytes of
+# dead cache. Exact names only -- never glob the user's cache dir broadly.
+_LEGACY_DB_PATH = os.path.expanduser("~/.claude/cache/claude-browse-index.db")
 SQLITE_BUSY_TIMEOUT_MS = 30_000
+QUARANTINE_KEEP = 1
+QUARANTINE_MAX_AGE_S = 7 * 86400
+REINDEX_LOCK_SUFFIX = ".reindex.lock"
+REINDEX_WAIT_TIMEOUT_S = 15 * 60
 # v2: added last_timestamp column so the list view can sort by most recent
 #     activity instead of session start time.
 # v3: split sessions_fts from a single 'corpus' column into six fielded
@@ -354,10 +387,131 @@ def open_db(path: str = DB_PATH, *, read_only: bool = False) -> sqlite3.Connecti
         return conn
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    if path == DB_PATH:
+        _cleanup_legacy_cache()
     conn = _connect_sqlite(path)
     conn.execute("PRAGMA journal_mode=WAL")
+    # WAL + NORMAL is structurally crash-safe (a kill can lose the last
+    # transaction but cannot corrupt the file); FULL's per-commit fsync is
+    # pointless for a derived cache. OFF is excluded — it permits real
+    # corruption, which is the recurring symptom being fixed.
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA wal_autocheckpoint=1000")
     _init_schema(conn)
     return conn
+
+
+def acquire_reindex_lock(
+    db_path: str,
+    *,
+    block: bool = False,
+    poll_interval: float = 1.0,
+    timeout_s: float = REINDEX_WAIT_TIMEOUT_S,
+    on_wait: Callable[[], None] | None = None,
+) -> int | None:
+    """Elect the single reindex writer for db_path.
+
+    Returns an fd to hold for the duration of the reindex, or None when
+    another process holds the lock (and, with block=True, the wait timed
+    out). flock releases automatically on process death -- including
+    SIGKILL -- so a crashed winner never leaves a stale lock behind.
+
+    When the lockfile cannot be created or flock is unsupported on the
+    filesystem, returns an fd (or -1) and the caller proceeds unguarded --
+    exactly the pre-election behavior, never worse.
+    """
+    lock_path = db_path + REINDEX_LOCK_SUFFIX
+    try:
+        parent = os.path.dirname(lock_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError:
+        return -1
+    if fcntl is None:
+        return fd
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                # flock unsupported here (some network filesystems):
+                # proceed unguarded rather than refusing to index.
+                return fd
+            if not block or time.monotonic() >= deadline:
+                os.close(fd)
+                return None
+            if on_wait is not None:
+                on_wait()
+            time.sleep(poll_interval)
+
+
+def release_reindex_lock(fd: int | None) -> None:
+    if fd is None or fd < 0:
+        return
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _conn_db_path(conn: sqlite3.Connection) -> str:
+    """File backing the connection's main database ('' for in-memory)."""
+    try:
+        for _seq, name, file in conn.execute("PRAGMA database_list"):
+            if name == "main":
+                return file or ""
+    except sqlite3.Error:
+        pass
+    return ""
+
+
+def _cleanup_legacy_cache() -> None:
+    """Reclaim the pre-per-host index files (exact known names only).
+
+    The un-suffixed DB grew past 1 GB with a similarly sized WAL and
+    quarantine copies; it is dead weight once the per-host path is live.
+    """
+    candidates = [
+        _LEGACY_DB_PATH,
+        _LEGACY_DB_PATH + "-wal",
+        _LEGACY_DB_PATH + "-shm",
+        *_glob.glob(_glob.escape(_LEGACY_DB_PATH) + ".corrupt-*"),
+    ]
+    for candidate in candidates:
+        try:
+            os.remove(candidate)
+        except OSError:
+            pass
+
+
+def checkpoint_wal(conn: sqlite3.Connection) -> None:
+    """Best-effort WAL truncation after a reindex. Never raises.
+
+    Passive auto-checkpoints get pinned by concurrent readers (fzf helpers
+    open per-keystroke read connections) and never shrink the file, which
+    is how the WAL once grew to ~1 GB. TRUNCATE with a short budget lands
+    between keystrokes on most launches; PASSIVE at least recycles frames.
+    """
+    try:
+        conn.execute("PRAGMA busy_timeout = 2000")
+        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if row and row[0] == 1:
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    except sqlite3.Error:
+        pass
+    finally:
+        try:
+            conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        except sqlite3.Error:
+            pass
 
 
 def reset_db(path: str = DB_PATH) -> None:
@@ -366,11 +520,17 @@ def reset_db(path: str = DB_PATH) -> None:
     The DB is a derived cache over session JSONL files, so recovery from
     corruption (observed live: B-tree rowids out of order surfacing as a
     spurious UNIQUE-constraint failure during reindex) is: move the bad
-    file aside for forensics, drop the WAL/SHM siblings, rebuild from
-    source. Never crash the tool over a cache.
+    file aside for forensics and rebuild from source. Never crash the
+    tool over a cache.
+
+    The -wal/-shm sidecars are quarantined by rename, not deleted: removing
+    a live WAL from under another process's open connection is itself a
+    corruption vector, and the renamed trio stays coherent for forensics.
+    Callers must hold the reindex lock so two processes cannot both
+    quarantine and mass-rebuild the same index.
     """
+    quarantine = f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
     if os.path.exists(path):
-        quarantine = f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
         try:
             os.replace(path, quarantine)
         except OSError:
@@ -379,7 +539,50 @@ def reset_db(path: str = DB_PATH) -> None:
         sidecar = f"{path}{suffix}"
         if os.path.exists(sidecar):
             try:
-                os.remove(sidecar)
+                os.replace(sidecar, f"{quarantine}{suffix}")
+            except OSError:
+                try:
+                    os.remove(sidecar)
+                except OSError:
+                    pass
+    _prune_quarantines(path)
+
+
+def _prune_quarantines(path: str) -> None:
+    """Cap quarantined corrupt-index copies (each is a full-size DB).
+
+    Keeps the newest QUARANTINE_KEEP generations, and even those only up to
+    QUARANTINE_MAX_AGE_S -- forensic value decays fast and the copies cost
+    gigabytes. A generation is the db plus its renamed -wal/-shm siblings.
+    """
+    prefix = f"{path}.corrupt-"
+    entries = _glob.glob(_glob.escape(prefix) + "*")
+    if not entries:
+        return
+
+    def generation(entry: str) -> str:
+        stamp = entry[len(prefix):]
+        for suffix in ("-wal", "-shm"):
+            if stamp.endswith(suffix):
+                stamp = stamp[: -len(suffix)]
+        return stamp
+
+    keep: set[str] = set()
+    now = time.time()
+    stamps = sorted({generation(entry) for entry in entries}, reverse=True)
+    for idx, stamp in enumerate(stamps):
+        if idx >= QUARANTINE_KEEP:
+            break
+        try:
+            born = time.mktime(time.strptime(stamp, "%Y%m%d-%H%M%S"))
+        except ValueError:
+            continue
+        if now - born <= QUARANTINE_MAX_AGE_S:
+            keep.add(stamp)
+    for entry in entries:
+        if generation(entry) not in keep:
+            try:
+                os.remove(entry)
             except OSError:
                 pass
 
@@ -522,36 +725,117 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def reindex(conn: sqlite3.Connection) -> tuple[int, int, int]:
+def reindex(
+    conn: sqlite3.Connection,
+    *,
+    block: bool = False,
+    on_wait: Callable[[], None] | None = None,
+) -> tuple[int, int, int] | None:
     """Sync the index against on-disk session files.
 
-    Reindexes only files whose mtime changed since the last run, so steady-
-    state startup is fast (just a stat() per file). First run is a full
-    walk and may take several seconds for hundreds of sessions.
+    Exactly one process reindexes at a time: an flock on a sidecar
+    lockfile (derived from the connection's database path) elects the
+    writer. Losers return None immediately -- callers proceed on the
+    existing index -- or, with block=True, wait for the winner and then
+    reindex themselves (a fast no-op when the winner finished; a full
+    takeover when it was killed, since flock dies with its process).
 
-    Returns (added, updated, removed) counts for caller diagnostics.
+    Returns (added, updated, removed) counts, or None when the election
+    was lost.
     """
-    records = _dedupe_records_by_session_id(list_index_records())
-    record_map: dict[str, dict] = {r["path"]: r for r in records}
-    current_sids = {str(r.get("session_id") or "") for r in records}
+    db_path = _conn_db_path(conn)
+    lock_fd = -1
+    if db_path:
+        lock_fd = acquire_reindex_lock(db_path, block=block, on_wait=on_wait)
+        if lock_fd is None:
+            return None
+    try:
+        return _reindex_locked(conn)
+    finally:
+        release_reindex_lock(lock_fd)
 
+
+def rebuild_from_scratch(
+    db_path: str = DB_PATH,
+) -> tuple[sqlite3.Connection, tuple[int, int, int] | None]:
+    """Corruption recovery: quarantine + fresh open + reindex, under the lock.
+
+    Holding the reindex lock across reset_db() is what prevents the
+    observed feedback loop where two processes both diagnose corruption
+    and both mass-rebuild. If another process is already rebuilding, wait
+    for it and use whatever index it produced.
+    """
+    def _file_id(path: str) -> tuple[int, int] | None:
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (st.st_dev, st.st_ino)
+
+    pre_id = _file_id(db_path)
+    lock_fd = acquire_reindex_lock(db_path, block=True)
+    if lock_fd is None:
+        conn = open_db(db_path)
+        return conn, None
+    try:
+        # If the file's identity changed while we waited, another process
+        # already quarantined and rebuilt -- do not reset its fresh index.
+        if pre_id is not None and _file_id(db_path) == pre_id:
+            reset_db(db_path)
+        conn = open_db(db_path)
+        counts = _reindex_locked(conn)
+        return conn, counts
+    finally:
+        release_reindex_lock(lock_fd)
+
+
+def _reindex_locked(conn: sqlite3.Connection) -> tuple[int, int, int]:
+    """The reindex body. Callers must hold the reindex lock (or be the
+    sole process, e.g. tests on an in-memory/tmp database).
+
+    Stored (sid, mtime) pairs are fetched first and passed down to the
+    providers, which stat-gate their work: an unchanged session file is
+    never read or parsed, only stat()ed, and comes back as a stub record
+    marked unchanged. Steady-state startup therefore really is a stat per
+    file; only changed/new sessions pay the parse and the DB write.
+    """
     existing: dict[str, tuple[str, float]] = {
         row[0]: (row[1], row[2])
         for row in conn.execute("SELECT path, sid, mtime FROM sessions")
+    }
+
+    all_records = list_index_records(known_sessions=existing)
+    stub_paths = {r["path"] for r in all_records if r.get("unchanged")}
+    records = _dedupe_records_by_session_id(
+        [r for r in all_records if not r.get("unchanged")]
+    )
+    record_map: dict[str, dict] = {r["path"]: r for r in records}
+    current_sids = {str(r.get("session_id") or "") for r in records}
+    # Stubs carry no sid; their identity is whatever the index already has.
+    current_sids |= {
+        existing[path][0] for path in stub_paths if path in existing
     }
 
     added = updated = removed = 0
     now = time.time()
     changes_since_commit = 0
 
+    # Cold build (empty index): per-window df upserts would be millions of
+    # random writes into an ever-growing semantic_terms B-tree -- an order
+    # of magnitude slower than one GROUP BY over the finished postings.
+    # Skip df tracking and let the _semantic_terms_missing bootstrap below
+    # populate the table in a single pass. Steady state keeps exact
+    # incremental deltas.
+    bootstrap = not existing
+
     for path, record in record_map.items():
         prev = existing.get(path)
         if prev is None:
-            if _index_record(conn, record, now):
+            if _index_record(conn, record, now, track_term_df=not bootstrap):
                 added += 1
                 changes_since_commit += 1
         elif abs(prev[1] - record["mtime"]) > 0.001:
-            if _index_record(conn, record, now):
+            if _index_record(conn, record, now, track_term_df=not bootstrap):
                 updated += 1
                 changes_since_commit += 1
         if changes_since_commit >= 10:
@@ -559,6 +843,8 @@ def reindex(conn: sqlite3.Connection) -> tuple[int, int, int]:
             changes_since_commit = 0
 
     for path, (sid, _) in existing.items():
+        if path in stub_paths:
+            continue
         if path not in record_map and sid not in current_sids:
             conn.execute("DELETE FROM sessions WHERE sid = ?", (sid,))
             conn.execute("DELETE FROM sessions_fts WHERE sid = ?", (sid,))
@@ -571,11 +857,18 @@ def reindex(conn: sqlite3.Connection) -> tuple[int, int, int]:
 
     if changes_since_commit:
         conn.commit()
-    if added or updated or removed or _semantic_terms_missing(conn):
+    if added or updated or removed:
+        # df counts are maintained incrementally alongside the postings;
+        # only rows that decremented to zero need sweeping.
+        conn.execute("DELETE FROM semantic_terms WHERE df <= 0")
+    if _semantic_terms_missing(conn):
+        # Bootstrap / self-heal only: e.g. an index built before the
+        # incremental df counters, or terms wiped by a partial recovery.
         _refresh_semantic_index(conn)
     if _dense_embeddings_enabled():
         _sync_dense_embeddings(conn)
     conn.commit()
+    checkpoint_wal(conn)
     return (added, updated, removed)
 
 
@@ -603,7 +896,7 @@ def _dedupe_records_by_session_id(records: list[dict]) -> list[dict]:
 
 
 def _index_record(
-    conn: sqlite3.Connection, record: dict, now: float
+    conn: sqlite3.Connection, record: dict, now: float, *, track_term_df: bool = True
 ) -> bool:
     """Upsert one normalized session record into the index.
 
@@ -665,7 +958,7 @@ def _index_record(
             fields["boilerplate"],
         ),
     )
-    _reindex_segments_for_record(conn, record)
+    _reindex_segments_for_record(conn, record, track_term_df=track_term_df)
     return True
 
 
@@ -1331,6 +1624,19 @@ def _delete_semantic_windows_for_sid(conn: sqlite3.Connection, sid: str) -> None
     ]
     if rowids:
         placeholders = ",".join("?" for _ in rowids)
+        # Each posting row is exactly one df unit (PK is (term, window_id)),
+        # so decrementing by the per-term posting count keeps semantic_terms
+        # exact without the whole-corpus rebuild. Same transaction as the
+        # posting deletes, so a mid-write kill can't split them.
+        for term, count in conn.execute(
+            f"SELECT term, COUNT(*) FROM semantic_postings "
+            f"WHERE window_id IN ({placeholders}) GROUP BY term",
+            rowids,
+        ).fetchall():
+            conn.execute(
+                "UPDATE semantic_terms SET df = df - ? WHERE term = ?",
+                (count, term),
+            )
         conn.execute(
             f"DELETE FROM semantic_postings WHERE window_id IN ({placeholders})",
             rowids,
@@ -1345,6 +1651,8 @@ def _delete_semantic_windows_for_sid(conn: sqlite3.Connection, sid: str) -> None
 def _reindex_semantic_windows_from_segments(
     conn: sqlite3.Connection,
     sid: str,
+    *,
+    track_term_df: bool = True,
 ) -> None:
     _delete_semantic_windows_for_sid(conn, sid)
     rows = conn.execute(
@@ -1397,6 +1705,14 @@ def _reindex_semantic_windows_from_segments(
                 for term, weight in features.items()
             ],
         )
+        if track_term_df:
+            conn.executemany(
+                """
+                INSERT INTO semantic_terms (term, df) VALUES (?, 1)
+                ON CONFLICT(term) DO UPDATE SET df = df + 1
+                """,
+                [(term,) for term in features],
+            )
 
 
 def _refresh_semantic_index(conn: sqlite3.Connection) -> None:
@@ -1422,6 +1738,8 @@ def _semantic_terms_missing(conn: sqlite3.Connection) -> bool:
 def _reindex_segments_for_record(
     conn: sqlite3.Connection,
     record: dict,
+    *,
+    track_term_df: bool = True,
 ) -> None:
     sid = str(record["session_id"])
     _delete_segments_for_sid(conn, sid)
@@ -1454,7 +1772,7 @@ def _reindex_segments_for_record(
             """,
             (rowid, sid, role, idx, ts, text),
         )
-    _reindex_semantic_windows_from_segments(conn, sid)
+    _reindex_semantic_windows_from_segments(conn, sid, track_term_df=track_term_df)
 
 
 def _semantic_query_features(

@@ -72,6 +72,10 @@ Adding a column to the FTS index DB could have meant writing a real ALTER TABLE 
 
 This is not "cheating around migrations" — it's the right pattern for caches. Real ALTER TABLE migrations are for source-of-truth data where rebuilding is expensive or impossible. For 300 sessions, the rebuild took ~7 seconds. Don't write migration scaffolding you don't need.
 
+## "It's just a disposable cache" does not excuse skipping concurrency design
+
+The corollary the previous lesson hid: because the index was rebuildable, every failure got a *recovery* patch (self-heal on corruption, tolerate locks, don't rebuild on locks) and never a *prevention* fix. The result was a week with two corruption incidents, a ~1 GB write-ahead log nobody checkpointed, silent window deaths under concurrent launches, and a rebuild feedback loop where recovery itself was the heaviest writer. What ended the cycle was ordinary concurrency engineering, all cheap: a flock single-writer election on a sidecar lockfile (auto-released on SIGKILL), `wal_checkpoint(TRUNCATE)` after each write burst, `synchronous=NORMAL`, quarantine-by-rename instead of deleting a live WAL, and a per-host cache filename so file-sync between machines cannot interleave two hosts' pages into one SQLite file. If several processes open one database read-write on the hot path, design the writer topology on day one — "we can always rebuild" bounds the damage but also *hides* the bug until users hit it as slowness and vanished windows. And test contention with real subprocesses and real SIGKILLs: monkeypatched lock exceptions verified the message strings while the actual races corrupted the file.
+
 ## When tracking first AND last of something, watch the guard clause
 
 The original `core.py` captured the session start timestamp with:

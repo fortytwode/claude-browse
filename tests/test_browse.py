@@ -772,11 +772,17 @@ def test_main_does_not_rebuild_when_first_indexing_is_locked(monkeypatch, capsys
     captured = capsys.readouterr()
     assert excinfo.value.code == 1
     assert "Indexing sessions for the first time..." in captured.err
-    assert "Search index is locked by another claude-browse process" in captured.err
+    assert "Search index is locked by another process" in captured.err
     assert "Search index corrupted" not in captured.err
 
 
-def test_main_uses_existing_index_when_refresh_is_locked(monkeypatch, capsys):
+def test_main_warm_start_paints_immediately_and_refreshes_in_background(
+    monkeypatch, capsys
+):
+    """A warm launch must never block behind a reindex: one large active
+    session can take minutes to re-index, which left the winner window
+    blank -- the original 'window shows nothing' complaint."""
+
     class CountCursor:
         def fetchone(self):
             return (1,)
@@ -788,6 +794,7 @@ def test_main_uses_existing_index_when_refresh_is_locked(monkeypatch, capsys):
         def close(self):
             return None
 
+    spawned = []
     monkeypatch.setattr(browse, "_check_fzf", lambda: None)
     monkeypatch.setattr(browse, "_providers_with_local_state", lambda: ["claude"])
     monkeypatch.setattr(browse, "_folder_prefixes", lambda: [])
@@ -795,14 +802,12 @@ def test_main_uses_existing_index_when_refresh_is_locked(monkeypatch, capsys):
     monkeypatch.setattr(
         browse.fts,
         "reindex",
-        lambda _conn: (_ for _ in ()).throw(
-            sqlite3.OperationalError("database is locked")
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("warm start must not reindex inline")
         ),
     )
     monkeypatch.setattr(
-        browse.fts,
-        "reset_db",
-        lambda: (_ for _ in ()).throw(AssertionError("must not reset on lock")),
+        browse, "_spawn_background_index_refresh", lambda: spawned.append(1)
     )
     monkeypatch.setattr(browse.fts, "list_recent", lambda _conn, limit: [_info()])
     monkeypatch.setattr(
@@ -815,10 +820,33 @@ def test_main_uses_existing_index_when_refresh_is_locked(monkeypatch, capsys):
     with pytest.raises(SystemExit) as excinfo:
         browse.main()
 
-    captured = capsys.readouterr()
     assert excinfo.value.code == 0
-    assert "using the existing index without refreshing" in captured.err
-    assert "Search index corrupted" not in captured.err
+    assert spawned == [1]
+
+
+def test_refresh_index_once_heals_corruption_via_locked_rebuild(monkeypatch):
+    class Conn:
+        def close(self):
+            return None
+
+    rebuilt = []
+    monkeypatch.setattr(browse.fts, "open_db", lambda *args, **kwargs: Conn())
+    monkeypatch.setattr(
+        browse.fts,
+        "reindex",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            sqlite3.DatabaseError("malformed database schema")
+        ),
+    )
+    monkeypatch.setattr(
+        browse.fts,
+        "rebuild_from_scratch",
+        lambda: rebuilt.append(1) or (Conn(), (3, 0, 0)),
+    )
+
+    browse._refresh_index_once()
+
+    assert rebuilt == [1]
 
 
 def test_main_list_providers_prints_without_fzf(monkeypatch, capsys):
@@ -1548,3 +1576,55 @@ def test_folder_first_order_canonicalizes_both_sides(monkeypatch):
     ]
     out = browse._folder_first_order(sessions, "/users/shamanth/personal-ops/family")
     assert out[0]["session_id"] == "fam"
+
+
+def test_main_waits_for_winner_when_cold_start_loses_election(monkeypatch, capsys):
+    """A cold-start window that loses the writer election must wait for the
+    winner and then proceed -- never silently exit (the old behavior that
+    made concurrently launched windows just disappear)."""
+
+    class CountCursor:
+        def fetchone(self):
+            return (0,)
+
+    class Conn:
+        def execute(self, _sql):
+            return CountCursor()
+
+        def close(self):
+            return None
+
+    reindex_calls = []
+
+    def fake_reindex(_conn, **_kwargs):
+        reindex_calls.append(1)
+        if len(reindex_calls) == 1:
+            return None  # lost the election
+        return (5, 0, 0)  # winner finished; our turn is a fast no-op
+
+    monkeypatch.setattr(browse, "_check_fzf", lambda: None)
+    monkeypatch.setattr(browse, "_providers_with_local_state", lambda: ["claude"])
+    monkeypatch.setattr(browse, "_folder_prefixes", lambda: [])
+    monkeypatch.setattr(browse.fts, "open_db", lambda *args, **kwargs: Conn())
+    monkeypatch.setattr(browse.fts, "reindex", fake_reindex)
+    monkeypatch.setattr(
+        browse.fts, "acquire_reindex_lock", lambda *args, **kwargs: 3
+    )
+    monkeypatch.setattr(browse.fts, "release_reindex_lock", lambda _fd: None)
+    monkeypatch.setattr(browse.fts, "list_recent", lambda _conn, limit: [_info()])
+    monkeypatch.setattr(
+        browse.subprocess,
+        "run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 1, "stdout": ""})(),
+    )
+    monkeypatch.setattr(browse.sys, "argv", ["claude-browse"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        browse.main()
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 0
+    assert "waiting for it to finish" in captured.err
+    assert len(reindex_calls) == 2
+
+

@@ -215,9 +215,40 @@ def _parse_session(session_dir: str) -> dict[str, object] | None:
     }
 
 
-def list_index_records() -> list[dict[str, object]]:
+def _session_freshness(session_dir: str) -> float | None:
+    """max mtime of the session's events/workspace files -- the same
+    composite _parse_session stores, computed without parsing."""
+    session_id = os.path.basename(session_dir)
+    events_path = _events_path(session_dir, session_id)
+    try:
+        freshness = os.path.getmtime(events_path)
+    except OSError:
+        return None
+    workspace_path = _workspace_path(session_dir, session_id)
+    if os.path.exists(workspace_path):
+        try:
+            freshness = max(freshness, os.path.getmtime(workspace_path))
+        except OSError:
+            pass
+    return freshness
+
+
+def list_index_records(
+    known_sessions: dict[str, tuple[str, float]] | None = None,
+) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for session_dir in _session_dirs():
+        if known_sessions is not None and session_dir in known_sessions:
+            _sid, known_mtime = known_sessions[session_dir]
+            freshness = _session_freshness(session_dir)
+            if freshness is not None and abs(freshness - float(known_mtime)) <= 0.001:
+                records.append({
+                    "path": session_dir,
+                    "provider": "copilot",
+                    "mtime": known_mtime,
+                    "unchanged": True,
+                })
+                continue
         record = _parse_session(session_dir)
         if record:
             records.append(record)

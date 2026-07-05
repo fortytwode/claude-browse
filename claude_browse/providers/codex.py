@@ -340,14 +340,58 @@ def _load_state_records() -> tuple[list[dict[str, object]], float]:
     return (records, state_mtime)
 
 
+def _state_updated_s(state: dict[str, object]) -> float:
+    """Per-thread freshness from the state row, in epoch seconds."""
+    if not state:
+        return 0.0
+    ms = state.get("updated_ms")
+    if ms:
+        try:
+            return float(ms) / 1000.0
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(state.get("updated_s") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _history_last_ts(events: list[dict[str, object]]) -> float:
+    last = 0.0
+    for event in events or ():
+        ts = event.get("ts")
+        if isinstance(ts, (int, float)) and float(ts) > last:
+            last = float(ts)
+    return last
+
+
+def _record_freshness(
+    session_path: str,
+    state: dict[str, object],
+    events: list[dict[str, object]],
+) -> float:
+    """Per-session change fingerprint stored as the record's mtime.
+
+    Deliberately NOT the file mtimes of state_5.sqlite/history.jsonl:
+    those are global -- any codex activity anywhere bumped them, which
+    made every codex record look changed on every launch and forced a
+    full rewrite of all of them. Per-row updated_at and per-sid history
+    timestamps only move when THIS session moves.
+    """
+    session_mtime = (
+        os.path.getmtime(session_path)
+        if session_path and os.path.exists(session_path)
+        else 0.0
+    )
+    return max(session_mtime, _state_updated_s(state), _history_last_ts(events))
+
+
 def _build_index_record(
     sid: str,
     session_path: str,
     state: dict[str, object],
     metadata: dict[str, object],
     history: dict[str, list[dict[str, object]]],
-    history_mtime: float,
-    state_mtime: float,
 ) -> dict[str, object] | None:
     events = history.get(sid, [])
     event_texts = [str(event.get("text", "")) for event in events]
@@ -416,16 +460,7 @@ def _build_index_record(
         or metadata.get("last_timestamp")
         or metadata.get("timestamp")
     )
-    session_mtime = (
-        os.path.getmtime(session_path)
-        if session_path and os.path.exists(session_path)
-        else 0.0
-    )
-    record_mtime = max(
-        state_mtime if state else 0.0,
-        history_mtime if events else 0.0,
-        session_mtime,
-    )
+    record_mtime = _record_freshness(session_path, state, events)
     cwd = state.get("cwd") or metadata.get("cwd") or ""
     title_raw = str(state.get("title") or "").strip()
     title, title_boilerplate = split_boilerplate(title_raw)
@@ -455,14 +490,11 @@ def _build_index_record(
     }
 
 
-def list_index_records() -> list[dict[str, object]]:
+def list_index_records(
+    known_sessions: dict[str, tuple[str, float]] | None = None,
+) -> list[dict[str, object]]:
     history = load_history()
-    history_mtime = (
-        os.path.getmtime(CODEX_HISTORY_PATH)
-        if os.path.exists(CODEX_HISTORY_PATH)
-        else 0.0
-    )
-    state_rows, state_mtime = _load_state_records()
+    state_rows, _state_mtime = _load_state_records()
     state_by_sid = {str(row["session_id"]): row for row in state_rows}
     state_by_path = {
         str(row["path"]): row
@@ -473,20 +505,32 @@ def list_index_records() -> list[dict[str, object]]:
     seen_sids: set[str] = set()
 
     for session_path in list_session_files():
+        if known_sessions is not None and session_path in known_sessions:
+            # The stored sid came from this file's last full parse, so
+            # state/history lookups don't depend on guessing the sid from
+            # the filename. An indexed path is never a subagent session
+            # (those are filtered before indexing), so skipping the
+            # metadata parse cannot let one back in.
+            known_sid, known_mtime = known_sessions[session_path]
+            state = state_by_sid.get(known_sid) or state_by_path.get(session_path) or {}
+            freshness = _record_freshness(
+                session_path, state, history.get(known_sid, [])
+            )
+            if abs(freshness - float(known_mtime)) <= 0.001:
+                records.append({
+                    "path": session_path,
+                    "provider": "codex",
+                    "mtime": known_mtime,
+                    "unchanged": True,
+                })
+                seen_sids.add(known_sid)
+                continue
         metadata = _load_session_metadata(session_path)
         if str(metadata.get("thread_source") or "").lower() == "subagent":
             continue
         sid = str(metadata.get("session_id") or _session_id_from_path(session_path))
         state = state_by_sid.get(sid) or state_by_path.get(session_path) or {}
-        record = _build_index_record(
-            sid,
-            session_path,
-            state,
-            metadata,
-            history,
-            history_mtime,
-            state_mtime,
-        )
+        record = _build_index_record(sid, session_path, state, metadata, history)
         if record:
             records.append(record)
             seen_sids.add(sid)
@@ -495,16 +539,22 @@ def list_index_records() -> list[dict[str, object]]:
         sid = str(state["session_id"])
         if sid in seen_sids:
             continue
+        state_path = str(state.get("path") or "")
+        record_path = state_path or f"codex://{sid}"
+        if known_sessions is not None and record_path in known_sessions:
+            _known_sid, known_mtime = known_sessions[record_path]
+            freshness = _record_freshness(state_path, state, history.get(sid, []))
+            if abs(freshness - float(known_mtime)) <= 0.001:
+                records.append({
+                    "path": record_path,
+                    "provider": "codex",
+                    "mtime": known_mtime,
+                    "unchanged": True,
+                })
+                seen_sids.add(sid)
+                continue
         metadata = {"timestamp": None, "last_timestamp": None, "cwd": ""}
-        record = _build_index_record(
-            sid,
-            str(state.get("path") or ""),
-            state,
-            metadata,
-            history,
-            history_mtime,
-            state_mtime,
-        )
+        record = _build_index_record(sid, state_path, state, metadata, history)
         if record:
             records.append(record)
 
