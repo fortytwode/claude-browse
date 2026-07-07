@@ -1433,25 +1433,45 @@ def _spawn_background_index_refresh() -> None:
     """Fire-and-forget child that syncs the index while fzf paints.
 
     Detached (new session, no inherited stdio) so it survives the picker
-    closing and can't scribble on the terminal. Failure to spawn is
-    non-fatal: the picker still works on the existing index and the next
-    launch tries again.
+    closing and can't scribble on the terminal. The child is a fresh
+    interpreter, so the package root must go onto its sys.path
+    explicitly: the git-clone shim imports claude_browse via a sys.path
+    hack that does not propagate to subprocesses, and the resulting
+    silent ModuleNotFoundError froze the index at its last refresh date
+    for days. For the same reason the child's stderr goes to a logfile,
+    not DEVNULL -- the next silent death must leave a corpse. Failure to
+    spawn is non-fatal: the picker still works on the existing index and
+    the next launch tries again.
     """
+    pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    child_code = (
+        "import sys; "
+        f"sys.path.insert(0, {pkg_root!r}); "
+        "from claude_browse.browse import _refresh_index_once; "
+        "_refresh_index_once()"
+    )
+    stderr_target: object = subprocess.DEVNULL
+    try:
+        log_path = os.path.join(
+            os.path.dirname(fts.DB_PATH), "claude-browse-refresh.log"
+        )
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        stderr_target = open(log_path, "wb")
+    except OSError:
+        stderr_target = subprocess.DEVNULL
     try:
         subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                "from claude_browse.browse import _refresh_index_once; "
-                "_refresh_index_once()",
-            ],
+            [sys.executable, "-c", child_code],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_target,
             start_new_session=True,
         )
     except OSError:
         pass
+    finally:
+        if stderr_target is not subprocess.DEVNULL:
+            stderr_target.close()
 
 
 def _refresh_index_once() -> None:
