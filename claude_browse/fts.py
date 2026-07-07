@@ -90,7 +90,11 @@ REINDEX_WAIT_TIMEOUT_S = 15 * 60
 #     queried locally. Disabled by default so the normal tool remains offline.
 # v8: provider parsers move AGENTS/CLAUDE instruction dumps into the
 #     low-weight boilerplate column instead of title/first_msg/user_text.
-SCHEMA_VERSION = 8
+# v9: semantic_postings intern terms as integer ids into semantic_terms
+#     and become a WITHOUT ROWID table clustered on (term_id, window_id).
+#     v8 stored every term string twice (table + PK autoindex), which was
+#     ~85% of a 1.1 GB index file.
+SCHEMA_VERSION = 9
 _CLOSEOUT_CUE_WEIGHTS = {
     "closeout": 3.0,
     "close out": 3.0,
@@ -473,6 +477,53 @@ def _conn_db_path(conn: sqlite3.Connection) -> str:
     return ""
 
 
+_CORRUPTION_MESSAGE_MARKERS = (
+    "malformed",  # SQLITE_CORRUPT: "database disk image is malformed"
+    "not a database",  # SQLITE_NOTADB
+    "disk image",
+)
+
+
+def is_corruption_error(exc: sqlite3.Error) -> bool:
+    """True when the exception itself proves file-level corruption.
+
+    Exception type alone cannot discriminate: live corruption has
+    surfaced as IntegrityError ('UNIQUE constraint failed' from B-tree
+    pages with out-of-order rowids), and an indexing bug can raise the
+    same type on a healthy file. Result codes are authoritative where
+    available (Python 3.11+); the message match is the 3.9/3.10
+    fallback. A False here is not a clean bill of health -- callers
+    still confirm with integrity_ok() before trusting the file.
+    """
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None and code & 0xFF in (11, 26):
+        # SQLITE_CORRUPT / SQLITE_NOTADB primary result codes.
+        return True
+    message = str(exc).lower()
+    return any(marker in message for marker in _CORRUPTION_MESSAGE_MARKERS)
+
+
+def integrity_ok(db_path: str = DB_PATH) -> bool:
+    """Whether the index file passes SQLite's full integrity check.
+
+    quick_check is not enough: it skips index-vs-table consistency,
+    which is exactly where live corruption showed up (the
+    semantic_postings autoindex). A missing or unopenable file counts
+    as failed -- the caller's answer is 'rebuild' either way.
+    """
+    try:
+        conn = _connect_sqlite(db_path, read_only=True)
+    except sqlite3.Error:
+        return False
+    try:
+        rows = conn.execute("PRAGMA integrity_check").fetchall()
+        return len(rows) == 1 and str(rows[0][0]).lower() == "ok"
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 def _cleanup_legacy_cache() -> None:
     """Reclaim the pre-per-host index files (exact known names only).
 
@@ -620,6 +671,12 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             """
         )
         existing_version = None
+        try:
+            # Return the dropped pages to the filesystem: without this a
+            # version bump leaves a full-size file of free pages behind.
+            conn.execute("VACUUM")
+        except sqlite3.Error:
+            pass  # non-fatal: the space is reused, just not released
 
     conn.executescript(
         """
@@ -684,15 +741,16 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_semantic_windows_timestamp
             ON semantic_windows(timestamp DESC);
         CREATE TABLE IF NOT EXISTS semantic_postings (
-            term            TEXT NOT NULL,
+            term_id         INTEGER NOT NULL,
             window_id       INTEGER NOT NULL,
             weight          REAL NOT NULL,
-            PRIMARY KEY(term, window_id)
-        );
+            PRIMARY KEY(term_id, window_id)
+        ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS idx_semantic_postings_window
             ON semantic_postings(window_id);
         CREATE TABLE IF NOT EXISTS semantic_terms (
-            term            TEXT PRIMARY KEY,
+            term_id         INTEGER PRIMARY KEY,
+            term            TEXT NOT NULL UNIQUE,
             df              INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS dense_embeddings (
@@ -859,8 +917,18 @@ def _reindex_locked(conn: sqlite3.Connection) -> tuple[int, int, int]:
         conn.commit()
     if added or updated or removed:
         # df counts are maintained incrementally alongside the postings;
-        # only rows that decremented to zero need sweeping.
-        conn.execute("DELETE FROM semantic_terms WHERE df <= 0")
+        # only rows that decremented to zero need sweeping. Guarded by a
+        # postings-reference check: bulk-mode placeholder rows carry df=0
+        # but live term ids, and deleting those would orphan every
+        # posting that references them.
+        conn.execute(
+            """
+            DELETE FROM semantic_terms WHERE df <= 0 AND NOT EXISTS (
+                SELECT 1 FROM semantic_postings p
+                WHERE p.term_id = semantic_terms.term_id
+            )
+            """
+        )
     if _semantic_terms_missing(conn):
         # Bootstrap / self-heal only: e.g. an index built before the
         # incremental df counters, or terms wiped by a partial recovery.
@@ -1624,18 +1692,19 @@ def _delete_semantic_windows_for_sid(conn: sqlite3.Connection, sid: str) -> None
     ]
     if rowids:
         placeholders = ",".join("?" for _ in rowids)
-        # Each posting row is exactly one df unit (PK is (term, window_id)),
-        # so decrementing by the per-term posting count keeps semantic_terms
-        # exact without the whole-corpus rebuild. Same transaction as the
-        # posting deletes, so a mid-write kill can't split them.
-        for term, count in conn.execute(
-            f"SELECT term, COUNT(*) FROM semantic_postings "
-            f"WHERE window_id IN ({placeholders}) GROUP BY term",
+        # Each posting row is exactly one df unit (PK is (term_id,
+        # window_id)), so decrementing by the per-term posting count keeps
+        # semantic_terms exact without the whole-corpus rebuild. Same
+        # transaction as the posting deletes, so a mid-write kill can't
+        # split them.
+        for term_id, count in conn.execute(
+            f"SELECT term_id, COUNT(*) FROM semantic_postings "
+            f"WHERE window_id IN ({placeholders}) GROUP BY term_id",
             rowids,
         ).fetchall():
             conn.execute(
-                "UPDATE semantic_terms SET df = df - ? WHERE term = ?",
-                (count, term),
+                "UPDATE semantic_terms SET df = df - ? WHERE term_id = ?",
+                (count, term_id),
             )
         conn.execute(
             f"DELETE FROM semantic_postings WHERE window_id IN ({placeholders})",
@@ -1695,44 +1764,73 @@ def _reindex_semantic_windows_from_segments(
             ),
         )
         window_id = cur.lastrowid
-        conn.executemany(
-            """
-            INSERT INTO semantic_postings (term, window_id, weight)
-            VALUES (?, ?, ?)
-            """,
-            [
-                (term, window_id, weight)
-                for term, weight in features.items()
-            ],
-        )
+        terms = list(features)
         if track_term_df:
             conn.executemany(
                 """
                 INSERT INTO semantic_terms (term, df) VALUES (?, 1)
                 ON CONFLICT(term) DO UPDATE SET df = df + 1
                 """,
-                [(term,) for term in features],
+                [(term,) for term in terms],
             )
+        else:
+            # Bulk build: postings still need term ids, so the rows are
+            # created here with df left at 0 for the single-pass
+            # bootstrap in _refresh_semantic_index.
+            conn.executemany(
+                """
+                INSERT INTO semantic_terms (term, df) VALUES (?, 0)
+                ON CONFLICT(term) DO NOTHING
+                """,
+                [(term,) for term in terms],
+            )
+        term_placeholders = ",".join("?" for _ in terms)
+        term_ids = dict(
+            conn.execute(
+                f"SELECT term, term_id FROM semantic_terms "
+                f"WHERE term IN ({term_placeholders})",
+                terms,
+            ).fetchall()
+        )
+        conn.executemany(
+            """
+            INSERT INTO semantic_postings (term_id, window_id, weight)
+            VALUES (?, ?, ?)
+            """,
+            [
+                (term_ids[term], window_id, weight)
+                for term, weight in features.items()
+            ],
+        )
 
 
 def _refresh_semantic_index(conn: sqlite3.Connection) -> None:
-    conn.execute("DELETE FROM semantic_terms")
+    # Recompute df in place: term ids are referenced by postings, so the
+    # rows must survive (a DELETE + reinsert would renumber them).
     conn.execute(
         """
-        INSERT INTO semantic_terms (term, df)
-        SELECT term, COUNT(*)
-        FROM semantic_postings
-        GROUP BY term
+        UPDATE semantic_terms SET df = (
+            SELECT COUNT(*) FROM semantic_postings p
+            WHERE p.term_id = semantic_terms.term_id
+        )
         """
     )
+    # df just came straight from postings, so df <= 0 provably means no
+    # postings reference the row.
+    conn.execute("DELETE FROM semantic_terms WHERE df <= 0")
 
 
 def _semantic_terms_missing(conn: sqlite3.Connection) -> bool:
     windows = conn.execute("SELECT COUNT(*) FROM semantic_windows").fetchone()[0]
     if not windows:
         return False
-    terms = conn.execute("SELECT COUNT(*) FROM semantic_terms").fetchone()[0]
-    return not terms
+    # Bulk builds insert term rows with df=0 (they only need the ids), so
+    # 'missing' means no term has a real count yet -- not just an empty
+    # table.
+    row = conn.execute(
+        "SELECT 1 FROM semantic_terms WHERE df > 0 LIMIT 1"
+    ).fetchone()
+    return row is None
 
 
 def _reindex_segments_for_record(
@@ -1778,7 +1876,12 @@ def _reindex_segments_for_record(
 def _semantic_query_features(
     conn: sqlite3.Connection,
     query: str,
-) -> tuple[list[tuple[str, float]], float]:
+) -> tuple[list[tuple[int, float]], float]:
+    """Resolve query text to weighted (term_id, weight) features.
+
+    Terms unknown to the corpus are dropped here; the ids join directly
+    against semantic_postings.term_id.
+    """
     raw_features = _semantic_features(
         query,
         max_features=_SEMANTIC_QUERY_MAX_FEATURES,
@@ -1796,14 +1899,14 @@ def _semantic_query_features(
     norm_sq = 0.0
     for term, raw_weight in raw_features.items():
         row = conn.execute(
-            "SELECT df FROM semantic_terms WHERE term = ?",
+            "SELECT term_id, df FROM semantic_terms WHERE term = ?",
             (term,),
         ).fetchone()
         if not row:
             continue
-        idf = _semantic_idf(int(total_windows), int(row[0]))
+        idf = _semantic_idf(int(total_windows), int(row[1]))
         weight = raw_weight * idf * idf
-        scored.append((term, weight))
+        scored.append((int(row[0]), weight))
         norm_sq += weight * weight
 
     if not scored:
@@ -1832,8 +1935,8 @@ def _semantic_window_matches(
 
     values_sql = ", ".join(["(?, ?)"] * len(query_features))
     feature_params: list[object] = []
-    for term, weight in query_features:
-        feature_params.extend([term, weight])
+    for term_id, weight in query_features:
+        feature_params.extend([term_id, weight])
 
     where = ["w.norm > 0"]
     sid_params: list[object] = []
@@ -1844,7 +1947,7 @@ def _semantic_window_matches(
 
     score_expr = "dot / (norm * ?)"
     sql = f"""
-        WITH q(term, qw) AS (
+        WITH q(term_id, qw) AS (
             VALUES {values_sql}
         ),
         scored AS (
@@ -1856,7 +1959,7 @@ def _semantic_window_matches(
                    SUM(p.weight * q.qw) AS dot,
                    COUNT(*) AS overlap_count
             FROM q
-            JOIN semantic_postings p ON p.term = q.term
+            JOIN semantic_postings p ON p.term_id = q.term_id
             JOIN semantic_windows w ON w.rowid = p.window_id
             WHERE {' AND '.join(where)}
             GROUP BY w.rowid

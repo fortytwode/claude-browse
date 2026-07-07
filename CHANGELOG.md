@@ -48,7 +48,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   everything in Copilot by default and indexes local session state from
   `~/.copilot/session-state/`.
 
+### Changed
+- **The search index shrank by a third (schema v9, measured live:
+  1.1 GB -> 741 MB): semantic postings now intern terms as integer
+  ids.** v8 stored every posting's term string twice -- once in the
+  table, once in its primary-key autoindex, 606 MB across ~10M
+  postings. Postings are now a `WITHOUT ROWID` table clustered on
+  `(term_id, window_id)` referencing `semantic_terms`, which removes
+  the autoindex outright and halves the postings B-tree. The version
+  bump triggers a one-time rebuild (~2 min for 386 sessions), and the
+  drop now VACUUMs so the file actually returns the space instead of
+  holding a full-size file of free pages.
+
 ### Fixed
+- **A failed index refresh no longer nukes a healthy index.** The
+  recovery path used to treat every non-lock `sqlite3.DatabaseError` as
+  file corruption and respond with quarantine + full rebuild -- so an
+  application-level `IntegrityError` (an indexing bug) would destroy a
+  good 1 GB index and mask the bug behind rebuild churn. Recovery is now
+  gated: rebuild only when the exception carries a real corruption code
+  (`SQLITE_CORRUPT`/`SQLITE_NOTADB`) or the file fails a full
+  `PRAGMA integrity_check`; otherwise the existing index is kept and the
+  failure is surfaced as the bug it is. (Diagnosed live: a "corrupt"
+  quarantined copy from 2026-07-07 passed a full integrity check -- the
+  file had been healthy all along.)
 - **Concurrent launches no longer fight over (or corrupt) the search
   index.** Previously every launch ran a read-write reindex, so N windows
   opened at once meant N contending SQLite writers: one ground through a
