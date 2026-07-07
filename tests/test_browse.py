@@ -824,6 +824,47 @@ def test_main_warm_start_paints_immediately_and_refreshes_in_background(
     assert spawned == [1]
 
 
+def test_background_refresh_child_imports_from_any_cwd(monkeypatch, tmp_path):
+    """The detached refresh child is a fresh interpreter: without an
+    explicit sys.path fix-up it dies on a silent ModuleNotFoundError
+    whenever claude_browse is not pip-installed (the git-clone shim
+    case), freezing the index at its last refresh date. Observed live:
+    two machines stuck showing nothing newer than the day this child
+    shipped."""
+    captured = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return None
+
+    monkeypatch.setattr(browse.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(browse.fts, "DB_PATH", str(tmp_path / "index.db"))
+    browse._spawn_background_index_refresh()
+    # browse.subprocess IS the subprocess module: undo the Popen patch so
+    # the probe's subprocess.run below uses the real one.
+    monkeypatch.undo()
+
+    code = captured["cmd"][2]
+    pkg_root = os.path.dirname(
+        os.path.dirname(os.path.abspath(browse.__file__))
+    )
+    assert "sys.path.insert" in code
+    assert pkg_root in code
+    # The import must resolve from an unrelated cwd. Probe with the
+    # refresh call swapped for a print so the test never touches a real
+    # index database.
+    probe = code.replace("_refresh_index_once()", "print('ok')")
+    assert probe != code
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.stdout.strip() == "ok", result.stderr
+
+
 def test_refresh_index_once_heals_corruption_via_locked_rebuild(monkeypatch):
     class Conn:
         def close(self):
