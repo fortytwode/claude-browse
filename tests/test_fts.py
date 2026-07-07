@@ -2315,6 +2315,36 @@ def test_reindex_never_parses_unchanged_files(db, tmp_path, monkeypatch):
     assert (added, updated, removed) == (0, 0, 1)
 
 
+def test_reindex_reports_progress_per_changed_session(db, tmp_path, monkeypatch):
+    """on_progress fires once per changed/new session with a stable
+    total, so the cold-build ticker can show 'indexed N/M sessions'."""
+    sessions_dir = tmp_path / "projects" / "demo"
+    sessions_dir.mkdir(parents=True)
+    for i in range(3):
+        _write_claude_session(sessions_dir, i)
+
+    from claude_browse.providers import claude as claude_provider
+
+    monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setattr(claude_provider, "HISTORY_PATH", str(tmp_path / "no-history"))
+    monkeypatch.setattr(
+        fts,
+        "list_index_records",
+        lambda known_sessions=None: claude_provider.list_index_records(
+            known_sessions=known_sessions
+        ),
+    )
+
+    calls: list[tuple[int, int]] = []
+    fts.reindex(db, on_progress=lambda done, total: calls.append((done, total)))
+    assert calls == [(1, 3), (2, 3), (3, 3)]
+
+    # Steady state: nothing changed, so the ticker must stay silent.
+    calls.clear()
+    fts.reindex(db, on_progress=lambda done, total: calls.append((done, total)))
+    assert calls == []
+
+
 def test_incremental_semantic_terms_match_full_rebuild(db, tmp_path, monkeypatch):
     """The per-session df deltas must produce exactly the same
     semantic_terms content as the whole-corpus GROUP BY rebuild they

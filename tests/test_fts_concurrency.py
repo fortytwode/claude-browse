@@ -82,9 +82,9 @@ fts.list_index_records = lambda known_sessions=None: records
 
 if os.environ.get("SLOW_REINDEX") == "1":
     _real = fts._reindex_locked
-    def _slow(conn):
+    def _slow(conn, **kwargs):
         time.sleep(float(os.environ.get("REINDEX_SLEEP", "3")))
-        return _real(conn)
+        return _real(conn, **kwargs)
     fts._reindex_locked = _slow
 
 conn = fts.open_db({db!r})

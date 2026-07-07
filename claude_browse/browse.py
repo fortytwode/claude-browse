@@ -1502,6 +1502,25 @@ def _refresh_index_once() -> None:
         conn.close()
 
 
+def _make_index_progress(interval_s: float = 5.0):
+    """Periodic 'indexed N/M sessions...' ticker for the cold build.
+
+    Must stay visible for the same reason as the wait ticker below:
+    users SIGKILL anything that looks hung, and a cold build sits
+    silently for minutes on big corpora. First tick prints immediately
+    so the build looks alive from the start.
+    """
+    last = [0.0]
+
+    def tick(done: int, total: int) -> None:
+        now = time.monotonic()
+        if done == total or now - last[0] >= interval_s:
+            last[0] = now
+            print(f"  indexed {done}/{total} sessions...", file=sys.stderr)
+
+    return tick
+
+
 def _make_wait_progress():
     """Elapsed-time ticker for waiting on another window's index build.
 
@@ -1602,7 +1621,7 @@ def main() -> None:
     else:
         print("Indexing sessions for the first time...", file=sys.stderr)
         try:
-            result = fts.reindex(conn)
+            result = fts.reindex(conn, on_progress=_make_index_progress())
             if result is None:
                 # Cold start lost the writer election: another window is
                 # building the very index we need. Wait for it visibly -- a
@@ -1631,7 +1650,9 @@ def main() -> None:
                 conn = fts.open_db()
                 # No-op if the winner finished; full takeover if it was
                 # killed (flock releases with its process).
-                result = fts.reindex(conn)
+                result = fts.reindex(
+                    conn, on_progress=_make_index_progress()
+                )
             added, updated, removed = result or (0, 0, 0)
         except sqlite3.DatabaseError as exc:
             if _is_sqlite_lock_error(exc):
