@@ -849,6 +849,70 @@ def test_refresh_index_once_heals_corruption_via_locked_rebuild(monkeypatch):
     assert rebuilt == [1]
 
 
+def test_refresh_index_once_spares_healthy_index_on_app_error(monkeypatch):
+    """An IntegrityError on a file that passes integrity_check is an
+    indexing bug, not corruption: rebuilding would destroy a good index
+    to mask it. The refresh must leave the index alone."""
+
+    class Conn:
+        def close(self):
+            return None
+
+    rebuilt = []
+    monkeypatch.setattr(browse.fts, "open_db", lambda *args, **kwargs: Conn())
+    monkeypatch.setattr(
+        browse.fts,
+        "reindex",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            sqlite3.IntegrityError(
+                "UNIQUE constraint failed: semantic_terms.term"
+            )
+        ),
+    )
+    monkeypatch.setattr(browse.fts, "integrity_ok", lambda *a, **k: True)
+    monkeypatch.setattr(
+        browse.fts,
+        "rebuild_from_scratch",
+        lambda: rebuilt.append(1) or (Conn(), (3, 0, 0)),
+    )
+
+    browse._refresh_index_once()
+
+    assert rebuilt == []
+
+
+def test_refresh_index_once_rebuilds_when_file_fails_integrity(monkeypatch):
+    """The live-observed shape: page corruption surfacing as an
+    IntegrityError. The exception text proves nothing, but the file
+    fails integrity_check -- rebuild."""
+
+    class Conn:
+        def close(self):
+            return None
+
+    rebuilt = []
+    monkeypatch.setattr(browse.fts, "open_db", lambda *args, **kwargs: Conn())
+    monkeypatch.setattr(
+        browse.fts,
+        "reindex",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            sqlite3.IntegrityError(
+                "UNIQUE constraint failed: semantic_terms.term"
+            )
+        ),
+    )
+    monkeypatch.setattr(browse.fts, "integrity_ok", lambda *a, **k: False)
+    monkeypatch.setattr(
+        browse.fts,
+        "rebuild_from_scratch",
+        lambda: rebuilt.append(1) or (Conn(), (3, 0, 0)),
+    )
+
+    browse._refresh_index_once()
+
+    assert rebuilt == [1]
+
+
 def test_main_list_providers_prints_without_fzf(monkeypatch, capsys):
     entries = (
         type(

@@ -2024,6 +2024,35 @@ def test_artifact_penalty_ignores_metadata_tool_mention_when_match_is_deep():
     assert _artifact_penalty(row_opening_match, plan, "cfo") >= 6.0
 
 
+def test_is_corruption_error_matches_file_level_markers():
+    assert fts.is_corruption_error(
+        sqlite3.DatabaseError("database disk image is malformed")
+    )
+    assert fts.is_corruption_error(
+        sqlite3.DatabaseError("file is not a database")
+    )
+    # App-level errors prove nothing about the file by themselves.
+    assert not fts.is_corruption_error(
+        sqlite3.IntegrityError("UNIQUE constraint failed: semantic_terms.term")
+    )
+    assert not fts.is_corruption_error(
+        sqlite3.OperationalError("no such table: semantic_windows")
+    )
+
+
+def test_integrity_ok_reports_healthy_and_missing_files(tmp_path):
+    db_path = str(tmp_path / "index.db")
+    conn = fts.open_db(db_path)
+    conn.close()
+    assert fts.integrity_ok(db_path)
+    # Missing file counts as failed: the caller's answer is 'rebuild'.
+    assert not fts.integrity_ok(str(tmp_path / "absent.db"))
+    # A file that is not SQLite at all must fail, not raise.
+    junk = tmp_path / "junk.db"
+    junk.write_bytes(b"this is not a database" * 100)
+    assert not fts.integrity_ok(str(junk))
+
+
 def test_reset_db_quarantines_corrupt_file_and_allows_fresh_open(tmp_path):
     """Startup self-heal: a corrupt index must never crash the tool.
     Observed live: B-tree corruption surfacing as 'UNIQUE constraint
@@ -2328,3 +2357,13 @@ def test_incremental_semantic_terms_match_full_rebuild(db, tmp_path, monkeypatch
     rebuilt = sorted(db.execute("SELECT term, df FROM semantic_terms").fetchall())
     assert incremental == rebuilt
     assert incremental, "corpus must actually have semantic terms"
+    # Interned ids: every posting must resolve to a live term row, and no
+    # surviving term may sit at df=0 with postings still attached.
+    orphaned = db.execute(
+        """
+        SELECT COUNT(*) FROM semantic_postings p
+        LEFT JOIN semantic_terms t ON t.term_id = p.term_id
+        WHERE t.term_id IS NULL
+        """
+    ).fetchone()[0]
+    assert orphaned == 0

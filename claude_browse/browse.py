@@ -1470,6 +1470,13 @@ def _refresh_index_once() -> None:
             if _is_sqlite_lock_error(exc):
                 return
             conn.close()
+            if not fts.is_corruption_error(exc) and fts.integrity_ok():
+                # App-level failure on a healthy file (e.g. an
+                # IntegrityError from an indexing bug). Rebuilding would
+                # destroy a good index to mask a code bug -- and the
+                # rebuild is itself the heaviest writer in the system.
+                # Leave the index stale; the picker keeps working.
+                return
             conn, _counts = fts.rebuild_from_scratch()
     finally:
         conn.close()
@@ -1617,22 +1624,38 @@ def main() -> None:
                 )
                 conn.close()
                 sys.exit(1)
-            # The index is a derived cache over the session JSONL files --
-            # when it corrupts (observed live: 'UNIQUE constraint failed:
-            # semantic_terms.term' from B-tree pages with out-of-order
-            # rowids, likely a mid-write kill under many concurrent
-            # sessions), the right move is a transparent rebuild from
-            # source, never a startup crash. rebuild_from_scratch
-            # quarantines under the reindex lock so two windows cannot both
-            # diagnose corruption and both mass-rebuild.
-            print(
-                f"Search index corrupted ({exc}); rebuilding from scratch...",
-                file=sys.stderr,
-            )
             conn.close()
-            conn, counts = fts.rebuild_from_scratch()
-            added, updated, removed = counts or (0, 0, 0)
-            print(f"  rebuilt: {added} sessions reindexed", file=sys.stderr)
+            if not fts.is_corruption_error(exc) and fts.integrity_ok():
+                # The error came from our own indexing code, not the
+                # file: quarantining a healthy 1 GB index over an app
+                # bug is how rebuild churn masked real bugs. Keep the
+                # existing index and surface the failure instead.
+                print(
+                    f"Search index refresh failed ({exc}); the index "
+                    "file is healthy, so this is an indexing bug -- "
+                    "continuing with the existing index.",
+                    file=sys.stderr,
+                )
+                conn = fts.open_db()
+                added = updated = removed = 0
+            else:
+                # The index is a derived cache over the session JSONL
+                # files -- when it corrupts (observed live: 'UNIQUE
+                # constraint failed: semantic_terms.term' from B-tree
+                # pages with out-of-order rowids, likely a mid-write kill
+                # under many concurrent sessions), the right move is a
+                # transparent rebuild from source, never a startup crash.
+                # rebuild_from_scratch quarantines under the reindex lock
+                # so two windows cannot both diagnose corruption and both
+                # mass-rebuild.
+                print(
+                    f"Search index corrupted ({exc}); rebuilding from "
+                    "scratch...",
+                    file=sys.stderr,
+                )
+                conn, counts = fts.rebuild_from_scratch()
+                added, updated, removed = counts or (0, 0, 0)
+                print(f"  rebuilt: {added} sessions reindexed", file=sys.stderr)
         if added + updated + removed > 0:
             print(f"  indexed {added} sessions", file=sys.stderr)
         conn.close()
