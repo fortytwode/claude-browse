@@ -755,7 +755,7 @@ def test_main_does_not_rebuild_when_first_indexing_is_locked(monkeypatch, capsys
     monkeypatch.setattr(
         browse.fts,
         "reindex",
-        lambda _conn: (_ for _ in ()).throw(
+        lambda _conn, **_kwargs: (_ for _ in ()).throw(
             sqlite3.OperationalError("database is locked")
         ),
     )

@@ -788,6 +788,7 @@ def reindex(
     *,
     block: bool = False,
     on_wait: Callable[[], None] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[int, int, int] | None:
     """Sync the index against on-disk session files.
 
@@ -808,7 +809,7 @@ def reindex(
         if lock_fd is None:
             return None
     try:
-        return _reindex_locked(conn)
+        return _reindex_locked(conn, on_progress=on_progress)
     finally:
         release_reindex_lock(lock_fd)
 
@@ -847,9 +848,17 @@ def rebuild_from_scratch(
         release_reindex_lock(lock_fd)
 
 
-def _reindex_locked(conn: sqlite3.Connection) -> tuple[int, int, int]:
+def _reindex_locked(
+    conn: sqlite3.Connection,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> tuple[int, int, int]:
     """The reindex body. Callers must hold the reindex lock (or be the
     sole process, e.g. tests on an in-memory/tmp database).
+
+    on_progress(done, total) fires after each changed/new session is
+    processed -- total counts only sessions that need real work, so a
+    cold build reports against the full corpus and a steady-state
+    refresh against the handful that changed.
 
     Stored (sid, mtime) pairs are fetched first and passed down to the
     providers, which stat-gate their work: an unchanged session file is
@@ -877,6 +886,8 @@ def _reindex_locked(conn: sqlite3.Connection) -> tuple[int, int, int]:
     added = updated = removed = 0
     now = time.time()
     changes_since_commit = 0
+    progress_total = len(record_map)
+    progress_done = 0
 
     # Cold build (empty index): per-window df upserts would be millions of
     # random writes into an ever-growing semantic_terms B-tree -- an order
@@ -899,6 +910,9 @@ def _reindex_locked(conn: sqlite3.Connection) -> tuple[int, int, int]:
         if changes_since_commit >= 10:
             conn.commit()
             changes_since_commit = 0
+        progress_done += 1
+        if on_progress is not None:
+            on_progress(progress_done, progress_total)
 
     for path, (sid, _) in existing.items():
         if path in stub_paths:
