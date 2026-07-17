@@ -1008,9 +1008,8 @@ def _make_codex_corpus(tmp_path, *, updated_ms=1_776_000_600_000):
     conn.close()
 
     history_path.write_text(
-        '{"session_id":"%s","ts":1776000000,"text":"Please debug the onboarding flow"}\n'
-        '{"session_id":"%s","ts":1776000120,"text":"Now switch to paywall copy"}\n'
-        % (sid, sid)
+        f'{{"session_id":"{sid}","ts":1776000000,"text":"Please debug the onboarding flow"}}\n'
+        f'{{"session_id":"{sid}","ts":1776000120,"text":"Now switch to paywall copy"}}\n'
     )
     session_path.write_text(
         json.dumps({

@@ -95,3 +95,27 @@ if data.get("timestamp"):
 ```
 
 Easy to write the second one wrong (e.g., gating it behind the same `if not` guard, leaving last_timestamp == timestamp forever). When refactoring "first X" into "first and last X," explicitly verify the last variable updates on every iteration, not just the first.
+
+## The picker's result list can lag the query by one keystroke
+
+Each keystroke re-runs the search in a fresh subprocess via fzf's
+`change:reload`. On a query like `frame.io`, a user who stops typing and
+immediately reads the screen can see the *previous* prefix's results (`frame`
+-> 25 threads) under the completed query text (`frame.io` -> 1 thread) for a
+beat. This produced a convincing "search is broken" report that was actually
+a display race: re-running the generated script with `FZF_QUERY=frame.io`
+directly returned exactly the right thread at #1. When debugging a "wrong
+results" report against the picker, reproduce through the generated search
+script with the exact FZF_QUERY value before touching the ranker -- the
+ranker may be innocent.
+
+## Verify renderers with real pipeline output, not synthetic input
+
+The --web transcript viewer's code-block and paragraph rendering was tested
+with hand-written multiline strings and passed -- but every provider's
+`transcript_turns` flattened newlines out (`flatten_text` replaces `\n` with
+a space), so real API responses were single-line strings and the renderer's
+fence/paragraph logic was dead code in production. A cross-model review pass
+caught it; a 10-second check (`0 of 1,538 real turns contained a newline`)
+confirmed. When a renderer consumes an upstream extractor, always feed it
+actual extractor output at least once before calling it verified.

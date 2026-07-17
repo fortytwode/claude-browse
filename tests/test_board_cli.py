@@ -18,7 +18,7 @@ def test_render_board_lists_all_rows_sorted_needs_input_first(tmp_path, monkeypa
     store.upsert("s3", host="air", cwd="/tmp/proj-c", state="needs-input", name="thread-c")
 
     output = cli.render_board()
-    lines = [l for l in output.splitlines() if l.strip()]
+    lines = [line for line in output.splitlines() if line.strip()]
 
     assert len(lines) == 3
     assert "thread-c" in lines[0]  # needs-input sorts first
