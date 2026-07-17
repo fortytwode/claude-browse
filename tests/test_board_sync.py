@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import os
 
-from claude_browse.board import store, sync
+import pytest
+
+# board-sync is an optional extra (`pip install claude-browse[board-sync]`);
+# these tests exercise its Firestore wiring and are meaningless without it.
+pytest.importorskip(
+    "google.cloud.firestore", reason="board-sync extra not installed"
+)
+
+from claude_browse.board import store, sync  # noqa: E402
 
 
 def _fresh_store(tmp_path, monkeypatch):

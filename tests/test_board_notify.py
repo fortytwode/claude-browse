@@ -8,7 +8,10 @@ resulting syntax-error exit code on every real call.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+
+import pytest
 
 from claude_browse.board import notify
 
@@ -24,6 +27,10 @@ def test_applescript_quote_keeps_emoji_literal_not_json_escaped():
     assert "\\u" not in quoted  # the actual bug: json.dumps would emit ✅
 
 
+@pytest.mark.skipif(
+    shutil.which("osascript") is None,
+    reason="osascript is macOS-only; notify.notify degrades silently elsewhere",
+)
 def test_notify_with_emoji_title_produces_valid_applescript_real_osascript_call():
     """Regression test for the confirmed bug: real (non-mocked) osascript
     call with an emoji title, matching hook.py's actual usage, must exit 0."""
@@ -61,6 +68,10 @@ def test_notify_includes_sound_in_the_generated_script(monkeypatch):
     assert 'sound name "default"' in captured["script"]
 
 
+@pytest.mark.skipif(
+    shutil.which("osascript") is None,
+    reason="osascript is macOS-only; notify.notify degrades silently elsewhere",
+)
 def test_notify_with_sound_real_osascript_call_exits_zero():
     """Real (non-mocked) call through the actual notify() function, matching
     hook.py's exact usage (emoji title, real message) end to end."""
