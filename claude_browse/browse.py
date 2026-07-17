@@ -785,8 +785,10 @@ try:
             ranker = "v1"
             results = fts.search_ranked(conn, q, limit=LIMIT, current_cwd=CURRENT_CWD)
     else:
-        results = fts.list_recent(conn, limit=LIMIT)
-        if not CWD_FILTER:
+        if CWD_FILTER:
+            results = fts.sessions_for_cwd(conn, CWD_FILTER, limit=LIMIT)
+        else:
+            results = fts.list_recent(conn, limit=LIMIT, cwd=CURRENT_CWD)
             # Match the initial paint: float current-folder threads to the top when
             # the query is empty (including after the user types then clears it).
             results = _folder_first_order(results, CURRENT_CWD)
@@ -796,7 +798,15 @@ finally:
     conn.close()
 
 if CWD_FILTER:
-    results = [r for r in results if (r.get("cwd") or "").startswith(CWD_FILTER)]
+    # Boundary-aware: /w/app must not match /w/app-legacy. Mirrors
+    # fts.sessions_for_cwd's exact-or-subdirectory semantics so the typed-query
+    # path scopes identically to the empty-query path.
+    _base = CWD_FILTER.rstrip("/")
+    results = [
+        r for r in results
+        if (r.get("cwd") or "") == _base
+        or (r.get("cwd") or "").startswith(_base + "/")
+    ]
 
 search_log.log_search(
     q,
@@ -1052,6 +1062,8 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         "                        (current dir) even when it is the thread's own\n"
         "                        folder. Cross-folder threads already relocate\n"
         "                        automatically; this flag forces it always.\n"
+        "  --web                 Open a local browser tab to read full past\n"
+        "                        transcripts and scan sessions (no fzf needed)\n"
         "  --list-providers      Show built-in and external provider availability\n"
         f"  --target PROVIDER     Override launch target (`{valid_targets}`)\n"
         "  -h, --help            Show this help\n"
@@ -1570,6 +1582,10 @@ def main() -> None:
         args.remove("--here")
         cwd_filter = os.getcwd()
 
+    web_mode = "--web" in args
+    if web_mode:
+        args.remove("--web")
+
     # --relocate resumes the chosen thread in the CURRENT directory instead of
     # returning to its original folder. Native `claude --resume <id>` is bound
     # to the thread's original project dir, so this routes through the handoff
@@ -1592,7 +1608,9 @@ def main() -> None:
         _print_provider_list()
         return
 
-    _check_fzf()
+    if not web_mode:
+        # Web mode has no fzf dependency -- it's a plain local HTTP server.
+        _check_fzf()
 
     available_providers = _providers_with_local_state()
     if not available_providers:
@@ -1704,13 +1722,26 @@ def main() -> None:
     prefixes = _folder_prefixes()
     limit = 999 if show_all else DEFAULT_LIMIT
 
+    if web_mode:
+        from claude_browse import web
+
+        web.run_server(os.getcwd(), prefixes, cwd_filter, limit=limit)
+        return
+
     conn = fts.open_db(read_only=True)
-    initial = fts.list_recent(conn, limit=limit)
     if cwd_filter:
-        initial = [r for r in initial if (r.get("cwd") or "").startswith(cwd_filter)]
+        # --here: sessions under this folder specifically, fetched directly
+        # rather than filtered out of the global top-`limit` slice -- a
+        # folder that's aged out of that slice would otherwise wrongly
+        # report "no sessions" even though real ones exist.
+        initial = fts.sessions_for_cwd(conn, cwd_filter, limit=limit)
     else:
-        # Pre-search: float current-folder threads to the top. Once a query is
-        # typed, fts.search_ranked governs ordering instead.
+        # Pre-search: guarantee current-folder threads are present and float
+        # them to the top. Once a query is typed, fts.search_ranked governs
+        # ordering instead. _folder_first_order re-runs the float with path
+        # canonicalization (fts's guarantee is a raw-string match), keeping
+        # this paint consistent with the reload script's empty-query branch.
+        initial = fts.list_recent(conn, limit=limit, cwd=os.getcwd())
         initial = _folder_first_order(initial, os.getcwd())
     conn.close()
 

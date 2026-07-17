@@ -372,6 +372,71 @@ def test_write_search_script_reads_query_from_fzf_env(tmp_path):
     # Empty-query reload must also float current-folder threads, matching the
     # initial paint (folder-first must not vanish after type-then-clear).
     assert "_folder_first_order" in text
+    # No --here filter: the cwd-scoped branch must not leak into this variant.
+    assert "CWD_FILTER = None" in text
+
+
+def test_write_search_script_here_mode_uses_sessions_for_cwd(tmp_path):
+    """--here's empty-query reload fetches folder sessions directly (not a
+    post-filter of the global slice) and its typed-query filter is
+    boundary-aware so /w/app doesn't match /w/app-legacy."""
+    script_path = tmp_path / "search_here.py"
+    browse._write_search_script(
+        str(script_path),
+        "/tmp/test.db",
+        "/tmp/pkg",
+        "/w/app",
+        "/w/app",
+        25,
+    )
+    text = script_path.read_text()
+    assert "CWD_FILTER = '/w/app'" in text
+    assert "fts.sessions_for_cwd(conn, CWD_FILTER" in text
+    assert 'startswith(_base + "/")' in text
+    # The rendered script must be valid Python -- a template typo would
+    # otherwise only surface as a silently broken picker at runtime.
+    compile(text, str(script_path), "exec")
+
+
+def test_main_web_mode_dispatches_to_run_server(monkeypatch, tmp_path):
+    """--web skips fzf entirely and forwards cwd, prefixes, --here, --all."""
+    calls = []
+    monkeypatch.setattr(
+        "claude_browse.web.run_server",
+        lambda cwd, prefixes=(), cwd_filter=None, limit=100: calls.append(
+            (cwd, prefixes, cwd_filter, limit)
+        ),
+    )
+    monkeypatch.setattr(
+        browse,
+        "_check_fzf",
+        lambda: (_ for _ in ()).throw(AssertionError("--web must not require fzf")),
+    )
+    monkeypatch.setattr(browse, "_providers_with_local_state", lambda: ["claude"])
+    monkeypatch.setattr(browse, "_folder_prefixes", lambda: ())
+
+    class Conn:
+        def execute(self, *a, **k):
+            class Cur:
+                def fetchone(self):
+                    return (1,)
+
+            return Cur()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(browse.fts, "open_db", lambda *a, **k: Conn())
+    monkeypatch.setattr(browse, "_spawn_background_index_refresh", lambda: None)
+    monkeypatch.setattr(browse.sys, "argv", ["claude-browse", "--web", "--all"])
+
+    browse.main()
+
+    assert len(calls) == 1
+    cwd, _prefixes, cwd_filter, limit = calls[0]
+    assert cwd == os.getcwd()
+    assert cwd_filter is None
+    assert limit == 999  # --all must widen the web sidebar too
 
 
 def test_write_preview_script_reads_query_from_row_metadata_with_fzf_env_fallback(tmp_path):
@@ -809,7 +874,9 @@ def test_main_warm_start_paints_immediately_and_refreshes_in_background(
     monkeypatch.setattr(
         browse, "_spawn_background_index_refresh", lambda: spawned.append(1)
     )
-    monkeypatch.setattr(browse.fts, "list_recent", lambda _conn, limit: [_info()])
+    monkeypatch.setattr(
+        browse.fts, "list_recent", lambda _conn, limit, cwd=None: [_info()]
+    )
     monkeypatch.setattr(
         browse.subprocess,
         "run",
@@ -1716,7 +1783,9 @@ def test_main_waits_for_winner_when_cold_start_loses_election(monkeypatch, capsy
         browse.fts, "acquire_reindex_lock", lambda *args, **kwargs: 3
     )
     monkeypatch.setattr(browse.fts, "release_reindex_lock", lambda _fd: None)
-    monkeypatch.setattr(browse.fts, "list_recent", lambda _conn, limit: [_info()])
+    monkeypatch.setattr(
+        browse.fts, "list_recent", lambda _conn, limit, cwd=None: [_info()]
+    )
     monkeypatch.setattr(
         browse.subprocess,
         "run",

@@ -270,7 +270,9 @@ def preview_messages(path: str, session_id: str) -> list[tuple[int, str]]:
     return messages
 
 
-def transcript_turns(path: str, session_id: str) -> list[tuple[str, str]]:
+def transcript_turns(
+    path: str, session_id: str, flatten: bool = True
+) -> list[tuple[str, str]]:
     del session_id
     excerpt: list[tuple[str, str]] = []
 
@@ -286,12 +288,14 @@ def transcript_turns(path: str, session_id: str) -> list[tuple[str, str]]:
                 if role not in ("user", "assistant"):
                     continue
                 text = extract_text(msg.get("content", ""))
+                # Selection always judges the flattened form so both modes
+                # emit the same turn list; flatten only changes the text.
                 cleaned = flatten_text(text)
                 if len(cleaned) <= 3:
                     continue
                 if role == "user" and is_noise_text(cleaned):
                     continue
-                excerpt.append((role, cleaned))
+                excerpt.append((role, cleaned if flatten else text.strip()))
     except Exception:
         return []
 
