@@ -199,6 +199,25 @@ Next gated build after testing:
 
 ---
 
+## Known gaps (verified, queued)
+
+- **Single-anchor ranking can bury a title match.** Observed live 2026-07-17:
+  searching `maxrewards` ranked a thread titled "Upload MaxRewards testing
+  tasks to Frame.io" (anchor in the title, most recent matching activity in
+  the result set) at #33 of 39, below threads that mention the anchor only
+  in passing. All candidates land in the same single-anchor evidence tier,
+  so a discriminator ahead of the recency key misorders them. Fix must be
+  eval-driven (`eval/run.py`) so other query shapes don't regress; the rule
+  to encode: an anchor hit in the title should outrank passing-mention
+  threads.
+- **Session-folder attribution follows the launch directory.** A thread
+  started from a repo root is filed under the root even if the work is about
+  a subfolder/client -- so folder-scoped views (`--here`, web "this folder
+  only", folder float) miss it. Possible improvement: also attribute
+  sessions to folders whose paths appear heavily in the transcript.
+
+---
+
 ## Product principles
 
 - Optimize for restart quality before provider count.
