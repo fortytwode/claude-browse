@@ -2984,7 +2984,16 @@ def _artifact_penalty(row: dict, plan: QueryPlan, query: str) -> float:
             rf"{re.escape(anchor)}[^\\n]{{0,40}}(?:{'|'.join(_CODE_REFERENCE_WINDOW_CUES)})",
         )
         if any(re.search(pattern, haystack) for pattern in code_ref_patterns):
-            penalty += 5.0 if _is_plain_entity_query(plan, query) else 4.0
+            # Title evidence trumps snippet-shape suspicion: if the anchor is
+            # in the session's own title, this thread is ABOUT the entity and
+            # the code-reference match is incidental. Without this exemption a
+            # thread titled "Upload MaxRewards testing tasks to Frame.io" was
+            # tier-0'd to rank 33/39 for 'maxrewards' because its matched
+            # snippet contained `clients/maxrewards/FRAME_IO_UPLOAD...md`
+            # (observed live 2026-07-17). Substring match mirrors
+            # _metadata_anchor_score's own .find() semantics.
+            if anchor not in str(row.get("name") or "").lower():
+                penalty += 5.0 if _is_plain_entity_query(plan, query) else 4.0
     return penalty
 
 

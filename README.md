@@ -379,7 +379,9 @@ python3 -m venv .venv
 ```
 
 Firestore uses Application Default Credentials (`gcloud auth
-application-default login`) against project `team-projects-480520`. Slack
+application-default login`). Point it at YOUR project via
+`CLAUDE_BROWSE_BOARD_PROJECT`, `CLAUDE_BROWSE_BOARD_DATABASE`, and
+`CLAUDE_BROWSE_BOARD_COLLECTION` (defaults preserve existing installs). Slack
 needs `SLACK_BOT_TOKEN` -- set in your environment, or in
 `~/team-operations/.env` (auto-detected as a fallback, since hooks run
 with a minimal inherited environment that usually won't have it exported).

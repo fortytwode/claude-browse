@@ -1470,6 +1470,56 @@ def test_search_ranked_plain_entity_query_demotes_code_reference_mentions(db):
     assert results[0]["session_id"] == "real_thread"
 
 
+def test_code_reference_penalty_exempts_title_anchored_threads(db):
+    """A thread whose TITLE carries the anchor must not be buried just
+    because its matched snippet mentions the anchor inside a backticked
+    file path. Regression test for the live bug where 'Upload MaxRewards
+    testing tasks to Frame.io' ranked 33/39 for 'maxrewards' because its
+    snippet contained `clients/maxrewards/FRAME_IO_UPLOAD_WORKFLOW.md`."""
+    _seed(
+        db,
+        "title_anchored",
+        "acmeco upload runbook now live in `clients/acmeco/UPLOAD_WORKFLOW.md` on main",
+        title="Upload AcmeCo testing tasks to Frame.io",
+        first_msg="Set up the AcmeCo upload workflow.",
+        segments=[
+            (
+                "assistant",
+                "The runbook (now live in `clients/acmeco/UPLOAD_WORKFLOW.md` on main) is ready.",
+                "2026-05-10T00:00:00Z",
+            ),
+        ],
+    )
+    _seed(
+        db,
+        "path_only",
+        "check `clients/acmeco/UPLOAD_WORKFLOW.md` while fixing the build",
+        title="Fix build pipeline flakiness",
+        first_msg="The build is flaky again.",
+        segments=[
+            (
+                "assistant",
+                "Also check `clients/acmeco/UPLOAD_WORKFLOW.md` while fixing the build.",
+                "2026-05-10T00:00:00Z",
+            ),
+        ],
+    )
+
+    plan = build_query_plan("acmeco")
+    anchored_row = fts.get_by_sid(db, "title_anchored")
+    anchored_row["context"] = "runbook `clients/acmeco/UPLOAD_WORKFLOW.md` on main"
+    path_row = fts.get_by_sid(db, "path_only")
+    path_row["context"] = "check `clients/acmeco/UPLOAD_WORKFLOW.md` while fixing"
+
+    # Title evidence exempts; a genuine path-only mention stays penalized.
+    assert fts._artifact_penalty(anchored_row, plan, "acmeco") == 0.0
+    assert fts._artifact_penalty(path_row, plan, "acmeco") >= 5.0
+
+    results = fts.search_ranked(db, "acmeco")
+    sids = [r["session_id"] for r in results]
+    assert sids.index("title_anchored") < sids.index("path_only")
+
+
 def test_search_ranked_single_anchor_workspace_match_beats_incidental_mention(db):
     _seed(
         db,

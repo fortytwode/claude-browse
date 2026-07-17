@@ -22,9 +22,14 @@ from pathlib import Path
 
 from claude_browse.board import naming, store
 
-PROJECT = "team-projects-480520"
-DATABASE = "creative-dashboard"
-COLLECTION = "agent_board_sessions"
+# Board sync targets YOUR Firestore project -- override via env for any
+# deployment that isn't the original author's fleet. Defaults preserve
+# existing installs.
+PROJECT = os.environ.get("CLAUDE_BROWSE_BOARD_PROJECT", "team-projects-480520")
+DATABASE = os.environ.get("CLAUDE_BROWSE_BOARD_DATABASE", "creative-dashboard")
+COLLECTION = os.environ.get(
+    "CLAUDE_BROWSE_BOARD_COLLECTION", "agent_board_sessions"
+)
 META_COLLECTION = "agent_board_meta"
 META_DOC = "slack"
 # Channel ID, not name -- chat.postMessage/chat.update resolution by name is
