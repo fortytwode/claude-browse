@@ -69,6 +69,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   holding a full-size file of free pages.
 
 ### Fixed
+- **A title match can no longer be buried by the code-reference penalty.**
+  A single-entity query (e.g. `maxrewards`) demoted any thread whose
+  matched snippet mentioned the entity inside a backticked file path --
+  even a thread titled with the entity ("Upload MaxRewards testing tasks
+  to Frame.io" ranked 33/39). The penalty now exempts threads whose title
+  carries the anchor; genuine path-only mentions stay penalized.
+- **Board sync's Firestore target is now configurable** via
+  `CLAUDE_BROWSE_BOARD_PROJECT` / `_DATABASE` / `_COLLECTION` env vars
+  instead of a hardcoded project (defaults preserve existing installs).
 - **Current-folder sessions are now guaranteed visible.** The session list
   previously re-sorted only the globally most-recent slice, so a folder
   whose sessions had aged out of that slice showed nothing to float --
