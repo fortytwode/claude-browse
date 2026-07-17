@@ -42,6 +42,7 @@ from .query import (
     term_spans,
 )
 
+
 def _default_db_path() -> str:
     """Per-host index path.
 
@@ -3626,33 +3627,83 @@ def _age_days(ts_str: str | None, now: datetime) -> float:
         return 365.0
 
 
-def list_recent(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
+# Shared by sessions_for_cwd / list_recent / get_by_sid -- these feed
+# positionally into _row_to_dict, so the column list must change in exactly
+# one place.
+_SESSION_COLUMNS = (
+    "sid, path, provider, cwd, timestamp, last_timestamp, title, "
+    "first_msg, last_msg, msg_count, mtime, '' AS context"
+)
+
+
+def sessions_for_cwd(conn: sqlite3.Connection, cwd: str, limit: int = 100) -> list[dict]:
+    """Return sessions whose cwd is exactly `cwd` or a subdirectory of it.
+
+    Raw prefix match on the stored cwd string, same semantics as the
+    existing `--here` filter -- no path canonicalization, so casing/symlink
+    differences aren't resolved here (consistent with prior --here behavior;
+    a folder reached via a different alias/symlink spelling than the one
+    recorded at index time won't match).
+    """
+    base = cwd.rstrip("/")
+    escaped = _escape_like(base)
+    rows = conn.execute(
+        f"""
+        SELECT {_SESSION_COLUMNS}
+        FROM sessions
+        WHERE cwd = ? OR cwd LIKE ? ESCAPE '\\'
+        ORDER BY COALESCE(last_timestamp, timestamp, '') DESC, mtime DESC
+        LIMIT ?
+        """,
+        (base, escaped + "/%", limit),
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def list_recent(
+    conn: sqlite3.Connection, limit: int = 100, cwd: str | None = None
+) -> list[dict]:
     """Return recent sessions for the empty-query / initial-display state.
 
     Ordered by last activity (the JSONL's most recent event timestamp), so
     a session resumed today floats to the top even if it was started weeks
     ago. Falls back to start timestamp when last_timestamp is missing
     (older index rows, malformed sessions); mtime is the final tiebreaker.
+
+    When `cwd` is given, sessions under that folder are both guaranteed to
+    be included AND floated to the top -- a plain global top-`limit` query
+    can otherwise squeeze a folder out entirely (nothing left for a "float
+    to top" step to promote), and a naive prepend-only-if-missing merge
+    would guarantee presence without actually floating a folder session
+    that's already inside the global slice. At most half of `limit` (or
+    however many slots the global slice didn't fill) is reserved for
+    folder-only sessions, so a folder with a lot of old history can't
+    evict every genuinely-recent cross-project session from the display.
     """
     rows = conn.execute(
-        """
-        SELECT sid, path, provider, cwd, timestamp, last_timestamp, title,
-               first_msg, last_msg, msg_count, mtime, '' AS context
+        f"""
+        SELECT {_SESSION_COLUMNS}
         FROM sessions
         ORDER BY COALESCE(last_timestamp, timestamp, '') DESC, mtime DESC
         LIMIT ?
         """,
         (limit,),
     ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    recent = [_row_to_dict(r) for r in rows]
+    if not cwd:
+        return recent
+    folder_cap = max(limit - len(recent), limit // 2, 1)
+    folder_sessions = sessions_for_cwd(conn, cwd, limit=folder_cap)
+    folder_ids = {s["session_id"] for s in folder_sessions}
+    rest = [s for s in recent if s["session_id"] not in folder_ids]
+    return (folder_sessions + rest)[:limit]
 
 
 def get_by_sid(conn: sqlite3.Connection, sid: str) -> dict | None:
     """Look up one session by its ID. Used to resolve fzf's selection."""
     row = conn.execute(
-        """
-        SELECT sid, path, provider, cwd, timestamp, last_timestamp, title,
-               first_msg, last_msg, msg_count, mtime, '' AS context
+        f"""
+        SELECT {_SESSION_COLUMNS}
         FROM sessions
         WHERE sid = ?
         """,

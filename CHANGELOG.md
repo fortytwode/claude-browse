@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **`--web` local transcript viewer**: `claude-browse --web` opens a
+  local-only (127.0.0.1-bound, Host-header-validated, zero-dependency)
+  browser page for actually *reading* full past conversations -- sidebar of
+  sessions (current folder first, searchable, "this folder only" toggle,
+  honors `--here` and `--all`) and a scrollable rendered transcript with
+  preserved line breaks, fenced code blocks, and in-thread search. An
+  optional add-on; the fzf picker stays the fast resume path.
+
 - **Agent Board**: every Claude Code session is now tracked as a live,
   auto-named thread. State (`working` / `idle` / `needs-input` / `gone` /
   `ended`) is driven by Claude Code hooks and shown in the statusline; a
@@ -61,6 +69,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   holding a full-size file of free pages.
 
 ### Fixed
+- **Current-folder sessions are now guaranteed visible.** The session list
+  previously re-sorted only the globally most-recent slice, so a folder
+  whose sessions had aged out of that slice showed nothing to float --
+  and `--here` could wrongly report "No sessions found" even when real
+  sessions existed for the folder. Current-folder sessions are now fetched
+  and floated with their own guaranteed query (capped so a folder with a
+  long history can't evict all recent cross-project activity), and
+  `--here`'s typed-query filter is boundary-aware (scoping to `app` no
+  longer matches `app-legacy`).
 - **A failed index refresh no longer nukes a healthy index.** The
   recovery path used to treat every non-lock `sqlite3.DatabaseError` as
   file corruption and respond with quarantine + full rebuild -- so an

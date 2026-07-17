@@ -270,7 +270,9 @@ def preview_messages(path: str, session_id: str) -> list[tuple[int, str]]:
     return messages
 
 
-def transcript_turns(path: str, session_id: str) -> list[tuple[str, str]]:
+def transcript_turns(
+    path: str, session_id: str, flatten: bool = True
+) -> list[tuple[str, str]]:
     turns: list[tuple[str, str]] = []
     for event in _load_events(path, session_id):
         role, text = _event_role_and_text(event)
@@ -281,7 +283,7 @@ def transcript_turns(path: str, session_id: str) -> list[tuple[str, str]]:
             continue
         if role == "user" and is_noise_text(cleaned):
             continue
-        turns.append((role, cleaned))
+        turns.append((role, cleaned if flatten else text.strip()))
     return turns
 
 

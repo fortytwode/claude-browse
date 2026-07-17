@@ -62,21 +62,27 @@ def _append_turn(
     turns: list[tuple[str, str]],
     role: str,
     text: str,
+    flatten: bool = True,
 ) -> None:
+    # Selection and dedup always judge the flattened form so both modes
+    # emit the same turn list; flatten only changes the stored text.
     cleaned = flatten_text(text)
     if len(cleaned) <= 3 or is_noise_text(cleaned):
         return
-    if turns and turns[-1] == (role, cleaned):
+    emitted = cleaned if flatten else text.strip()
+    if turns and turns[-1] == (role, emitted):
         return
-    turns.append((role, cleaned))
+    turns.append((role, emitted))
 
 
-def _load_session_turns(session_path: str) -> list[tuple[str, str]]:
+def _load_session_turns(
+    session_path: str, flatten: bool = True
+) -> list[tuple[str, str]]:
     if not session_path or not os.path.exists(session_path):
         return []
 
     mtime = os.path.getmtime(session_path)
-    cache_key = f"{session_path}:{mtime}"
+    cache_key = f"{session_path}:{mtime}:{flatten}"
     cached = _CODEX_SESSION_TURNS_CACHE["entries"].get(cache_key)
     if cached is not None:
         return cached  # type: ignore[return-value]
@@ -96,16 +102,25 @@ def _load_session_turns(session_path: str) -> list[tuple[str, str]]:
                 if item_type == "event_msg":
                     event_type = payload.get("type")
                     if event_type == "user_message":
-                        _append_turn(turns, "user", str(payload.get("message", "")))
+                        _append_turn(
+                            turns,
+                            "user",
+                            str(payload.get("message", "")),
+                            flatten=flatten,
+                        )
                     elif event_type == "agent_message":
                         _append_turn(
-                            turns, "assistant", str(payload.get("message", ""))
+                            turns,
+                            "assistant",
+                            str(payload.get("message", "")),
+                            flatten=flatten,
                         )
                     elif event_type == "task_complete":
                         _append_turn(
                             turns,
                             "assistant",
                             str(payload.get("last_agent_message", "")),
+                            flatten=flatten,
                         )
                     continue
 
@@ -116,7 +131,7 @@ def _load_session_turns(session_path: str) -> list[tuple[str, str]]:
                 role = payload.get("role")
                 if payload_type == "message" and role in ("user", "assistant"):
                     text = _extract_codex_content_text(payload.get("content"))
-                    _append_turn(turns, role, text)
+                    _append_turn(turns, role, text, flatten=flatten)
     except Exception:
         turns = []
 
@@ -581,8 +596,10 @@ def preview_messages(path: str, session_id: str) -> list[tuple[int, str]]:
     return messages
 
 
-def transcript_turns(path: str, session_id: str) -> list[tuple[str, str]]:
-    turns = _load_session_turns(path)
+def transcript_turns(
+    path: str, session_id: str, flatten: bool = True
+) -> list[tuple[str, str]]:
+    turns = _load_session_turns(path, flatten=flatten)
     if turns:
         return turns
 

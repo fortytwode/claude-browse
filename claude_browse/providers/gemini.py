@@ -215,12 +215,18 @@ def preview_messages(path: str, session_id: str) -> list[tuple[int, str]]:
     return messages
 
 
-def transcript_turns(path: str, session_id: str) -> list[tuple[str, str]]:
+def transcript_turns(
+    path: str, session_id: str, flatten: bool = True
+) -> list[tuple[str, str]]:
     del session_id
     try:
         with open(path) as f:
             data = json.load(f)
     except Exception:
+        return []
+    if not isinstance(data, dict):
+        # Valid JSON that isn't a session object (bare list/string) would
+        # otherwise raise AttributeError below; mirror _parse_session's guard.
         return []
 
     turns: list[tuple[str, str]] = []
@@ -235,7 +241,7 @@ def transcript_turns(path: str, session_id: str) -> list[tuple[str, str]]:
             continue
         if role == "user" and is_noise_text(cleaned):
             continue
-        turns.append((role, cleaned))
+        turns.append((role, cleaned if flatten else text.strip()))
     return turns
 
 

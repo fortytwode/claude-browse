@@ -121,9 +121,23 @@ class ProviderSpec:
         return self.preview_messages_reader(path, session_id)
 
     def transcript_turns(
-        self, path: str, session_id: str
+        self, path: str, session_id: str, flatten: bool = True
     ) -> list[TranscriptTurn]:
+        """Return (role, text) turns; flatten=False preserves newlines.
+
+        External providers with the older 2-arg reader keep working --
+        they just always return flattened text, as before.
+        """
+        if not flatten and self._turns_reader_accepts_flatten():
+            return self.transcript_turns_reader(path, session_id, flatten=False)
         return self.transcript_turns_reader(path, session_id)
+
+    def _turns_reader_accepts_flatten(self) -> bool:
+        try:
+            params = inspect.signature(self.transcript_turns_reader).parameters
+        except (TypeError, ValueError):
+            return False
+        return "flatten" in params
 
     def transcript_excerpt(
         self, path: str, session_id: str, limit: int = 24

@@ -83,7 +83,44 @@ claude-browse --all         # every session you've ever run
 codex-browse --here         # only sessions started in the current directory
 claude-browse --relocate    # force-resume the chosen thread in the current dir, even if it's the thread's own folder
 claude-browse --no-canonicalize   # accepted for compatibility; canonicalization still happens at index time
+claude-browse --web         # open a local browser tab to read full past transcripts and scan sessions
 ```
+
+### Web viewer
+
+```bash
+claude-browse --web
+```
+
+Opens a local-only browser tab (bound to `127.0.0.1`, no accounts, no outbound
+network calls) alongside the usual fzf picker -- not a replacement for it.
+Use it when you actually want to *read* a past conversation: a sidebar lists
+sessions (current folder first, searchable, "this folder only" toggle) and
+selecting one renders the full thread -- opened at the latest exchange,
+scroll up for history -- with fenced code blocks and an in-thread search
+box. This is prose only (user/assistant text) -- tool calls, file edits,
+and command output aren't captured. `--here` scopes the whole server to the
+current folder; `--all` widens the sidebar past the default 100 sessions.
+Requests from any Host other than `127.0.0.1`/`localhost` are rejected
+(DNS-rebinding protection). `Ctrl-C` in the terminal shuts the server down.
+
+#### Scripting the web viewer (JSON API)
+
+The page is backed by three JSON endpoints you can call directly (the
+server prints its URL to stderr on startup; the port is OS-assigned):
+
+| Endpoint | Returns |
+| -------- | ------- |
+| `GET /api/meta` | `{"here_only_forced": bool}` -- whether `--here` scoping is forced server-side |
+| `GET /api/sessions?q=<query>&here=1` | `{"sessions": [...]}` -- session list; `q` runs the same ranked search as the fzf picker, `here=1` scopes to the launch folder. Each session carries `session_id`, `provider`, `provider_name`, `folder`, `cwd`, `title`, `first_msg`, `last_msg`, `msg_count`, `timestamp`, `last_timestamp`, and a preformatted `when` |
+| `GET /api/session/<sid>` | `{"meta": {...}, "turns": [{"role", "text"}, ...]}` -- the full prose transcript, newlines preserved |
+
+Errors come back as JSON too: `404` (unknown session/route), `403` (foreign
+Host header), `500` (unreadable transcript), `503` (search index mid-rebuild
+-- retry shortly). For non-HTTP scripting, the same primitives are plain
+Python imports: `claude_browse.fts.list_recent` / `sessions_for_cwd` /
+`search_ranked` / `get_by_sid`, and
+`claude_browse.providers.get_provider(p).transcript_turns(path, sid)`.
 
 While the TUI is up:
 
@@ -440,7 +477,12 @@ to run tests and what's in/out of scope.
 
 ## Related work and future products
 
-This is the free, local, single-machine tool. The paid companion products
-(cross-device sync + mobile/web browsing + AI search across sessions) are
-tracked in [ROADMAP.md](ROADMAP.md). If you want to know when they ship,
-star the repo or open a discussion — a waitlist will go up close to launch.
+This is the free, local, single-machine tool — including `--web`, which is a
+local-only reading surface for this machine's sessions (it binds to
+127.0.0.1, serves your own indexed history, and works offline). The paid
+companion products (cross-device sync + hosted mobile/web browsing across
+all your machines + AI search across sessions) are a different surface:
+they follow your sessions across devices without a terminal on each one.
+They're tracked in [ROADMAP.md](ROADMAP.md). If you want to know when they
+ship, star the repo or open a discussion — a waitlist will go up close to
+launch.

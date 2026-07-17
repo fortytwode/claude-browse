@@ -695,6 +695,136 @@ def test_recent_sorts_by_last_activity_not_start(db):
     assert [r["session_id"] for r in results] == ["old_resumed", "newer_dormant"]
 
 
+def test_sessions_for_cwd_matches_folder_and_subdirs(db):
+    _seed(db, "same", "x", cwd="/w/family", mtime=1.0)
+    _seed(db, "sub", "y", cwd="/w/family/sub", mtime=2.0)
+    _seed(db, "sibling", "z", cwd="/w/family-ops", mtime=3.0)
+    _seed(db, "elsewhere", "w", cwd="/w/other", mtime=4.0)
+
+    sids = {r["session_id"] for r in fts.sessions_for_cwd(db, "/w/family")}
+    assert sids == {"same", "sub"}
+
+
+def test_sessions_for_cwd_respects_limit_and_recency(db):
+    _seed(db, "old", "x", cwd="/w/family", mtime=1.0, timestamp="2026-01-01T00:00:00Z")
+    _seed(db, "new", "y", cwd="/w/family", mtime=2.0, timestamp="2026-05-01T00:00:00Z")
+
+    sids = [r["session_id"] for r in fts.sessions_for_cwd(db, "/w/family", limit=1)]
+    assert sids == ["new"]
+
+
+def test_sessions_for_cwd_escapes_like_wildcards_in_folder_name(db):
+    """An underscore in a folder name is a literal character, not a SQL
+    LIKE single-char wildcard -- a sibling folder differing only at that
+    position must not match. Regression test: an earlier version built the
+    LIKE pattern from the raw path with no wildcard escaping."""
+    _seed(db, "real", "x", cwd="/w/my_project", mtime=1.0)
+    _seed(db, "decoy", "y", cwd="/w/myXproject", mtime=2.0)
+
+    sids = {r["session_id"] for r in fts.sessions_for_cwd(db, "/w/my_project")}
+    assert sids == {"real"}
+
+
+def test_list_recent_cwd_none_is_unchanged(db):
+    """Passing no cwd must behave exactly like before -- pure global recency."""
+    _seed(db, "a", "x", cwd="/w/one", mtime=1.0, timestamp="2026-01-01T00:00:00Z")
+    _seed(db, "b", "y", cwd="/w/two", mtime=2.0, timestamp="2026-05-01T00:00:00Z")
+
+    with_cwd_none = [r["session_id"] for r in fts.list_recent(db, cwd=None)]
+    without_cwd_arg = [r["session_id"] for r in fts.list_recent(db)]
+    assert with_cwd_none == without_cwd_arg == ["b", "a"]
+
+
+def test_list_recent_guarantees_folder_session_outside_top_limit(db):
+    """A folder session older than the global top-N slice must still surface,
+    not just be silently squeezed out -- the bug this fix addresses."""
+    _seed(
+        db,
+        "home_but_old",
+        "x",
+        cwd="/w/home",
+        mtime=1.0,
+        timestamp="2020-01-01T00:00:00Z",
+    )
+    for i in range(5):
+        _seed(
+            db,
+            f"busy{i}",
+            "y",
+            cwd="/w/busy",
+            mtime=10.0 + i,
+            timestamp=f"2026-05-0{i + 1}T00:00:00Z",
+        )
+
+    # Global top-3 would exclude "home_but_old" entirely without the guarantee.
+    results = fts.list_recent(db, limit=3, cwd="/w/home")
+    sids = [r["session_id"] for r in results]
+    assert "home_but_old" in sids
+    assert sids[0] == "home_but_old"
+    assert len(sids) == 3
+
+
+def test_list_recent_cwd_dedupes_when_folder_session_already_in_top_slice(db):
+    """A folder session recent enough to already be in the global slice
+    shouldn't be duplicated by the guarantee merge."""
+    _seed(db, "home_recent", "x", cwd="/w/home", mtime=5.0)
+    _seed(db, "other", "y", cwd="/w/other", mtime=1.0)
+
+    results = fts.list_recent(db, limit=10, cwd="/w/home")
+    sids = [r["session_id"] for r in results]
+    assert sids.count("home_recent") == 1
+    assert sids[0] == "home_recent"
+
+
+def test_list_recent_floats_folder_session_already_in_slice_but_not_first(db):
+    """A folder session that's present in the global top-N slice, but not
+    naturally first, must still be floated to the top -- not just left
+    wherever plain recency put it. Regression test: an earlier version of
+    this merge only prepended folder sessions *missing* from the slice,
+    leaving an already-present-but-buried one un-floated."""
+    _seed(db, "home_older", "x", cwd="/w/home", mtime=1.0)
+    for i in range(3):
+        _seed(db, f"other{i}", "y", cwd="/w/other", mtime=10.0 + i)
+
+    results = fts.list_recent(db, limit=10, cwd="/w/home")
+    sids = [r["session_id"] for r in results]
+    assert sids[0] == "home_older"
+    assert set(sids) == {"home_older", "other0", "other1", "other2"}
+
+
+def test_list_recent_cwd_guarantee_does_not_evict_all_recent_activity(db):
+    """A folder with a lot of old history must not push every genuinely
+    recent cross-project session out of the display -- at least half of
+    `limit` stays reserved for pure global recency. Regression test: an
+    earlier version prepended every matching folder session unconditionally,
+    which could evict 100% of real recent activity for a small limit."""
+    for i in range(5):
+        _seed(
+            db,
+            f"home_old{i}",
+            "x",
+            cwd="/w/home",
+            mtime=1.0 + i,
+            timestamp="2020-01-01T00:00:00Z",
+        )
+    for i in range(3):
+        _seed(
+            db,
+            f"other_new{i}",
+            "y",
+            cwd="/w/other",
+            mtime=100.0 + i,
+            timestamp=f"2026-05-0{i + 1}T00:00:00Z",
+        )
+
+    results = fts.list_recent(db, limit=3, cwd="/w/home")
+    sids = [r["session_id"] for r in results]
+    assert any(sid.startswith("home_old") for sid in sids), "folder must still surface"
+    assert any(
+        sid.startswith("other_new") for sid in sids
+    ), "recent cross-project activity must not be fully evicted"
+
+
 def test_search_invalid_fts_query_returns_empty(db):
     """Invalid FTS5 syntax should not crash; we degrade to no results."""
     _seed(db, "s1", "anything")

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude-browse</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div id="sidebar-header">
+      <input id="search-input" type="text" placeholder="Search sessions..." autocomplete="off">
+      <label id="here-toggle-label">
+        <input id="here-toggle" type="checkbox">
+        This folder only
+      </label>
+    </div>
+    <div id="session-list" aria-live="polite"></div>
+  </aside>
+  <main id="viewer">
+    <div id="viewer-header">
+      <div id="viewer-title">Select a session on the left</div>
+      <div id="viewer-meta"></div>
+      <input id="thread-search" type="text" placeholder="Search in this thread..." autocomplete="off" hidden>
+      <div id="thread-search-count"></div>
+    </div>
+    <div id="transcript"></div>
+  </main>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>
