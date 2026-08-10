@@ -500,6 +500,23 @@ def test_claude_provider_keeps_instruction_dump_out_of_first_msg(tmp_path):
     assert "vela" in fields["boilerplate"]
 
 
+def test_claude_provider_get_live_activity_reads_latest_timestamp(tmp_path):
+    session_path = tmp_path / "session.jsonl"
+    session_path.write_text(
+        json.dumps({"timestamp": "2026-05-12T08:00:00Z"})
+        + "\n"
+        + ("x" * 5000)
+        + "\n"
+        + json.dumps({"timestamp": "2026-05-12T08:02:00Z"})
+        + "\n"
+    )
+
+    timestamp, mtime = claude_provider.get_live_activity(str(session_path))
+
+    assert timestamp == "2026-05-12T08:02:00Z"
+    assert mtime == os.path.getmtime(session_path)
+
+
 def test_codex_provider_lists_index_records(monkeypatch, tmp_path):
     state_path = tmp_path / "state.sqlite"
     history_path = tmp_path / "history.jsonl"

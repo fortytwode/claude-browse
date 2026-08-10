@@ -18,6 +18,36 @@ from .common import (
 
 SESSIONS_DIR = os.path.expanduser("~/.claude/projects")
 HISTORY_PATH = os.path.expanduser("~/.claude/history.jsonl")
+_ACTIVITY_TAIL_BYTES = 256 * 1024
+
+
+def get_live_activity(jsonl_path: str) -> tuple[str | None, float | None]:
+    """Read only the tail needed to refresh a session's recency metadata.
+
+    Active Claude transcripts can be very large.  The full index parser reads
+    the entire file to rebuild search fields, but the list view only needs the
+    newest timestamp.  Keeping this path bounded prevents a long reindex from
+    leaving the visible activity time stale.
+    """
+    try:
+        mtime = os.path.getmtime(jsonl_path)
+        with open(jsonl_path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - _ACTIVITY_TAIL_BYTES))
+            chunk = handle.read()
+    except OSError:
+        return None, None
+
+    for raw_line in reversed(chunk.splitlines()):
+        try:
+            data = json.loads(raw_line)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        timestamp = data.get("timestamp")
+        if timestamp:
+            return str(timestamp), mtime
+    return None, mtime
 
 
 def has_local_state() -> bool:
