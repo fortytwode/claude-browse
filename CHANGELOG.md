@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-10
+
 ### Added
 - **`--web` local transcript viewer**: `claude-browse --web` opens a
   local-only (127.0.0.1-bound, Host-header-validated, zero-dependency)
@@ -345,7 +347,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (keyword resume)
 - `install.sh` symlinks scripts into `~/.local/bin/`
 
-[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/fortytwode/claude-browse/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/fortytwode/claude-browse/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/fortytwode/claude-browse/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/fortytwode/claude-browse/compare/v1.1.0...v1.2.0
