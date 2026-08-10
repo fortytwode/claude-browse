@@ -1929,6 +1929,34 @@ def test_reindex_picks_up_new_files(db, tmp_path, monkeypatch):
     assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in sids
 
 
+def test_reindex_refreshes_live_activity_before_full_parse(db, monkeypatch, tmp_path):
+    old_mtime = time.time() - 60
+    active_path = tmp_path / "active-session.jsonl"
+    active_path.write_text("{}\n")
+    _seed(
+        db,
+        "active-session",
+        "existing transcript",
+        path=str(active_path),
+        mtime=old_mtime,
+        last_timestamp="2026-05-12T08:00:00Z",
+    )
+    monkeypatch.setattr(
+        fts.claude_provider,
+        "get_live_activity",
+        lambda _path: ("2026-05-12T08:02:00Z", old_mtime + 1),
+    )
+
+    changed = fts._refresh_live_activity_locked(db)
+
+    assert changed == 1
+    row = db.execute(
+        "SELECT last_timestamp, mtime FROM sessions WHERE sid = ?",
+        ("active-session",),
+    ).fetchone()
+    assert row == ("2026-05-12T08:02:00Z", old_mtime)
+
+
 def test_reindex_skips_unchanged(db, tmp_path, monkeypatch):
     """Second reindex with no mtime change does no work."""
     sessions_dir = tmp_path / "projects" / "demo"

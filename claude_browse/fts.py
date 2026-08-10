@@ -34,6 +34,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from .core import list_index_records
+from .providers import claude as claude_provider
 from .providers import get_provider
 from .query import (
     QueryPlan,
@@ -867,6 +868,7 @@ def _reindex_locked(
     marked unchanged. Steady-state startup therefore really is a stat per
     file; only changed/new sessions pay the parse and the DB write.
     """
+    _refresh_live_activity_locked(conn)
     existing: dict[str, tuple[str, float]] = {
         row[0]: (row[1], row[2])
         for row in conn.execute("SELECT path, sid, mtime FROM sessions")
@@ -930,6 +932,10 @@ def _reindex_locked(
 
     if changes_since_commit:
         conn.commit()
+    # The file may have grown while a large transcript was being parsed.  A
+    # final bounded tail read prevents the full parse's older snapshot from
+    # overwriting newer activity that arrived during that work.
+    _refresh_live_activity_locked(conn)
     if added or updated or removed:
         # df counts are maintained incrementally alongside the postings;
         # only rows that decremented to zero need sweeping. Guarded by a
@@ -953,6 +959,49 @@ def _reindex_locked(
     conn.commit()
     checkpoint_wal(conn)
     return (added, updated, removed)
+
+
+def _refresh_live_activity_locked(conn: sqlite3.Connection) -> int:
+    """Refresh recency from changed Claude file tails before full indexing.
+
+    Full-text indexing an active transcript can take minutes.  Update the
+    cheap, user-visible activity fields first so readers see current recency
+    while the subsequent full parse is still in progress.  The caller holds
+    the reindex writer lock, so this metadata update is atomic with the
+    following index pass.
+    """
+    rows = conn.execute(
+        """
+        SELECT sid, path, last_timestamp, mtime
+        FROM sessions
+        WHERE provider = 'claude'
+        """
+    ).fetchall()
+    changed = 0
+    for sid, path, _last_timestamp, indexed_mtime in rows:
+        try:
+            current_mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if current_mtime <= float(indexed_mtime or 0):
+            continue
+        live_timestamp, live_mtime = claude_provider.get_live_activity(path)
+        if live_mtime is None or live_mtime <= float(indexed_mtime or 0):
+            continue
+        if not live_timestamp:
+            continue
+        conn.execute(
+            """
+            UPDATE sessions
+            SET last_timestamp = ?
+            WHERE sid = ?
+            """,
+            (live_timestamp, sid),
+        )
+        changed += 1
+    if changed:
+        conn.commit()
+    return changed
 
 
 def _dedupe_records_by_session_id(records: list[dict]) -> list[dict]:

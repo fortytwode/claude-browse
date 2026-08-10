@@ -69,6 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   holding a full-size file of free pages.
 
 ### Fixed
+- **Live session activity no longer stays stale while a large transcript is
+  being indexed.** The browser refreshes recency from the transcript tail
+  before and after full-text indexing, so a long parse cannot show an old
+  "minutes ago" value or overwrite newer activity.
 - **A title match can no longer be buried by the code-reference penalty.**
   A single-entity query (e.g. `maxrewards`) demoted any thread whose
   matched snippet mentioned the entity inside a backticked file path --
