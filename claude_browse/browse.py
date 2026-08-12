@@ -25,6 +25,7 @@ from .core import (
     display_cwd,
     folder_name,
     format_date,
+    newest_ts,
     provider_display_name,
     write_import_file,
 )
@@ -457,7 +458,15 @@ def format_row(
     topic-drift hint (latest user message) when the title looks stale.
     """
     query_active = bool(query.strip())
-    thread_date = format_date(info.get("last_timestamp") or info.get("timestamp"))
+    # mtime beats the indexed timestamp for a thread that is still being
+    # written: the picker paints from the previous index, so a live session
+    # would otherwise show the age it had at the last completed index pass.
+    thread_date = format_date(
+        newest_ts(
+            info.get("last_timestamp") or info.get("timestamp"),
+            info.get("mtime"),
+        )
+    )
     match_date = format_date(info.get("match_timestamp"))
     date = thread_date
     provider = (info.get("provider") or "claude").lower()
@@ -574,8 +583,8 @@ def _format_thread_span(
     drift = (last - start).days
     if drift < min_drift_days:
         return ""
-    began = start.strftime("%b %-d, %Y")
-    last_str = last.strftime("%b %-d")
+    began = start.astimezone().strftime("%b %-d, %Y")
+    last_str = last.astimezone().strftime("%b %-d")
     return f"Began {began} ({drift}d before last activity, {last_str})"
 
 
@@ -593,6 +602,7 @@ sys.path.insert(0, {package_dir!r})
 from claude_browse import fts
 from claude_browse.core import (
     extract_query_terms,
+    format_local,
     highlight_terms,
     provider_display_name,
 )
@@ -712,9 +722,9 @@ def get_preview(row_meta, query=""):
             cwd = "~" + cwd[len(home):]
         print(f"Folder:  {{cwd}}")
     if timestamp:
-        print(f"Started: {{timestamp[:19].replace('T', ' ')}}")
+        print(f"Started: {{format_local(timestamp)}}")
     if last_timestamp and last_timestamp != timestamp:
-        print(f"Last activity: {{last_timestamp[:19].replace('T', ' ')}}")
+        print(f"Last activity: {{format_local(last_timestamp)}}")
     print(f"Messages: {{msg_count or 0}}")
     print()
     print(hl(render_restart_card_terminal(state, show_match_block=not (query.strip() and lead))))
