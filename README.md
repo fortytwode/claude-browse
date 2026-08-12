@@ -82,6 +82,8 @@ cursor-browse               # most recent 100 sessions, opens everything in Curs
 claude-browse --all         # every session you've ever run
 codex-browse --here         # only sessions started in the current directory
 claude-browse --relocate    # force-resume the chosen thread in the current dir, even if it's the thread's own folder
+codex-browse --fork         # always branch the chosen thread into a new, diverging one
+codex-browse --no-fork      # never branch; attach even if the thread is open elsewhere (may fail)
 claude-browse --no-canonicalize   # accepted for compatibility; canonicalization still happens at index time
 claude-browse --web         # open a local browser tab to read full past transcripts and scan sessions
 ```

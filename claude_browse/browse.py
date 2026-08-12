@@ -1062,6 +1062,13 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         "                        (current dir) even when it is the thread's own\n"
         "                        folder. Cross-folder threads already relocate\n"
         "                        automatically; this flag forces it always.\n"
+        "  --fork                Always branch the chosen thread into a new,\n"
+        "                        diverging one instead of re-attaching to it\n"
+        "  --no-fork             Never branch; attach to the thread even if it\n"
+        "                        is already open elsewhere (may fail: a thread\n"
+        "                        allows only one writer). By default a thread\n"
+        "                        already open in another terminal is forked so\n"
+        "                        the two sessions diverge.\n"
         "  --web                 Open a local browser tab to read full past\n"
         "                        transcripts and scan sessions (no fzf needed)\n"
         "  --list-providers      Show built-in and external provider availability\n"
@@ -1139,6 +1146,54 @@ def _codex_mobile_cmd(*args: str, yolo: bool) -> list[str]:
     return cmd
 
 
+def _session_holder(session_id: str, binary: str) -> tuple[int, str] | None:
+    """Return (pid, tty) of a live provider process attached to session_id.
+
+    A thread is single-writer: CodeX refuses the second attach with JSON-RPC
+    -32600 ("already has an active writer"), and because resume is an
+    os.execvp we cannot catch that failure after the fact. So detect the
+    collision BEFORE handing off, while we are still the running process.
+
+    Both conditions are required: the session id in argv AND argv[0] being
+    the provider's own binary. Matching the id alone produces false
+    positives from anything that merely mentions it -- the shell that
+    launched us, an editor on the rollout file, a grep.
+    """
+    if not session_id or not binary:
+        return None
+    try:
+        proc = subprocess.run(
+            ["ps", "-Ao", "pid=,tty=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    me = os.getpid()
+    for line in proc.stdout.splitlines():
+        if session_id not in line:
+            continue
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid == me:
+            continue
+        command = parts[2]
+        argv0 = command.split(None, 1)[0]
+        if os.path.basename(argv0) != binary:
+            continue
+        tty = parts[1]
+        return pid, (tty if tty and tty != "??" else "another terminal")
+    return None
+
+
 def _native_resume(
     session: dict,
     provider: str,
@@ -1146,9 +1201,43 @@ def _native_resume(
     cwd: str,
     prefixes: tuple[str, ...],
     yolo: bool,
+    fork: bool | None = None,
 ) -> None:
+    """Resume session_id natively.
+
+    fork=True always branches, fork=False never does, fork=None (default)
+    branches only when the thread is already open elsewhere -- so opening the
+    same thread in two terminals gives two diverging threads instead of an
+    "active writer" error.
+    """
     _require_binary(provider)
     spec = get_provider(provider)
+
+    holder = None if fork is False else _session_holder(session_id, spec.binary)
+    if fork or holder:
+        fork_cmd = spec.native_fork_cmd(session_id, yolo)
+        if fork_cmd is not None:
+            mode = " (yolo)" if yolo else ""
+            if holder:
+                print(
+                    f"Thread is already open in {holder[1]} (pid {holder[0]}); "
+                    "forking into a new thread so the two diverge."
+                )
+            print(
+                f"Forking{mode} in {spec.display_name} "
+                f"({folder_name(cwd, prefixes)})..."
+            )
+            os.execvp(fork_cmd[0], fork_cmd)
+            return
+        if holder:
+            print(
+                f"Thread is already open in {holder[1]} (pid {holder[0]}), and "
+                f"{spec.display_name} cannot fork a thread. Attach to that "
+                "terminal, or close it and try again.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     if _use_codex_mobile_mode(provider):
         cmd = _codex_mobile_cmd("resume", session_id, yolo=yolo)
         mode = " (yolo)" if yolo else ""
@@ -1278,9 +1367,12 @@ def _open_in_target_provider(
     *,
     reenter_topic: bool = False,
     relocate: bool = False,
+    fork: bool | None = None,
 ) -> None:
     if source_provider == target_provider and not reenter_topic and not relocate:
-        _native_resume(session, source_provider, session_id, cwd, prefixes, yolo)
+        _native_resume(
+            session, source_provider, session_id, cwd, prefixes, yolo, fork=fork
+        )
         return
     _continue_in_provider(
         session,
@@ -1594,6 +1686,18 @@ def main() -> None:
     if relocate:
         args.remove("--relocate")
 
+    # Forking branches the chosen thread into a new, diverging one instead of
+    # re-attaching to it. Default (None) is "fork only on collision", which is
+    # what makes opening one thread in two terminals work: the second terminal
+    # silently branches rather than hitting the single-writer error.
+    fork: bool | None = None
+    if "--fork" in args:
+        args.remove("--fork")
+        fork = True
+    if "--no-fork" in args:
+        args.remove("--no-fork")
+        fork = False
+
     # --no-canonicalize is a legacy flag; canonicalization now happens at
     # index time, not at display time. Accept and ignore for compat.
     if "--no-canonicalize" in args:
@@ -1901,6 +2005,7 @@ def main() -> None:
             selection_query,
             reenter_topic=(action == "reenter_topic"),
             relocate=relocate,
+            fork=fork,
         )
 
     finally:

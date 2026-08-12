@@ -617,6 +617,7 @@ PROVIDER = ProviderSpec(
     display_name="CodeX",
     binary="codex",
     native_resume_prefix=("codex", "resume"),
+    native_fork_prefix=("codex", "fork"),
     list_index_records_reader=list_index_records,
     preview_messages_reader=preview_messages,
     transcript_turns_reader=transcript_turns,

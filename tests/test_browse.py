@@ -1196,7 +1196,7 @@ def test_open_in_target_provider_native_resume_when_source_matches_target(
     monkeypatch.setattr(
         browse,
         "_native_resume",
-        lambda *args: captured.append(("native", args)),
+        lambda *args, **kwargs: captured.append(("native", args)),
     )
     monkeypatch.setattr(
         browse,
@@ -1226,7 +1226,7 @@ def test_open_in_target_provider_handoffs_when_source_differs_from_target(
     monkeypatch.setattr(
         browse,
         "_native_resume",
-        lambda *args: captured.append(("native", args)),
+        lambda *args, **kwargs: captured.append(("native", args)),
     )
     monkeypatch.setattr(
         browse,
@@ -1256,7 +1256,7 @@ def test_open_in_target_provider_reenter_topic_uses_handoff_even_when_source_mat
     monkeypatch.setattr(
         browse,
         "_native_resume",
-        lambda *args: captured.append(("native", args)),
+        lambda *args, **kwargs: captured.append(("native", args)),
     )
     monkeypatch.setattr(
         browse,
@@ -1802,3 +1802,120 @@ def test_main_waits_for_winner_when_cold_start_loses_election(monkeypatch, capsy
     assert len(reindex_calls) == 2
 
 
+
+
+# --- fork-on-collision -------------------------------------------------
+
+
+def _ps_stub(lines: list[str]):
+    """Fake `ps -Ao pid=,tty=,command=` output."""
+
+    class _R:
+        returncode = 0
+        stdout = "\n".join(lines)
+
+    return lambda *a, **k: _R()
+
+
+def test_session_holder_matches_provider_process(monkeypatch):
+    monkeypatch.setattr(
+        browse.subprocess,
+        "run",
+        _ps_stub(["68683 ttys010 codex resume abc-123 --dangerously-bypass"]),
+    )
+    assert browse._session_holder("abc-123", "codex") == (68683, "ttys010")
+
+
+def test_session_holder_ignores_non_provider_process(monkeypatch):
+    """A shell or editor merely mentioning the id is not a holder."""
+    monkeypatch.setattr(
+        browse.subprocess,
+        "run",
+        _ps_stub(
+            [
+                "111 ttys001 vim /tmp/abc-123.jsonl",
+                "222 ttys002 grep abc-123 /var/log/x",
+                "333 ttys003 codex resume other-id",
+            ]
+        ),
+    )
+    assert browse._session_holder("abc-123", "codex") is None
+
+
+def test_session_holder_ignores_self(monkeypatch):
+    import os as _os
+
+    monkeypatch.setattr(
+        browse.subprocess,
+        "run",
+        _ps_stub([f"{_os.getpid()} ttys001 codex resume abc-123"]),
+    )
+    assert browse._session_holder("abc-123", "codex") is None
+
+
+def test_native_resume_forks_when_thread_already_open(monkeypatch, capsys):
+    monkeypatch.setattr(browse, "_require_binary", lambda p: None)
+    monkeypatch.setattr(
+        browse, "_session_holder", lambda sid, binary: (68683, "ttys010")
+    )
+    execd: list[list[str]] = []
+    monkeypatch.setattr(browse.os, "execvp", lambda f, c: execd.append(c))
+
+    browse._native_resume({}, "codex", "abc-123", "/proj", (), True)
+
+    assert execd and execd[0][:3] == ["codex", "fork", "abc-123"]
+    assert "already open in ttys010" in capsys.readouterr().out
+
+
+def test_native_resume_plain_when_no_collision(monkeypatch):
+    monkeypatch.setattr(browse, "_require_binary", lambda p: None)
+    monkeypatch.setattr(browse, "_session_holder", lambda sid, binary: None)
+    execd: list[list[str]] = []
+    monkeypatch.setattr(browse.os, "execvp", lambda f, c: execd.append(c))
+
+    browse._native_resume({}, "codex", "abc-123", "/proj", (), True)
+
+    assert execd and execd[0][:3] == ["codex", "resume", "abc-123"]
+
+
+def test_native_resume_no_fork_flag_skips_collision_check(monkeypatch):
+    """--no-fork restores the old attach-anyway behavior."""
+    monkeypatch.setattr(browse, "_require_binary", lambda p: None)
+    called: list[str] = []
+    monkeypatch.setattr(
+        browse,
+        "_session_holder",
+        lambda sid, binary: called.append(sid) or (1, "ttys010"),
+    )
+    execd: list[list[str]] = []
+    monkeypatch.setattr(browse.os, "execvp", lambda f, c: execd.append(c))
+
+    browse._native_resume({}, "codex", "abc-123", "/proj", (), True, fork=False)
+
+    assert not called
+    assert execd and execd[0][:3] == ["codex", "resume", "abc-123"]
+
+
+def test_native_resume_fork_flag_forces_fork(monkeypatch):
+    monkeypatch.setattr(browse, "_require_binary", lambda p: None)
+    monkeypatch.setattr(browse, "_session_holder", lambda sid, binary: None)
+    execd: list[list[str]] = []
+    monkeypatch.setattr(browse.os, "execvp", lambda f, c: execd.append(c))
+
+    browse._native_resume({}, "claude", "abc-123", "/proj", (), False, fork=True)
+
+    assert execd
+    assert execd[0][:4] == ["claude", "--resume", "abc-123", "--fork-session"]
+
+
+def test_native_resume_errors_when_provider_cannot_fork(monkeypatch, capsys):
+    monkeypatch.setattr(browse, "_require_binary", lambda p: None)
+    monkeypatch.setattr(
+        browse, "_session_holder", lambda sid, binary: (99, "ttys004")
+    )
+    monkeypatch.setattr(browse.os, "execvp", lambda f, c: None)
+
+    with pytest.raises(SystemExit):
+        browse._native_resume({}, "gemini", "abc-123", "/proj", (), True)
+
+    assert "cannot fork" in capsys.readouterr().err
