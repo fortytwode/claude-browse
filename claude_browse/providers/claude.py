@@ -337,6 +337,7 @@ PROVIDER = ProviderSpec(
     display_name="Claude",
     binary="claude",
     native_resume_prefix=("claude", "--resume"),
+    native_fork_flag="--fork-session",
     list_index_records_reader=list_index_records,
     preview_messages_reader=preview_messages,
     transcript_turns_reader=transcript_turns,

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Open one thread in two terminals and let them diverge.** A thread is
+  single-writer: resuming one that is already open elsewhere failed with
+  `thread ... already has an active writer (code -32600)`, and because
+  resume is an `os.execvp` the error surfaced raw after claude-browse had
+  already replaced itself with the provider CLI, so it could neither
+  explain nor recover. Resume now detects the collision *first* (a live
+  process whose argv[0] is the provider binary and which carries the
+  session id) and branches into a new thread seeded from the same history,
+  reporting the terminal that holds the original. CodeX uses `codex fork`,
+  Claude uses `claude --resume <id> --fork-session`. `--fork` always
+  branches; `--no-fork` restores the old attach-anyway behavior. Providers
+  without a fork primitive (Gemini, Copilot, Cursor) now fail with the
+  holding terminal named instead of a JSON-RPC error code.
+
 ## [1.3.0] - 2026-08-10
 
 ### Added

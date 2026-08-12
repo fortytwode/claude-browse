@@ -35,6 +35,8 @@ class ProviderSpec:
     session_files_reader: Callable[[], list[str]] | None = None
     availability_reader: Callable[[], bool] | None = None
     auth_status_reader: Callable[[], str | None] | None = None
+    native_fork_prefix: tuple[str, ...] | None = None
+    native_fork_flag: str | None = None
     native_yolo_flag: str | None = None
     handoff_yolo_flag: str | None = None
     add_dir_flag: str | None = "--add-dir"
@@ -51,6 +53,29 @@ class ProviderSpec:
 
     def native_resume_cmd(self, session_id: str, yolo: bool) -> list[str]:
         cmd = list(self.native_resume_prefix) + [session_id]
+        if yolo and self.native_yolo_flag:
+            cmd.append(self.native_yolo_flag)
+        return cmd
+
+    @property
+    def can_native_fork(self) -> bool:
+        """True when the CLI can branch a thread into a new, diverging one."""
+        return bool(self.native_fork_prefix or self.native_fork_flag)
+
+    def native_fork_cmd(self, session_id: str, yolo: bool) -> list[str] | None:
+        """Command that opens a NEW thread seeded from session_id's history.
+
+        Two shapes exist in the wild: a dedicated subcommand (CodeX:
+        `codex fork <id>`) and a flag on resume (Claude: `claude --resume
+        <id> --fork-session`). Returns None when the provider cannot fork,
+        so callers fall back to plain resume.
+        """
+        if self.native_fork_prefix:
+            cmd = list(self.native_fork_prefix) + [session_id]
+        elif self.native_fork_flag:
+            cmd = list(self.native_resume_prefix) + [session_id, self.native_fork_flag]
+        else:
+            return None
         if yolo and self.native_yolo_flag:
             cmd.append(self.native_yolo_flag)
         return cmd
