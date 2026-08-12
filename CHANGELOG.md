@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Absolute timestamps were printed in UTC but labelled as local.** The
+  preview rendered `Started:` / `Last activity:` by slicing the stored ISO
+  string and swapping the `T`, with no timezone conversion, so every
+  absolute time was off by the viewer's whole UTC offset (5h30m in IST).
+  A thread last touched at 19:06 local read as `13:36`. Timestamps now
+  convert to local time before rendering, as does the "Began ... before
+  last activity" span line.
+- **A thread being actively written showed a stale age.** The picker paints
+  from the existing index and refreshes in a detached child, so the "40m
+  ago" column reported the age as of the last completed index pass, not
+  reality; a large, still-growing session could sit tens of minutes behind
+  and sort as though it were idle. The age now takes whichever is newer,
+  the indexed timestamp or the file's mtime, which costs a stat() and is
+  always current.
+
 ### Added
 - **Open one thread in two terminals and let them diverge.** A thread is
   single-writer: resuming one that is already open elsewhere failed with

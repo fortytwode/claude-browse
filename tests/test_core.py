@@ -985,3 +985,66 @@ def test_build_import_markdown_relocate_without_path_omits_transcript_line(monke
     assert "## Resuming Here (relocated)" in text
     assert "- Previous folder: `/home/alice/proj`" in text
     assert "Full original transcript" not in text
+
+
+# --- local-time rendering and live-file freshness ----------------------
+
+
+@pytest.fixture
+def ist(monkeypatch):
+    """Run a test in Asia/Kolkata (UTC+5:30), a half-hour offset."""
+    import os
+    import time
+
+    monkeypatch.setitem(os.environ, "TZ", "Asia/Kolkata")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_format_local_converts_utc_to_local(ist):
+    """The old code sliced the ISO string, printing UTC as if it were local."""
+    stored = "2026-07-30T08:08:52.981000Z"
+    assert stored[:19].replace("T", " ") == "2026-07-30 08:08:52"  # old, wrong
+    assert core.format_local(stored) == "2026-07-30 13:38:52"
+
+
+def test_format_local_handles_naive_timestamp(ist):
+    assert core.format_local("2026-07-30T08:08:52") == "2026-07-30 13:38:52"
+
+
+def test_format_local_falls_back_on_garbage():
+    assert core.format_local("not-a-timestamp") == "not-a-timestamp"
+    assert core.format_local(None) == "???"
+
+
+def test_newest_ts_prefers_mtime_when_index_is_behind():
+    """A live thread's mtime outruns the last completed index pass."""
+    indexed = "2026-08-12T14:10:43.059000Z"
+    mtime = datetime(2026, 8, 12, 14, 15, 56, tzinfo=timezone.utc).timestamp()
+    assert core.newest_ts(indexed, mtime) == "2026-08-12T14:15:56Z"
+
+
+def test_newest_ts_keeps_index_when_it_is_ahead():
+    indexed = "2026-08-12T14:10:43.059000Z"
+    mtime = datetime(2026, 8, 12, 14, 0, 0, tzinfo=timezone.utc).timestamp()
+    assert core.newest_ts(indexed, mtime) == indexed
+
+
+def test_newest_ts_without_mtime_is_a_passthrough():
+    assert core.newest_ts("2026-08-12T14:10:43Z", None) == "2026-08-12T14:10:43Z"
+    assert core.newest_ts("2026-08-12T14:10:43Z", 0) == "2026-08-12T14:10:43Z"
+
+
+def test_newest_ts_recovers_when_index_timestamp_is_missing():
+    mtime = datetime(2026, 8, 12, 14, 15, 56, tzinfo=timezone.utc).timestamp()
+    assert core.newest_ts(None, mtime) == "2026-08-12T14:15:56Z"
+
+
+def test_age_uses_mtime_so_a_live_thread_is_not_stale():
+    now = datetime.now(timezone.utc)
+    indexed = (now - timedelta(minutes=40)).isoformat().replace("+00:00", "Z")
+    mtime = (now - timedelta(minutes=1)).timestamp()
+    assert core.format_date(indexed) == "40m ago"
+    assert core.format_date(core.newest_ts(indexed, mtime)) == "1m ago"

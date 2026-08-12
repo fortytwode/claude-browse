@@ -401,6 +401,50 @@ def write_codex_import_file(session: dict) -> str:
     return write_import_file(session, "codex")
 
 
+def parse_ts(ts: str | None) -> datetime | None:
+    """Parse a stored ISO timestamp as an aware UTC datetime."""
+    if not ts:
+        return None
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def format_local(ts: str | None) -> str:
+    """Render a stored UTC timestamp in the viewer's local timezone.
+
+    Stored timestamps are UTC ("...Z"). Slicing the ISO string and swapping
+    the T -- what the preview used to do -- printed UTC while reading as
+    local time, so every absolute time was off by the viewer's whole offset
+    (5h30m in IST, enough to make a live thread look hours idle).
+    """
+    parsed = parse_ts(ts)
+    if parsed is None:
+        return ts[:19].replace("T", " ") if ts else "???"
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def newest_ts(ts: str | None, mtime: float | None) -> str | None:
+    """Pick whichever of an indexed timestamp and a file mtime is newer.
+
+    The picker paints from the previous index and refreshes in a detached
+    child, so a session being actively written reports the age it had at
+    the last completed index pass. The file's mtime costs a stat() and is
+    always current, so it wins whenever it is ahead.
+    """
+    if not mtime:
+        return ts
+    from_mtime = datetime.fromtimestamp(mtime, timezone.utc)
+    parsed = parse_ts(ts)
+    if parsed is not None and parsed >= from_mtime:
+        return ts
+    return from_mtime.isoformat().replace("+00:00", "Z")
+
+
 def format_date(ts: str | None) -> str:
     """Format an ISO timestamp compactly, relative to now."""
     if not ts:
