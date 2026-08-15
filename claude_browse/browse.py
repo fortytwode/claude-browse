@@ -1094,8 +1094,8 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         "  Longer descriptive queries are reduced to the most specific anchors.\n"
         "\n"
         "Keys while browsing:\n"
-        f"  Enter                 Resume the selected thread in {target_name} (yolo)\n"
-        f"  Ctrl-O                Resume immediately in {target_name} (bypasses paste guard)\n"
+        f"  Enter                 Fork the selected thread in {target_name} (yolo)\n"
+        f"  Ctrl-O                Fork immediately in {target_name} (bypasses paste guard)\n"
         f"  Ctrl-T                Re-enter the matched topic in a new {target_name} session (yolo)\n"
         f"  Ctrl-S                Open in {target_name} (safe)\n"
         "  Ctrl-Y                Print the suggested next prompt for the selection\n"
@@ -1211,17 +1211,26 @@ def _native_resume(
     cwd: str,
     prefixes: tuple[str, ...],
     yolo: bool,
-    fork: bool | None = None,
+    fork: bool | None = True,
 ) -> None:
-    """Resume session_id natively.
+    """Open session_id natively, forking by default.
 
-    fork=True always branches, fork=False never does, fork=None (default)
-    branches only when the thread is already open elsewhere -- so opening the
-    same thread in two terminals gives two diverging threads instead of an
-    "active writer" error.
+    fork=True branches, fork=False attaches to the original thread, and
+    fork=None preserves the legacy collision-only behavior for compatibility.
     """
     _require_binary(provider)
     spec = get_provider(provider)
+
+    if _use_codex_mobile_mode(provider):
+        action = "fork" if fork else "resume"
+        cmd = _codex_mobile_cmd(action, session_id, yolo=yolo)
+        mode = " (yolo)" if yolo else ""
+        print(
+            f"{action.capitalize()}{mode}ing in {spec.display_name} mobile mode "
+            f"({folder_name(cwd, prefixes)})..."
+        )
+        os.execvp(cmd[0], cmd)
+        return
 
     holder = None if fork is False else _session_holder(session_id, spec.binary)
     if fork or holder:
@@ -1247,16 +1256,6 @@ def _native_resume(
                 file=sys.stderr,
             )
             sys.exit(1)
-
-    if _use_codex_mobile_mode(provider):
-        cmd = _codex_mobile_cmd("resume", session_id, yolo=yolo)
-        mode = " (yolo)" if yolo else ""
-        print(
-            f"Resuming{mode} in {spec.display_name} mobile mode "
-            f"({folder_name(cwd, prefixes)})..."
-        )
-        os.execvp(cmd[0], cmd)
-        return
 
     cmd = spec.native_resume_cmd(session_id, yolo)
     mode = " (yolo)" if yolo else ""
@@ -1696,11 +1695,11 @@ def main() -> None:
     if relocate:
         args.remove("--relocate")
 
-    # Forking branches the chosen thread into a new, diverging one instead of
-    # re-attaching to it. Default (None) is "fork only on collision", which is
-    # what makes opening one thread in two terminals work: the second terminal
-    # silently branches rather than hitting the single-writer error.
-    fork: bool | None = None
+    # Every picker selection opens a new branch by default. A native thread is
+    # single-writer, so attaching to the original would make a second browser
+    # window fail with "already has an active writer". --no-fork remains an
+    # explicit escape hatch for callers that deliberately want to attach.
+    fork: bool | None = True
     if "--fork" in args:
         args.remove("--fork")
         fork = True
@@ -1740,12 +1739,7 @@ def main() -> None:
 
     if total_pre > 0:
         # Warm start: paint immediately from the existing index and refresh
-        # it in a detached child. A launch must never sit blank behind a
-        # reindex -- one large active session can take minutes to re-index,
-        # and that wait (not just the losers' silent exits) was the
-        # "windows show nothing" complaint. The writer election makes
-        # concurrent refreshers from several windows safe: one wins, the
-        # rest exit as no-ops. Per-keystroke search reloads re-query the
+        # it in a detached child. Per-keystroke search reloads re-query the
         # DB, so results freshen while the picker is already open.
         conn.close()
         _spawn_background_index_refresh()

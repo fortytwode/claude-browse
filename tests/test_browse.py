@@ -585,7 +585,7 @@ def test_default_target_provider_supports_dynamic_plugin_shims(monkeypatch):
     assert browse._default_target_provider("/tmp/mystery-browse") == "mystery"
 
 
-def test_native_resume_uses_codexmobile_on_mobile_ssh(monkeypatch, tmp_path):
+def test_native_resume_forks_with_codexmobile_on_mobile_ssh(monkeypatch, tmp_path):
     class Tty:
         def isatty(self) -> bool:
             return True
@@ -618,7 +618,7 @@ def test_native_resume_uses_codexmobile_on_mobile_ssh(monkeypatch, tmp_path):
         browse._native_resume(_info(provider="codex"), "codex", "abc-123", "/tmp/proj", (), True)
 
     assert captured["binary"] == str(codexmobile)
-    assert captured["cmd"] == [str(codexmobile), "--yolo", "resume", "abc-123"]
+    assert captured["cmd"] == [str(codexmobile), "--yolo", "fork", "abc-123"]
 
 
 def test_native_resume_keeps_codex_native_when_mobile_disabled(monkeypatch):
@@ -641,7 +641,7 @@ def test_native_resume_keeps_codex_native_when_mobile_disabled(monkeypatch):
     assert captured["binary"] == "codex"
     assert captured["cmd"] == [
         "codex",
-        "resume",
+        "fork",
         "abc-123",
         "--dangerously-bypass-approvals-and-sandbox",
     ]
@@ -844,9 +844,7 @@ def test_main_does_not_rebuild_when_first_indexing_is_locked(monkeypatch, capsys
 def test_main_warm_start_paints_immediately_and_refreshes_in_background(
     monkeypatch, capsys
 ):
-    """A warm launch must never block behind a reindex: one large active
-    session can take minutes to re-index, which left the winner window
-    blank -- the original 'window shows nothing' complaint."""
+    """A warm launch paints immediately and refreshes in the background."""
 
     class CountCursor:
         def fetchone(self):
@@ -1867,7 +1865,7 @@ def test_native_resume_forks_when_thread_already_open(monkeypatch, capsys):
     assert "already open in ttys010" in capsys.readouterr().out
 
 
-def test_native_resume_plain_when_no_collision(monkeypatch):
+def test_native_resume_forks_by_default_even_without_collision(monkeypatch):
     monkeypatch.setattr(browse, "_require_binary", lambda p: None)
     monkeypatch.setattr(browse, "_session_holder", lambda sid, binary: None)
     execd: list[list[str]] = []
@@ -1875,7 +1873,7 @@ def test_native_resume_plain_when_no_collision(monkeypatch):
 
     browse._native_resume({}, "codex", "abc-123", "/proj", (), True)
 
-    assert execd and execd[0][:3] == ["codex", "resume", "abc-123"]
+    assert execd and execd[0][:3] == ["codex", "fork", "abc-123"]
 
 
 def test_native_resume_no_fork_flag_skips_collision_check(monkeypatch):
