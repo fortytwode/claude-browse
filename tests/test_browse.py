@@ -1876,6 +1876,24 @@ def test_native_resume_forks_by_default_even_without_collision(monkeypatch):
     assert execd and execd[0][:3] == ["codex", "fork", "abc-123"]
 
 
+def test_native_resume_uses_compact_continuation_for_oversized_codex(monkeypatch, capsys):
+    monkeypatch.setattr(browse, "_require_binary", lambda p: None)
+    handoff: dict[str, object] = {}
+    monkeypatch.setattr(
+        browse, "_continue_in_provider",
+        lambda *args, **kwargs: handoff.update(args=args, kwargs=kwargs),
+    )
+    session = _info(provider="codex", path="/tmp/huge.jsonl")
+    session["source_size"] = 129 * 1024 * 1024
+
+    browse._native_resume(session, "codex", "abc-123", "/proj", (), True)
+
+    assert handoff["args"][:3] == (session, "codex", "codex")
+    assert handoff["kwargs"]["compact_continuation"] is True
+    assert handoff["kwargs"]["relocate"] is True
+    assert "compact continuation" in capsys.readouterr().out
+
+
 def test_native_resume_no_fork_flag_skips_collision_check(monkeypatch):
     """--no-fork restores the old attach-anyway behavior."""
     monkeypatch.setattr(browse, "_require_binary", lambda p: None)

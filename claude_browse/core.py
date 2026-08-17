@@ -137,6 +137,7 @@ def build_import_markdown(
     *,
     reenter_topic: bool = False,
     relocate: bool = False,
+    compact_continuation: bool = False,
 ) -> str:
     """Create a compact Markdown brief so another app can continue a thread.
 
@@ -213,6 +214,15 @@ def build_import_markdown(
                 f"- Full original transcript: `{transcript_path}` — read it if you "
                 "need detail beyond the recent turns below."
             )
+    if compact_continuation:
+        lines.extend([
+            "",
+            "## Compact Continuation",
+            "",
+            "This is a new compact continuation, not a native fork. The original "
+            "CodeX transcript was too large to fork interactively; use the full "
+            "transcript path above when older detail is needed.",
+        ])
     lines.extend([""] + render_restart_card_markdown(work_state))
 
     if selection_query and selection_query.strip():
@@ -368,6 +378,7 @@ def write_import_file(
     *,
     reenter_topic: bool = False,
     relocate: bool = False,
+    compact_continuation: bool = False,
 ) -> str:
     """Write a temporary Markdown import brief and return its path."""
     tmp = tempfile.NamedTemporaryFile(
@@ -384,6 +395,7 @@ def write_import_file(
                 selection_query,
                 reenter_topic=reenter_topic,
                 relocate=relocate,
+                compact_continuation=compact_continuation,
             )
         )
     finally:

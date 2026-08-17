@@ -79,6 +79,7 @@ from claude_browse import fts
 
 records = json.load(open({records_json!r}))
 fts.list_index_records = lambda known_sessions=None: records
+fts.codex_provider.list_metadata_records = lambda known=None: []
 
 if os.environ.get("SLOW_REINDEX") == "1":
     _real = fts._reindex_locked
@@ -181,11 +182,14 @@ def test_sigkill_mid_reindex_releases_lock_and_leaves_recoverable_db(tmp_path):
     import claude_browse.fts as fts_mod
 
     original = fts_mod.list_index_records
+    original_metadata = fts_mod.codex_provider.list_metadata_records
     fts_mod.list_index_records = lambda known_sessions=None: records
+    fts_mod.codex_provider.list_metadata_records = lambda known=None: []
     try:
         result = fts.reindex(conn)
     finally:
         fts_mod.list_index_records = original
+        fts_mod.codex_provider.list_metadata_records = original_metadata
     assert result is not None
     assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 300
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
