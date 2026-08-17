@@ -725,6 +725,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             ON segments(sid, segment_idx);
         CREATE INDEX IF NOT EXISTS idx_segments_timestamp
             ON segments(timestamp DESC);
+        CREATE TABLE IF NOT EXISTS content_cursors (
+            sid             TEXT PRIMARY KEY,
+            path            TEXT NOT NULL,
+            byte_offset     INTEGER NOT NULL,
+            source_size     INTEGER NOT NULL,
+            source_mtime    REAL NOT NULL
+        );
         CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
             sid UNINDEXED,
             role UNINDEXED,
@@ -897,6 +904,7 @@ def _reindex_locked(
     file; only changed/new sessions pay the parse and the DB write.
     """
     _refresh_live_activity_locked(conn)
+    _enrich_pending_codex_append_only(conn)
     existing: dict[str, tuple[str, float]] = {
         row[0]: (row[1], row[2])
         for row in conn.execute("SELECT path, sid, content_mtime FROM sessions")
@@ -1102,6 +1110,45 @@ def _refresh_codex_manifest_locked(conn: sqlite3.Connection) -> int:
     return changed
 
 
+def _enrich_pending_codex_append_only(conn: sqlite3.Connection) -> int:
+    """Advance durable CodeX byte cursors without re-reading old content."""
+    rows = conn.execute(
+        """SELECT s.sid, s.path, s.last_timestamp, c.byte_offset
+           FROM sessions s JOIN content_cursors c ON c.sid = s.sid
+           WHERE s.provider = 'codex' AND s.coverage = 'pending'
+           ORDER BY s.mtime DESC"""
+    ).fetchall()
+    completed = 0
+    for sid, path, last_timestamp, offset in rows:
+        turns, next_offset, reset = codex_provider.load_session_turns_since(path, int(offset))
+        if reset:
+            # The normal full-record path below rebuilds this one session.
+            conn.execute("DELETE FROM content_cursors WHERE sid = ?", (sid,))
+            continue
+        start_idx = conn.execute(
+            "SELECT COALESCE(MAX(segment_idx), 0) FROM segments WHERE sid = ?", (sid,)
+        ).fetchone()[0]
+        for idx, (role, text) in enumerate(turns, int(start_idx) + 1):
+            cur = conn.execute(
+                "INSERT INTO segments (sid, segment_idx, role, timestamp, text) VALUES (?, ?, ?, ?, ?)",
+                (sid, idx, role, last_timestamp, text),
+            )
+            conn.execute(
+                "INSERT INTO segments_fts (rowid, sid, role, segment_idx, timestamp, text) VALUES (?, ?, ?, ?, ?, ?)",
+                (cur.lastrowid, sid, role, idx, last_timestamp, text),
+            )
+        conn.execute(
+            "UPDATE content_cursors SET byte_offset=?, source_size=?, source_mtime=? WHERE sid=?",
+            (next_offset, next_offset, os.path.getmtime(path), sid),
+        )
+        conn.execute("UPDATE sessions SET coverage='complete', content_mtime=mtime WHERE sid=?", (sid,))
+        _reindex_semantic_windows_from_segments(conn, sid)
+        completed += 1
+    if completed:
+        conn.commit()
+    return completed
+
+
 def _dedupe_records_by_session_id(records: list[dict]) -> list[dict]:
     deduped: dict[str, dict] = {}
     for record in records:
@@ -1197,6 +1244,15 @@ def _index_record(
         ),
     )
     _reindex_segments_for_record(conn, record, track_term_df=track_term_df)
+    if record.get("provider") == "codex" and str(record.get("path") or ""):
+        conn.execute(
+            """INSERT INTO content_cursors (sid, path, byte_offset, source_size, source_mtime)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(sid) DO UPDATE SET path=excluded.path, byte_offset=excluded.byte_offset,
+                   source_size=excluded.source_size, source_mtime=excluded.source_mtime""",
+            (sid, record["path"], int(record.get("source_size") or 0),
+             int(record.get("source_size") or 0), float(record.get("source_mtime") or 0)),
+        )
     return True
 
 

@@ -38,6 +38,28 @@ def test_codex_bounded_metadata_reads_head_and_tail_only(tmp_path, monkeypatch):
     assert metadata["size"] == path.stat().st_size
 
 
+def test_codex_incremental_parser_preserves_incomplete_tail_and_detects_reset(tmp_path):
+    path = tmp_path / "session.jsonl"
+    first = b'{"type":"event_msg","payload":{"type":"user_message","message":"first"}}\n'
+    second = b'{"type":"event_msg","payload":{"type":"agent_message","message":"second reply"}}\n'
+    path.write_bytes(first + second[:-1])
+
+    turns, offset, reset = codex_provider.load_session_turns_since(str(path))
+    assert turns == [("user", "first")]
+    assert offset == len(first)
+    assert reset is False
+
+    path.write_bytes(first + second)
+    turns, offset, reset = codex_provider.load_session_turns_since(str(path), offset)
+    assert turns == [("assistant", "second reply")]
+    assert offset == len(first + second)
+    assert reset is False
+
+    path.write_bytes(first)
+    _turns, offset, reset = codex_provider.load_session_turns_since(str(path), offset)
+    assert (offset, reset) == (0, True)
+
+
 def test_provider_ids_include_claude_codex_gemini_copilot_and_cursor():
     assert provider_ids() == ("claude", "codex", "gemini", "copilot", "cursor")
 

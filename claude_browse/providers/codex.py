@@ -142,6 +142,59 @@ def _load_session_turns(
     return turns
 
 
+def load_session_turns_since(
+    session_path: str, offset: int = 0, flatten: bool = True
+) -> tuple[list[tuple[str, str]], int, bool]:
+    """Parse complete CodeX JSONL records appended after ``offset``.
+
+    Returns ``(turns, next_offset, reset)``.  A truncation/replacement is
+    never spliced onto old content: callers reset that session's projection
+    and restart at byte zero.  The final incomplete line is retained for the
+    next pass rather than being lost or indexed twice.
+    """
+    try:
+        size = os.path.getsize(session_path)
+    except OSError:
+        return [], offset, False
+    if offset < 0 or offset > size:
+        return [], 0, True
+    turns: list[tuple[str, str]] = []
+    next_offset = offset
+    try:
+        with open(session_path, "rb") as handle:
+            handle.seek(offset)
+            while True:
+                start = handle.tell()
+                raw = handle.readline()
+                if not raw:
+                    break
+                if not raw.endswith(b"\n"):
+                    # A writer can leave an unterminated tail temporarily.
+                    next_offset = start
+                    break
+                next_offset = handle.tell()
+                try:
+                    data = json.loads(raw)
+                except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                payload = data.get("payload") or {}
+                if data.get("type") == "event_msg":
+                    kind = payload.get("type")
+                    if kind == "user_message":
+                        _append_turn(turns, "user", str(payload.get("message") or ""), flatten)
+                    elif kind == "agent_message":
+                        _append_turn(turns, "assistant", str(payload.get("message") or ""), flatten)
+                    elif kind == "task_complete":
+                        _append_turn(turns, "assistant", str(payload.get("last_agent_message") or ""), flatten)
+                elif data.get("type") == "response_item" and payload.get("type") == "message":
+                    role = payload.get("role")
+                    if role in ("user", "assistant"):
+                        _append_turn(turns, role, _extract_codex_content_text(payload.get("content")), flatten)
+    except OSError:
+        return [], offset, False
+    return turns, next_offset, False
+
+
 def list_session_files() -> list[str]:
     pattern = os.path.join(CODEX_SESSIONS_DIR, "**", "*.jsonl")
     return sorted(glob.glob(pattern, recursive=True))
