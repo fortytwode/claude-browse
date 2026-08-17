@@ -33,13 +33,16 @@ def db():
 
 
 @pytest.fixture(autouse=True)
-def _dense_embeddings_off_by_default(monkeypatch):
+def _isolated_index_environment(monkeypatch):
     monkeypatch.delenv("CLAUDE_BROWSE_DENSE_EMBEDDINGS", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CLAUDE_BROWSE_EMBEDDING_MODEL", raising=False)
     monkeypatch.delenv("CLAUDE_BROWSE_EMBEDDING_DIMENSIONS", raising=False)
     monkeypatch.delenv("CLAUDE_BROWSE_EMBEDDING_BATCH_SIZE", raising=False)
     monkeypatch.delenv("CLAUDE_BROWSE_DENSE_MIN_SCORE", raising=False)
+    # Reindex tests control their provider record stream explicitly; never let
+    # the developer's live CodeX corpus leak into an in-memory fixture.
+    monkeypatch.setattr(fts.codex_provider, "list_metadata_records", lambda known=None: [])
 
 
 def test_open_db_sets_busy_timeout(tmp_path):
@@ -1957,6 +1960,29 @@ def test_reindex_refreshes_live_activity_before_full_parse(db, monkeypatch, tmp_
     assert row == ("2026-05-12T08:02:00Z", old_mtime)
 
 
+def test_reindex_commits_fresh_codex_manifest_before_content_parse(db, monkeypatch):
+    record = {
+        "path": "/tmp/fresh-codex.jsonl", "provider": "codex",
+        "session_id": "fresh-codex", "cwd": "/work",
+        "timestamp": "2026-08-17T11:00:00Z",
+        "last_timestamp": "2026-08-17T11:36:00Z", "name": "fresh work",
+        "first_msg": "fresh work", "last_msg": "", "msg_count": 0,
+        "mtime": 1234.0, "source_size": 5_000_000_000, "coverage": "pending",
+    }
+    monkeypatch.setattr(fts.codex_provider, "list_metadata_records", lambda known: [record])
+    # Simulate a body parser that has not returned yet: manifest work itself
+    # must still leave a visible, current row.
+    monkeypatch.setattr(fts, "list_index_records", lambda known_sessions=None: [])
+
+    added, updated, removed = fts.reindex(db)
+
+    row = fts.get_by_sid(db, "fresh-codex")
+    assert (added, updated, removed) == (0, 0, 0)
+    assert row["last_timestamp"] == "2026-08-17T11:36:00Z"
+    assert row["coverage"] == "pending"
+    assert row["source_size"] == 5_000_000_000
+
+
 def test_reindex_skips_unchanged(db, tmp_path, monkeypatch):
     """Second reindex with no mtime change does no work."""
     sessions_dir = tmp_path / "projects" / "demo"
@@ -2325,6 +2351,36 @@ def test_open_db_write_path_is_wal_with_normal_sync(tmp_path):
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         # 1 == NORMAL: crash-safe in WAL mode without per-commit fsync.
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_open_db_migrates_v9_without_dropping_existing_sessions(tmp_path):
+    path = tmp_path / "v9.db"
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_version VALUES (9);
+        CREATE TABLE sessions (
+            sid TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, provider TEXT NOT NULL,
+            cwd TEXT, timestamp TEXT, last_timestamp TEXT, title TEXT, first_msg TEXT,
+            last_msg TEXT, msg_count INTEGER NOT NULL DEFAULT 0, mtime REAL NOT NULL,
+            indexed_at REAL NOT NULL
+        );
+        INSERT INTO sessions VALUES ('old', '/tmp/old.jsonl', 'codex', '', '', '',
+            'old', 'old message', '', 1, 123.0, 123.0);
+        """
+    )
+    raw.close()
+
+    conn = fts.open_db(str(path))
+    try:
+        row = conn.execute(
+            "SELECT content_mtime, coverage FROM sessions WHERE sid = 'old'"
+        ).fetchone()
+        assert row == (123.0, "complete")
+        assert conn.execute("SELECT version FROM schema_version").fetchone() == (11,)
     finally:
         conn.close()
 

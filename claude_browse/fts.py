@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 
 from .core import list_index_records
 from .providers import claude as claude_provider
+from .providers import codex as codex_provider
 from .providers import get_provider
 from .query import (
     QueryPlan,
@@ -96,7 +97,7 @@ REINDEX_WAIT_TIMEOUT_S = 15 * 60
 #     and become a WITHOUT ROWID table clustered on (term_id, window_id).
 #     v8 stored every term string twice (table + PK autoindex), which was
 #     ~85% of a 1.1 GB index file.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
 _CLOSEOUT_CUE_WEIGHTS = {
     "closeout": 3.0,
     "close out": 3.0,
@@ -657,7 +658,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     cur = conn.execute("SELECT version FROM schema_version LIMIT 1")
     row = cur.fetchone()
     existing_version = row[0] if row else None
-    if existing_version is not None and existing_version != SCHEMA_VERSION:
+    if existing_version is not None and existing_version not in (9, 10, SCHEMA_VERSION):
         conn.executescript(
             """
             DROP TABLE IF EXISTS sessions_fts;
@@ -694,6 +695,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             last_msg        TEXT,
             msg_count       INTEGER NOT NULL DEFAULT 0,
             mtime           REAL NOT NULL,
+            source_mtime    REAL NOT NULL DEFAULT 0,
+            content_mtime   REAL NOT NULL DEFAULT 0,
+            source_size     INTEGER NOT NULL DEFAULT 0,
+            coverage        TEXT NOT NULL DEFAULT 'complete',
             indexed_at      REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_mtime
@@ -780,7 +785,30 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
-    if existing_version is None:
+    if existing_version == 9:
+        # v9 is structurally compatible. Preserve its potentially-gigabyte
+        # FTS projection and add the manifest fields in-place; rebuilding it
+        # would recreate the very multi-minute startup this migration fixes.
+        conn.executescript(
+            """
+            ALTER TABLE sessions ADD COLUMN content_mtime REAL NOT NULL DEFAULT 0;
+            ALTER TABLE sessions ADD COLUMN source_size INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE sessions ADD COLUMN coverage TEXT NOT NULL DEFAULT 'complete';
+            ALTER TABLE sessions ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0;
+            UPDATE sessions SET content_mtime = mtime WHERE content_mtime = 0;
+            UPDATE sessions SET source_mtime = mtime WHERE source_mtime = 0;
+            UPDATE schema_version SET version = 11;
+            """
+        )
+    elif existing_version == 10:
+        conn.executescript(
+            """
+            ALTER TABLE sessions ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0;
+            UPDATE sessions SET source_mtime = mtime WHERE source_mtime = 0;
+            UPDATE schema_version SET version = 11;
+            """
+        )
+    elif existing_version is None:
         conn.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
     conn.commit()
 
@@ -871,7 +899,7 @@ def _reindex_locked(
     _refresh_live_activity_locked(conn)
     existing: dict[str, tuple[str, float]] = {
         row[0]: (row[1], row[2])
-        for row in conn.execute("SELECT path, sid, mtime FROM sessions")
+        for row in conn.execute("SELECT path, sid, content_mtime FROM sessions")
     }
 
     all_records = list_index_records(known_sessions=existing)
@@ -884,6 +912,14 @@ def _reindex_locked(
     # Stubs carry no sid; their identity is whatever the index already has.
     current_sids |= {
         existing[path][0] for path in stub_paths if path in existing
+    }
+    # A just-committed manifest row is deliberately absent from the full
+    # record stream until its body has been parsed; do not mistake that gap
+    # for deletion in the same refresh transaction.
+    current_sids |= {
+        row[0] for row in conn.execute(
+            "SELECT sid FROM sessions WHERE coverage IN ('pending', 'partial')"
+        )
     }
 
     added = updated = removed = 0
@@ -962,7 +998,7 @@ def _reindex_locked(
 
 
 def _refresh_live_activity_locked(conn: sqlite3.Connection) -> int:
-    """Refresh recency from changed Claude file tails before full indexing.
+    """Refresh recency from changed provider tails before full indexing.
 
     Full-text indexing an active transcript can take minutes.  Update the
     cheap, user-visible activity fields first so readers see current recency
@@ -998,6 +1034,68 @@ def _refresh_live_activity_locked(conn: sqlite3.Connection) -> int:
             """,
             (live_timestamp, sid),
         )
+        changed += 1
+    if changed:
+        conn.commit()
+    return changed + _refresh_codex_manifest_locked(conn)
+
+
+def _refresh_codex_manifest_locked(conn: sqlite3.Connection) -> int:
+    """Commit changed/new CodeX rows before any transcript-body parsing.
+
+    ``content_mtime`` deliberately remains at the last complete parse.  The
+    next content pass can therefore see that enrichment is required, while
+    readers immediately receive a current, explicitly-pending manifest row.
+    """
+    known = {
+        row[0]: float(row[1] or 0)
+        for row in conn.execute(
+            "SELECT path, source_mtime FROM sessions WHERE provider = 'codex'"
+        )
+    }
+    changed = 0
+    for record in codex_provider.list_metadata_records(known):
+        sid = str(record.get("session_id") or "")
+        path = str(record.get("path") or "")
+        if not sid or not path:
+            continue
+        old = conn.execute(
+            "SELECT sid FROM sessions WHERE path = ? OR sid = ?", (path, sid)
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO sessions (
+                sid, path, provider, cwd, timestamp, last_timestamp, title,
+                first_msg, last_msg, msg_count, mtime, source_mtime, content_mtime,
+                source_size, coverage, indexed_at
+            ) VALUES (?, ?, 'codex', ?, ?, ?, ?, ?, '', 0, ?, ?, 0, ?, 'pending', ?)
+            ON CONFLICT(sid) DO UPDATE SET
+                path = excluded.path,
+                cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE sessions.cwd END,
+                timestamp = COALESCE(excluded.timestamp, sessions.timestamp),
+                last_timestamp = COALESCE(excluded.last_timestamp, sessions.last_timestamp),
+                title = CASE WHEN excluded.title != '' THEN excluded.title ELSE sessions.title END,
+                first_msg = CASE WHEN excluded.first_msg != '' THEN excluded.first_msg ELSE sessions.first_msg END,
+                mtime = excluded.mtime,
+                source_mtime = excluded.source_mtime,
+                source_size = excluded.source_size,
+                coverage = 'pending',
+                indexed_at = excluded.indexed_at
+            """,
+            (
+                sid, path, record.get("cwd"), record.get("timestamp"),
+                record.get("last_timestamp"), record.get("name"),
+                record.get("first_msg"), record.get("mtime"), record.get("mtime"),
+                record.get("source_size", 0), time.time(),
+            ),
+        )
+        # A new manifest row should support its opening-message search before
+        # the full FTS body is ready. Existing full FTS rows stay intact.
+        if old is None and record.get("first_msg"):
+            conn.execute(
+                "INSERT INTO sessions_fts (sid, cwd, title, first_msg, user_text, asst_text, boilerplate) VALUES (?, ?, ?, ?, '', '', '')",
+                (sid, str(record.get("cwd") or "").lower(), str(record.get("name") or "").lower(), str(record.get("first_msg") or "").lower()),
+            )
         changed += 1
     if changed:
         conn.commit()
@@ -1045,8 +1143,9 @@ def _index_record(
         """
         INSERT INTO sessions (
             sid, path, provider, cwd, timestamp, last_timestamp, title,
-            first_msg, last_msg, msg_count, mtime, indexed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            first_msg, last_msg, msg_count, mtime, source_mtime, content_mtime, source_size,
+            coverage, indexed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?)
         ON CONFLICT(sid) DO UPDATE SET
             path = excluded.path,
             provider = excluded.provider,
@@ -1058,6 +1157,10 @@ def _index_record(
             last_msg = excluded.last_msg,
             msg_count = excluded.msg_count,
             mtime = excluded.mtime,
+            source_mtime = excluded.source_mtime,
+            content_mtime = excluded.content_mtime,
+            source_size = excluded.source_size,
+            coverage = 'complete',
             indexed_at = excluded.indexed_at
         """,
         (
@@ -1072,6 +1175,9 @@ def _index_record(
             record.get("last_msg"),
             record.get("msg_count", 0),
             record["mtime"],
+            record.get("source_mtime", record["mtime"]),
+            record["mtime"],
+            int(record.get("source_size") or 0),
             now,
         ),
     )
@@ -3690,7 +3796,7 @@ def _age_days(ts_str: str | None, now: datetime) -> float:
 # one place.
 _SESSION_COLUMNS = (
     "sid, path, provider, cwd, timestamp, last_timestamp, title, "
-    "first_msg, last_msg, msg_count, mtime, '' AS context"
+    "first_msg, last_msg, msg_count, mtime, coverage, source_size, '' AS context"
 )
 
 
@@ -3771,6 +3877,9 @@ def get_by_sid(conn: sqlite3.Connection, sid: str) -> dict | None:
 
 
 def _row_to_dict(r) -> dict:
+    # Search queries intentionally select a narrow historic shape while the
+    # picker list selects the manifest fields too. Keep both readers stable.
+    has_manifest = len(r) >= 14
     return {
         "session_id": r[0],
         "path": r[1],
@@ -3783,5 +3892,7 @@ def _row_to_dict(r) -> dict:
         "last_msg": r[8],
         "msg_count": r[9] or 0,
         "mtime": r[10],
-        "context": r[11],
+        "coverage": (r[11] if has_manifest else "complete") or "complete",
+        "source_size": (r[12] if has_manifest else 0) or 0,
+        "context": r[13] if has_manifest else r[11],
     }

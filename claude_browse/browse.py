@@ -533,6 +533,8 @@ def format_row(
         )
     else:
         msgs = f"{info.get('msg_count', 0)}msg"
+        if info.get("coverage") in {"pending", "partial"}:
+            msgs = f"{info.get('coverage')}"
         last = (
             (info.get("last_msg") or "")
             .strip()
@@ -623,7 +625,7 @@ def _lookup_session(session_id):
         return conn.execute(
             '''
             SELECT provider, path, cwd, timestamp, last_timestamp, title,
-                   first_msg, last_msg, msg_count
+                   first_msg, last_msg, msg_count, coverage, source_size
             FROM sessions
             WHERE sid = ?
             ''',
@@ -653,7 +655,7 @@ def get_preview(row_meta, query=""):
         name,
         first_msg,
         last_msg,
-        msg_count,
+        msg_count, coverage, source_size,
     ) = session
     state = build_work_state(
         {{
@@ -666,6 +668,8 @@ def get_preview(row_meta, query=""):
             "first_msg": first_msg,
             "last_msg": last_msg,
             "msg_count": msg_count,
+            "coverage": coverage,
+            "source_size": source_size,
             "session_id": session_id,
             "match_label": row_meta.get("match_label", ""),
             "match_timestamp": row_meta.get("match_timestamp", ""),
@@ -1221,6 +1225,28 @@ def _native_resume(
     _require_binary(provider)
     spec = get_provider(provider)
 
+    # CodeX's native fork materializes the parent transcript.  It is the
+    # right semantic default for ordinary threads, but a multi-gigabyte parent
+    # can leave the terminal apparently hung for minutes.  Keep the policy
+    # local and explicit; zero/missing metadata retains native behavior.
+    source_size = int(session.get("source_size") or 0)
+    compact_limit = int(os.environ.get("CLAUDE_BROWSE_CODEX_FORK_MAX_BYTES", 128 * 1024 * 1024))
+    if (
+        provider == "codex"
+        and fork is not False
+        and source_size > compact_limit
+    ):
+        print(
+            "Starting a compact continuation instead of a native CodeX fork "
+            f"({source_size / (1024 * 1024):.0f} MiB source exceeds the "
+            f"{compact_limit / (1024 * 1024):.0f} MiB safety limit)..."
+        )
+        _continue_in_provider(
+            session, "codex", "codex", cwd, prefixes, yolo,
+            relocate=True, compact_continuation=True,
+        )
+        return
+
     if _use_codex_mobile_mode(provider):
         action = "fork" if fork else "resume"
         cmd = _codex_mobile_cmd(action, session_id, yolo=yolo)
@@ -1274,6 +1300,7 @@ def _continue_in_provider(
     *,
     reenter_topic: bool = False,
     relocate: bool = False,
+    compact_continuation: bool = False,
 ) -> None:
     target_spec = get_provider(target_provider)
     target_name = target_spec.display_name
@@ -1294,13 +1321,10 @@ def _continue_in_provider(
 
     if target_spec.handoff_via_file:
         try:
-            import_path = write_import_file(
-                session,
-                target_provider,
-                selection_query,
-                reenter_topic=reenter_topic,
-                relocate=relocate,
-            )
+            kwargs = {"reenter_topic": reenter_topic, "relocate": relocate}
+            if compact_continuation:
+                kwargs["compact_continuation"] = True
+            import_path = write_import_file(session, target_provider, selection_query, **kwargs)
         except OSError as exc:
             print(f"Could not write import brief: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -1327,13 +1351,10 @@ def _continue_in_provider(
             )
     else:
         import_dir = None
-        import_markdown = build_import_markdown(
-            session,
-            target_provider,
-            selection_query,
-            reenter_topic=reenter_topic,
-            relocate=relocate,
-        )
+        kwargs = {"reenter_topic": reenter_topic, "relocate": relocate}
+        if compact_continuation:
+            kwargs["compact_continuation"] = True
+        import_markdown = build_import_markdown(session, target_provider, selection_query, **kwargs)
         if reenter_topic:
             prompt = (
                 f"Continue the imported {provider_display_name(source_provider)} session "
@@ -1358,7 +1379,9 @@ def _continue_in_provider(
     else:
         cmd = target_spec.handoff_cmd(import_dir, prompt, yolo, extra_dirs=extra_dirs)
     mode = " (yolo)" if yolo else ""
-    action = "Re-entering topic" if reenter_topic else "Continuing"
+    action = "Re-entering topic" if reenter_topic else (
+        "Starting compact continuation" if compact_continuation else "Continuing"
+    )
     print(f"{action}{mode} in {target_name} from {folder_name(cwd, prefixes)}...")
     exec_binary = cmd[0] if _use_codex_mobile_mode(target_provider) else target_spec.binary
     os.execvp(exec_binary, cmd)

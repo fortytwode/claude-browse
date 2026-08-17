@@ -20,6 +20,24 @@ from claude_browse.providers.base import PROVIDER_API_VERSION, ProviderSpec
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def test_codex_bounded_metadata_reads_head_and_tail_only(tmp_path, monkeypatch):
+    path = tmp_path / "rollout-2026-08-17T11-36-00-01a0-meta.jsonl"
+    path.write_bytes(
+        b'{"timestamp":"2026-08-17T10:00:00Z","type":"session_meta","payload":{"id":"fresh-id","cwd":"/work"}}\n'
+        b'{"timestamp":"2026-08-17T10:01:00Z","type":"event_msg","payload":{"type":"user_message","message":"fresh picker row"}}\n'
+        + b'{"type":"noise","payload":{"blob":"' + b"x" * 1024 + b'"}}\n'
+        + b'{"timestamp":"2026-08-17T11:36:00Z","type":"event_msg","payload":{"type":"task_complete"}}\n'
+    )
+    monkeypatch.setattr(codex_provider, "METADATA_SCAN_BYTES", 128)
+
+    metadata = codex_provider.read_session_metadata(str(path))
+
+    assert metadata["session_id"] == "fresh-id"
+    assert metadata["cwd"] == "/work"
+    assert metadata["last_timestamp"] == "2026-08-17T11:36:00Z"
+    assert metadata["size"] == path.stat().st_size
+
+
 def test_provider_ids_include_claude_codex_gemini_copilot_and_cursor():
     assert provider_ids() == ("claude", "codex", "gemini", "copilot", "cursor")
 

@@ -24,6 +24,7 @@ CODEX_STATE_DB = os.path.expanduser("~/.codex/state_5.sqlite")
 CODEX_HISTORY_PATH = os.path.expanduser("~/.codex/history.jsonl")
 CODEX_SESSIONS_DIR = os.path.expanduser("~/.codex/sessions")
 SQLITE_BUSY_TIMEOUT_MS = 30_000
+METADATA_SCAN_BYTES = 256 * 1024
 
 _CODEX_HISTORY_CACHE: dict[str, object] = {
     "mtime": None,
@@ -209,6 +210,126 @@ def _load_session_metadata(session_path: str) -> dict[str, object]:
     except Exception:
         return metadata
     return metadata
+
+
+def _metadata_from_lines(lines: list[bytes], metadata: dict[str, object]) -> None:
+    """Populate cheap session identity fields from complete JSONL lines."""
+    for raw_line in lines:
+        try:
+            data = json.loads(raw_line)
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        timestamp = data.get("timestamp")
+        if timestamp:
+            if not metadata.get("timestamp"):
+                metadata["timestamp"] = str(timestamp)
+            metadata["last_timestamp"] = str(timestamp)
+        if data.get("type") == "session_meta":
+            payload = data.get("payload") or {}
+            if payload.get("id"):
+                metadata["session_id"] = str(payload["id"])
+            if payload.get("cwd"):
+                metadata["cwd"] = str(payload["cwd"])
+            if payload.get("thread_source"):
+                metadata["thread_source"] = str(payload["thread_source"])
+        if not metadata.get("first_msg") and data.get("type") == "event_msg":
+            payload = data.get("payload") or {}
+            if payload.get("type") == "user_message":
+                text = _searchable_body(str(payload.get("message") or ""))
+                if text:
+                    metadata["first_msg"] = text[:200]
+
+
+def read_session_metadata(session_path: str) -> dict[str, object]:
+    """Return session identity from bounded head/tail reads only.
+
+    This is intentionally separate from ``_load_session_metadata``.  It is
+    safe to call while a multi-gigabyte transcript is still growing: the
+    first scan finds session_meta/the opening request and the tail supplies
+    current activity, while an incomplete trailing line is simply ignored.
+    """
+    metadata: dict[str, object] = {
+        "session_id": _session_id_from_path(session_path),
+        "cwd": "",
+        "timestamp": None,
+        "last_timestamp": None,
+        "thread_source": "",
+        "first_msg": "",
+        "size": 0,
+        "mtime": 0.0,
+    }
+    try:
+        with open(session_path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            metadata["size"] = size
+            metadata["mtime"] = os.path.getmtime(session_path)
+            handle.seek(0)
+            head = handle.read(METADATA_SCAN_BYTES)
+            handle.seek(max(0, size - METADATA_SCAN_BYTES))
+            tail = handle.read()
+    except OSError:
+        return metadata
+    _metadata_from_lines(head.splitlines(), metadata)
+    # The head's opening timestamp must remain the start; only take the tail's
+    # newest timestamp for recency and do not let an incomplete final line win.
+    tail_metadata = dict(metadata)
+    tail_metadata["timestamp"] = None
+    tail_metadata["first_msg"] = ""
+    _metadata_from_lines(tail.splitlines(), tail_metadata)
+    if tail_metadata.get("last_timestamp"):
+        metadata["last_timestamp"] = tail_metadata["last_timestamp"]
+    return metadata
+
+
+def list_metadata_records(
+    known_sources: dict[str, float] | None = None,
+) -> list[dict[str, object]]:
+    """Discover CodeX sessions newest-first without parsing transcript bodies."""
+    records: list[dict[str, object]] = []
+    try:
+        paths = sorted(list_session_files(), key=os.path.getmtime, reverse=True)
+    except OSError:
+        paths = list_session_files()
+    for path in paths:
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if known_sources is not None and abs(
+            float(known_sources.get(path, -1)) - mtime
+        ) <= 0.001:
+            continue
+        metadata = read_session_metadata(path)
+        if str(metadata.get("thread_source") or "").lower() == "subagent":
+            continue
+        sid = str(metadata.get("session_id") or _session_id_from_path(path))
+        first_msg = str(metadata.get("first_msg") or "")
+        records.append({
+            "path": path,
+            "provider": "codex",
+            "session_id": sid,
+            "cwd": canonicalize_path(str(metadata.get("cwd") or "")),
+            "timestamp": metadata.get("timestamp"),
+            "last_timestamp": metadata.get("last_timestamp") or metadata.get("timestamp"),
+            "name": first_msg or sid,
+            "first_msg": first_msg,
+            "last_msg": "",
+            "msg_count": 0,
+            "mtime": float(metadata.get("mtime") or 0.0),
+            "source_size": int(metadata.get("size") or 0),
+            "coverage": "pending",
+        })
+    return records
+
+
+def get_live_activity(session_path: str) -> tuple[str | None, float | None]:
+    """Provider-parity bounded recency reader used by the index refresh."""
+    metadata = read_session_metadata(session_path)
+    return (
+        str(metadata["last_timestamp"]) if metadata.get("last_timestamp") else None,
+        float(metadata["mtime"]) if metadata.get("mtime") else None,
+    )
 
 
 def _searchable_body(text: str) -> str:
@@ -476,6 +597,12 @@ def _build_index_record(
         or metadata.get("timestamp")
     )
     record_mtime = _record_freshness(session_path, state, events)
+    try:
+        source_size = os.path.getsize(session_path) if session_path else 0
+        source_mtime = os.path.getmtime(session_path) if session_path else 0.0
+    except OSError:
+        source_size = 0
+        source_mtime = 0.0
     cwd = state.get("cwd") or metadata.get("cwd") or ""
     title_raw = str(state.get("title") or "").strip()
     title, title_boilerplate = split_boilerplate(title_raw)
@@ -494,6 +621,8 @@ def _build_index_record(
         "name": title or first_msg[:200],
         "msg_count": msg_count,
         "mtime": record_mtime,
+        "source_mtime": source_mtime,
+        "source_size": source_size,
         "fields": {
             "cwd": str(cwd or "").lower(),
             "title": title.lower(),
