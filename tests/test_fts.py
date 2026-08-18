@@ -1983,6 +1983,148 @@ def test_reindex_commits_fresh_codex_manifest_before_content_parse(db, monkeypat
     assert row["source_size"] == 5_000_000_000
 
 
+def test_codex_manifest_replaces_stale_parent_identity_for_same_path(
+    db, monkeypatch
+):
+    path = "/tmp/rollout-2026-08-17T11-00-00-child-id.jsonl"
+    _seed(db, "parent-id", "legacy parent text", provider="codex", path=path)
+    db.execute(
+        """INSERT INTO content_cursors
+               (sid, path, byte_offset, source_size, source_mtime)
+           VALUES ('parent-id', ?, 12, 12, 1.0)""",
+        (path,),
+    )
+    db.commit()
+    record = {
+        "path": path,
+        "provider": "codex",
+        "session_id": "child-id",
+        "cwd": "/work",
+        "timestamp": "2026-08-17T11:00:00Z",
+        "last_timestamp": "2026-08-17T12:00:00Z",
+        "name": "correct child",
+        "first_msg": "correct child",
+        "mtime": 2.0,
+        "source_size": 12,
+    }
+    monkeypatch.setattr(
+        fts.codex_provider, "list_metadata_records", lambda _known: [record]
+    )
+
+    changed = fts._refresh_codex_manifest_locked(db)
+
+    assert changed == 1
+    assert db.execute(
+        "SELECT sid, path FROM sessions ORDER BY sid"
+    ).fetchall() == [("child-id", path)]
+    assert db.execute(
+        "SELECT COUNT(*) FROM sessions_fts WHERE sid='parent-id'"
+    ).fetchone()[0] == 0
+    assert db.execute(
+        "SELECT COUNT(*) FROM content_cursors WHERE sid='parent-id'"
+    ).fetchone()[0] == 0
+
+
+def test_pending_codex_enrichment_advances_in_bounded_chunks(
+    db, monkeypatch, tmp_path
+):
+    path = tmp_path / "rollout-child-id.jsonl"
+    first = (
+        b'{"type":"event_msg","payload":{"type":"user_message",'
+        b'"message":"first bounded message"}}\n'
+    )
+    second = (
+        b'{"type":"event_msg","payload":{"type":"agent_message",'
+        b'"message":"second bounded reply"}}\n'
+    )
+    path.write_bytes(first + second)
+    _seed(db, "child-id", "opening", provider="codex", path=str(path))
+    fts._delete_segments_for_sid(db, "child-id")
+    db.execute(
+        """UPDATE sessions SET coverage='pending', source_size=?, source_mtime=?,
+                                  content_mtime=0, mtime=? WHERE sid='child-id'""",
+        (path.stat().st_size, path.stat().st_mtime, path.stat().st_mtime),
+    )
+    db.execute(
+        """INSERT INTO content_cursors
+               (sid, path, byte_offset, source_size, source_mtime)
+           VALUES ('child-id', ?, 0, ?, ?)""",
+        (str(path), path.stat().st_size, path.stat().st_mtime),
+    )
+    db.commit()
+    monkeypatch.setenv(
+        "CLAUDE_BROWSE_CODEX_ENRICH_BUDGET_BYTES", str(max(len(first), len(second)))
+    )
+
+    assert fts._enrich_pending_codex_append_only(db) == 1
+    assert db.execute(
+        "SELECT byte_offset FROM content_cursors WHERE sid='child-id'"
+    ).fetchone()[0] == len(first)
+    assert db.execute(
+        "SELECT coverage FROM sessions WHERE sid='child-id'"
+    ).fetchone()[0] == "pending"
+
+    assert fts._enrich_pending_codex_append_only(db) == 1
+    assert db.execute(
+        "SELECT byte_offset FROM content_cursors WHERE sid='child-id'"
+    ).fetchone()[0] == len(first + second)
+    assert db.execute(
+        "SELECT coverage FROM sessions WHERE sid='child-id'"
+    ).fetchone()[0] == "complete"
+    assert db.execute(
+        "SELECT role, text FROM segments WHERE sid='child-id' ORDER BY segment_idx"
+    ).fetchall() == [
+        ("user", "first bounded message"),
+        ("assistant", "second bounded reply"),
+    ]
+
+
+def test_pending_codex_enrichment_skips_oversized_record_as_partial(
+    db, monkeypatch, tmp_path
+):
+    path = tmp_path / "rollout-child-id.jsonl"
+    oversized = b'{"type":"compaction","blob":"' + b"x" * 256 + b'"}\n'
+    searchable = (
+        b'{"type":"event_msg","payload":{"type":"user_message",'
+        b'"message":"searchable after skip"}}\n'
+    )
+    path.write_bytes(oversized + searchable)
+    _seed(db, "child-id", "opening", provider="codex", path=str(path))
+    fts._delete_segments_for_sid(db, "child-id")
+    db.execute(
+        """UPDATE sessions SET coverage='pending', source_size=?, source_mtime=?,
+                                  content_mtime=0, mtime=? WHERE sid='child-id'""",
+        (path.stat().st_size, path.stat().st_mtime, path.stat().st_mtime),
+    )
+    db.execute(
+        """INSERT INTO content_cursors
+               (sid, path, byte_offset, source_size, source_mtime)
+           VALUES ('child-id', ?, 0, ?, ?)""",
+        (str(path), path.stat().st_size, path.stat().st_mtime),
+    )
+    db.commit()
+    monkeypatch.setenv(
+        "CLAUDE_BROWSE_CODEX_ENRICH_BUDGET_BYTES", str(len(searchable))
+    )
+
+    for _ in range(10):
+        fts._enrich_pending_codex_append_only(db)
+        cursor = db.execute(
+            """SELECT byte_offset, skip_record, lossy
+               FROM content_cursors WHERE sid='child-id'"""
+        ).fetchone()
+        if cursor[0] == path.stat().st_size and cursor[1] == 0:
+            break
+
+    assert cursor == (path.stat().st_size, 0, 1)
+    assert db.execute(
+        "SELECT coverage FROM sessions WHERE sid='child-id'"
+    ).fetchone()[0] == "partial"
+    assert db.execute(
+        "SELECT role, text FROM segments WHERE sid='child-id' ORDER BY segment_idx"
+    ).fetchall() == [("user", "searchable after skip")]
+
+
 def test_reindex_skips_unchanged(db, tmp_path, monkeypatch):
     """Second reindex with no mtime change does no work."""
     sessions_dir = tmp_path / "projects" / "demo"

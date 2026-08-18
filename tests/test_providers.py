@@ -60,6 +60,53 @@ def test_codex_incremental_parser_preserves_incomplete_tail_and_detects_reset(tm
     assert (offset, reset) == (0, True)
 
 
+def test_codex_fork_metadata_keeps_child_identity_from_first_meta(tmp_path):
+    path = tmp_path / "rollout-2026-08-17T11-37-56-child-id.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "timestamp": f"2026-08-17T11:37:5{index}Z",
+                    "type": "session_meta",
+                    "payload": {"id": sid, "cwd": cwd, "thread_source": "user"},
+                }
+            )
+            for index, (sid, cwd) in enumerate(
+                (("child-id", "/current"), ("parent-id", "/parent"), ("root-id", "/root"))
+            )
+        )
+        + "\n"
+    )
+
+    bounded = codex_provider.read_session_metadata(str(path))
+    full = codex_provider._load_session_metadata(str(path))
+
+    assert bounded["session_id"] == "child-id"
+    assert bounded["cwd"] == "/current"
+    assert full["session_id"] == "child-id"
+    assert full["cwd"] == "/current"
+
+
+def test_codex_full_metadata_uses_session_meta_payload_timestamp(tmp_path):
+    path = tmp_path / "rollout-child-id.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "child-id",
+                    "timestamp": "2026-08-17T11:37:50Z",
+                },
+            }
+        )
+        + "\n"
+    )
+
+    metadata = codex_provider._load_session_metadata(str(path))
+
+    assert metadata["timestamp"] == "2026-08-17T11:37:50Z"
+
+
 def test_provider_ids_include_claude_codex_gemini_copilot_and_cursor():
     assert provider_ids() == ("claude", "codex", "gemini", "copilot", "cursor")
 
@@ -1122,6 +1169,84 @@ def test_codex_gate_stubs_unchanged_sessions_without_parsing(monkeypatch, tmp_pa
     assert stub["path"] == str(session_path)
     assert stub["provider"] == "codex"
     assert abs(float(stub["mtime"]) - float(stored_mtime)) <= 0.001
+
+
+def test_codex_gate_defers_changed_transcript_over_refresh_budget(monkeypatch, tmp_path):
+    sessions_dir = tmp_path / "sessions" / "2026" / "08" / "17"
+    sessions_dir.mkdir(parents=True)
+    path = sessions_dir / "rollout-2026-08-17T12-00-00-budgeted-id.jsonl"
+    path.write_text('{"type":"event_msg"}\n')
+    monkeypatch.setattr(codex_provider, "CODEX_SESSIONS_DIR", str(tmp_path / "sessions"))
+    monkeypatch.setattr(codex_provider, "load_history", lambda: {})
+    monkeypatch.setattr(codex_provider, "_load_state_records", lambda: ([], 0.0))
+    monkeypatch.setenv("CLAUDE_BROWSE_CODEX_ENRICH_BUDGET_BYTES", "1")
+    monkeypatch.setattr(
+        codex_provider,
+        "_load_session_metadata",
+        lambda _path: (_ for _ in ()).throw(AssertionError("deferred file was parsed")),
+    )
+
+    records = codex_provider.list_index_records({str(path): ("budgeted-id", 0.0)})
+
+    assert records == [{
+        "path": str(path),
+        "provider": "codex",
+        "mtime": 0.0,
+        "unchanged": True,
+    }]
+
+    records = codex_provider.list_index_records({})
+    assert records == [], "an untracked duplicate path must not bypass the byte budget"
+
+    monkeypatch.setattr(
+        codex_provider,
+        "_load_state_records",
+        lambda: ([{
+            "session_id": "budgeted-id",
+            "path": str(path),
+            "first_user_message": "state fallback",
+        }], 0.0),
+    )
+    records = codex_provider.list_index_records({})
+    assert records == [], "a state row must not bypass the file admission budget"
+
+
+def test_codex_gate_enriches_newest_file_first(monkeypatch, tmp_path):
+    sessions_dir = tmp_path / "sessions" / "2026" / "08" / "17"
+    sessions_dir.mkdir(parents=True)
+    older = sessions_dir / "rollout-2026-08-17T11-00-00-older-id.jsonl"
+    newer = sessions_dir / "rollout-2026-08-17T12-00-00-newer-id.jsonl"
+    older.write_bytes(b"x" * 80)
+    newer.write_bytes(b"x" * 40)
+    os.utime(older, (1_000, 1_000))
+    os.utime(newer, (2_000, 2_000))
+    monkeypatch.setattr(codex_provider, "CODEX_SESSIONS_DIR", str(tmp_path / "sessions"))
+    monkeypatch.setattr(codex_provider, "load_history", lambda: {})
+    monkeypatch.setattr(codex_provider, "_load_state_records", lambda: ([], 0.0))
+    monkeypatch.setenv("CLAUDE_BROWSE_CODEX_ENRICH_BUDGET_BYTES", "40")
+    parsed: list[str] = []
+    monkeypatch.setattr(
+        codex_provider,
+        "read_session_metadata",
+        lambda path: {
+            "session_id": Path(path).stem.rsplit("-", 2)[-2] + "-id",
+            "thread_source": "",
+            "timestamp": None,
+            "last_timestamp": None,
+            "cwd": "",
+        },
+    )
+
+    def build(sid, path, _state, _metadata, _history):
+        parsed.append(path)
+        return {"session_id": sid, "path": path}
+
+    monkeypatch.setattr(codex_provider, "_build_index_record", build)
+
+    records = codex_provider.list_index_records({})
+
+    assert parsed == [str(newer)]
+    assert records == [{"session_id": "newer-id", "path": str(newer)}]
 
 
 def test_codex_gate_reparses_when_history_advances(monkeypatch, tmp_path):

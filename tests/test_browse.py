@@ -955,7 +955,7 @@ def test_refresh_index_once_heals_corruption_via_locked_rebuild(monkeypatch):
     assert rebuilt == [1]
 
 
-def test_refresh_index_once_spares_healthy_index_on_app_error(monkeypatch):
+def test_refresh_index_once_spares_healthy_index_on_app_error(monkeypatch, capsys):
     """An IntegrityError on a file that passes integrity_check is an
     indexing bug, not corruption: rebuilding would destroy a good index
     to mask it. The refresh must leave the index alone."""
@@ -985,6 +985,9 @@ def test_refresh_index_once_spares_healthy_index_on_app_error(monkeypatch):
     browse._refresh_index_once()
 
     assert rebuilt == []
+    error = capsys.readouterr().err
+    assert "refresh failed" in error
+    assert "UNIQUE constraint failed" in error
 
 
 def test_refresh_index_once_rebuilds_when_file_fails_integrity(monkeypatch):

@@ -25,6 +25,7 @@ CODEX_HISTORY_PATH = os.path.expanduser("~/.codex/history.jsonl")
 CODEX_SESSIONS_DIR = os.path.expanduser("~/.codex/sessions")
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 METADATA_SCAN_BYTES = 256 * 1024
+DEFAULT_CONTENT_ENRICH_BUDGET_BYTES = 64 * 1024 * 1024
 
 _CODEX_HISTORY_CACHE: dict[str, object] = {
     "mtime": None,
@@ -142,35 +143,66 @@ def _load_session_turns(
     return turns
 
 
-def load_session_turns_since(
-    session_path: str, offset: int = 0, flatten: bool = True
-) -> tuple[list[tuple[str, str]], int, bool]:
+def load_session_turns_chunk(
+    session_path: str,
+    offset: int = 0,
+    flatten: bool = True,
+    max_bytes: int | None = None,
+    skip_record: bool = False,
+) -> tuple[list[tuple[str, str]], int, bool, int, bool, bool]:
     """Parse complete CodeX JSONL records appended after ``offset``.
 
-    Returns ``(turns, next_offset, reset)``.  A truncation/replacement is
-    never spliced onto old content: callers reset that session's projection
-    and restart at byte zero.  The final incomplete line is retained for the
-    next pass rather than being lost or indexed twice.
+    Returns ``(turns, next_offset, reset, bytes_read, skip_record, lossy)``. A
+    truncation/replacement is never spliced onto old content: callers reset
+    that session's projection and restart at byte zero. The final incomplete
+    line is retained for the next pass rather than being lost or indexed
+    twice, while ``bytes_read`` keeps the aggregate I/O budget honest.
     """
+    if max_bytes is not None and max_bytes <= 0:
+        return [], offset, False, 0, skip_record, False
     try:
         size = os.path.getsize(session_path)
     except OSError:
-        return [], offset, False
+        return [], offset, False, 0, skip_record, False
     if offset < 0 or offset > size:
-        return [], 0, True
+        return [], 0, True, 0, False, False
     turns: list[tuple[str, str]] = []
     next_offset = offset
+    bytes_read = 0
+    lossy = False
     try:
         with open(session_path, "rb") as handle:
             handle.seek(offset)
             while True:
                 start = handle.tell()
-                raw = handle.readline()
+                remaining = None
+                if max_bytes is not None:
+                    remaining = max_bytes - (start - offset)
+                    if remaining <= 0:
+                        break
+                raw = handle.readline(remaining)
                 if not raw:
                     break
+                bytes_read += len(raw)
+                if skip_record:
+                    next_offset = handle.tell()
+                    lossy = True
+                    if raw.endswith(b"\n"):
+                        skip_record = False
+                        continue
+                    break
                 if not raw.endswith(b"\n"):
-                    # A writer can leave an unterminated tail temporarily.
-                    next_offset = start
+                    if start == offset and handle.tell() < size:
+                        # One JSONL record exceeds the bounded read. Advance in
+                        # durable skip mode instead of allocating it or retrying
+                        # the same bytes forever; callers expose partial search
+                        # coverage once the record has been skipped.
+                        next_offset = handle.tell()
+                        skip_record = True
+                        lossy = True
+                    else:
+                        # A writer can leave an unterminated tail temporarily.
+                        next_offset = start
                     break
                 next_offset = handle.tell()
                 try:
@@ -191,13 +223,34 @@ def load_session_turns_since(
                     if role in ("user", "assistant"):
                         _append_turn(turns, role, _extract_codex_content_text(payload.get("content")), flatten)
     except OSError:
-        return [], offset, False
-    return turns, next_offset, False
+        return [], offset, False, bytes_read, skip_record, lossy
+    return turns, next_offset, False, bytes_read, skip_record, lossy
+
+
+def load_session_turns_since(
+    session_path: str, offset: int = 0, flatten: bool = True
+) -> tuple[list[tuple[str, str]], int, bool]:
+    """Compatibility wrapper for unbounded append-only parsing."""
+    turns, next_offset, reset, _bytes_read, _skip_record, _lossy = load_session_turns_chunk(
+        session_path, offset, flatten=flatten
+    )
+    return turns, next_offset, reset
 
 
 def list_session_files() -> list[str]:
     pattern = os.path.join(CODEX_SESSIONS_DIR, "**", "*.jsonl")
     return sorted(glob.glob(pattern, recursive=True))
+
+
+def _list_session_files_newest_first() -> list[str]:
+    dated_paths: list[tuple[float, str]] = []
+    for path in list_session_files():
+        try:
+            dated_paths.append((os.path.getmtime(path), path))
+        except OSError:
+            continue
+    dated_paths.sort(reverse=True)
+    return [path for _mtime, path in dated_paths]
 
 
 def _session_id_from_path(session_path: str) -> str:
@@ -234,6 +287,7 @@ def _load_session_metadata(session_path: str) -> dict[str, object]:
         "last_timestamp": None,
         "thread_source": "",
     }
+    identity_found = False
     try:
         with open(session_path) as f:
             for line in f:
@@ -252,20 +306,32 @@ def _load_session_metadata(session_path: str) -> dict[str, object]:
                     continue
 
                 payload = data.get("payload", {})
-                if payload.get("id"):
-                    metadata["session_id"] = str(payload.get("id"))
-                if payload.get("cwd"):
-                    metadata["cwd"] = str(payload.get("cwd"))
                 if payload.get("timestamp") and not metadata.get("timestamp"):
                     metadata["timestamp"] = payload.get("timestamp")
-                if payload.get("thread_source"):
-                    metadata["thread_source"] = str(payload.get("thread_source"))
+                identity_found = _apply_session_identity(
+                    metadata, payload, identity_found
+                )
     except Exception:
         return metadata
     return metadata
 
 
-def _metadata_from_lines(lines: list[bytes], metadata: dict[str, object]) -> None:
+def _apply_session_identity(
+    metadata: dict[str, object], payload: dict, identity_found: bool
+) -> bool:
+    if identity_found or not payload.get("id"):
+        return identity_found
+    metadata["session_id"] = str(payload["id"])
+    if payload.get("cwd"):
+        metadata["cwd"] = str(payload["cwd"])
+    if payload.get("thread_source"):
+        metadata["thread_source"] = str(payload["thread_source"])
+    return True
+
+
+def _metadata_from_lines(
+    lines: list[bytes], metadata: dict[str, object], identity_found: bool = False
+) -> bool:
     """Populate cheap session identity fields from complete JSONL lines."""
     for raw_line in lines:
         try:
@@ -279,18 +345,16 @@ def _metadata_from_lines(lines: list[bytes], metadata: dict[str, object]) -> Non
             metadata["last_timestamp"] = str(timestamp)
         if data.get("type") == "session_meta":
             payload = data.get("payload") or {}
-            if payload.get("id"):
-                metadata["session_id"] = str(payload["id"])
-            if payload.get("cwd"):
-                metadata["cwd"] = str(payload["cwd"])
-            if payload.get("thread_source"):
-                metadata["thread_source"] = str(payload["thread_source"])
+            identity_found = _apply_session_identity(
+                metadata, payload, identity_found
+            )
         if not metadata.get("first_msg") and data.get("type") == "event_msg":
             payload = data.get("payload") or {}
             if payload.get("type") == "user_message":
                 text = _searchable_body(str(payload.get("message") or ""))
                 if text:
                     metadata["first_msg"] = text[:200]
+    return identity_found
 
 
 def read_session_metadata(session_path: str) -> dict[str, object]:
@@ -323,36 +387,50 @@ def read_session_metadata(session_path: str) -> dict[str, object]:
             tail = handle.read()
     except OSError:
         return metadata
-    _metadata_from_lines(head.splitlines(), metadata)
+    identity_found = _metadata_from_lines(head.splitlines(), metadata)
     # The head's opening timestamp must remain the start; only take the tail's
     # newest timestamp for recency and do not let an incomplete final line win.
     tail_metadata = dict(metadata)
     tail_metadata["timestamp"] = None
     tail_metadata["first_msg"] = ""
-    _metadata_from_lines(tail.splitlines(), tail_metadata)
+    _metadata_from_lines(tail.splitlines(), tail_metadata, identity_found)
     if tail_metadata.get("last_timestamp"):
         metadata["last_timestamp"] = tail_metadata["last_timestamp"]
     return metadata
 
 
+def _content_enrich_budget_bytes() -> int:
+    raw = os.environ.get("CLAUDE_BROWSE_CODEX_ENRICH_BUDGET_BYTES", "")
+    try:
+        value = int(raw) if raw else DEFAULT_CONTENT_ENRICH_BUDGET_BYTES
+    except ValueError:
+        return DEFAULT_CONTENT_ENRICH_BUDGET_BYTES
+    return max(0, value)
+
+
 def list_metadata_records(
-    known_sources: dict[str, float] | None = None,
+    known_sources: dict[str, float | tuple[str, float]] | None = None,
 ) -> list[dict[str, object]]:
     """Discover CodeX sessions newest-first without parsing transcript bodies."""
     records: list[dict[str, object]] = []
-    try:
-        paths = sorted(list_session_files(), key=os.path.getmtime, reverse=True)
-    except OSError:
-        paths = list_session_files()
-    for path in paths:
+    for path in _list_session_files_newest_first():
         try:
             mtime = os.path.getmtime(path)
         except OSError:
             continue
-        if known_sources is not None and abs(
-            float(known_sources.get(path, -1)) - mtime
-        ) <= 0.001:
-            continue
+        if known_sources is not None:
+            known_value = known_sources.get(path, -1.0)
+            known_sid = ""
+            if isinstance(known_value, tuple):
+                known_sid, known_mtime = known_value
+            else:
+                known_mtime = known_value
+            # Rollout filenames carry the current child ID. An older parser
+            # could cache this path under an inherited parent ID, so an
+            # otherwise-unchanged path still needs one bounded reconciliation.
+            identity_matches = not known_sid or known_sid == _session_id_from_path(path)
+            if identity_matches and abs(float(known_mtime) - mtime) <= 0.001:
+                continue
         metadata = read_session_metadata(path)
         if str(metadata.get("thread_source") or "").lower() == "subagent":
             continue
@@ -700,8 +778,14 @@ def list_index_records(
     }
     records: list[dict[str, object]] = []
     seen_sids: set[str] = set()
+    ordered_session_paths = _list_session_files_newest_first()
+    session_paths = set(ordered_session_paths)
 
-    for session_path in list_session_files():
+    enrich_budget = _content_enrich_budget_bytes()
+    enriched_bytes = 0
+    for session_path in ordered_session_paths:
+        known_sid = ""
+        known_mtime = 0.0
         if known_sessions is not None and session_path in known_sessions:
             # The stored sid came from this file's last full parse, so
             # state/history lookups don't depend on guessing the sid from
@@ -722,7 +806,25 @@ def list_index_records(
                 })
                 seen_sids.add(known_sid)
                 continue
-        metadata = _load_session_metadata(session_path)
+        try:
+            source_size = os.path.getsize(session_path)
+        except OSError:
+            source_size = 0
+        if source_size > max(0, enrich_budget - enriched_bytes):
+            if known_sid:
+                records.append({
+                    "path": session_path,
+                    "provider": "codex",
+                    "mtime": known_mtime,
+                    "unchanged": True,
+                })
+                seen_sids.add(known_sid)
+            # New paths have already been represented by the bounded manifest
+            # pass. Omitting them here defers full-text enrichment without
+            # allocating their transcript body in this process.
+            continue
+        enriched_bytes += source_size
+        metadata = read_session_metadata(session_path)
         if str(metadata.get("thread_source") or "").lower() == "subagent":
             continue
         sid = str(metadata.get("session_id") or _session_id_from_path(session_path))
@@ -737,6 +839,11 @@ def list_index_records(
         if sid in seen_sids:
             continue
         state_path = str(state.get("path") or "")
+        # A rollout file is canonical when it exists. Its newest-first file
+        # pass either indexed it or deliberately deferred it; the state row
+        # must not bypass that admission decision with a second full parse.
+        if state_path in session_paths:
+            continue
         record_path = state_path or f"codex://{sid}"
         if known_sessions is not None and record_path in known_sessions:
             _known_sid, known_mtime = known_sessions[record_path]
@@ -750,6 +857,13 @@ def list_index_records(
                 })
                 seen_sids.add(sid)
                 continue
+        try:
+            source_size = os.path.getsize(state_path) if state_path else 0
+        except OSError:
+            source_size = 0
+        if source_size > max(0, enrich_budget - enriched_bytes):
+            continue
+        enriched_bytes += source_size
         metadata = {"timestamp": None, "last_timestamp": None, "cwd": ""}
         record = _build_index_record(sid, state_path, state, metadata, history)
         if record:

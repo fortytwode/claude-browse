@@ -730,7 +730,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             path            TEXT NOT NULL,
             byte_offset     INTEGER NOT NULL,
             source_size     INTEGER NOT NULL,
-            source_mtime    REAL NOT NULL
+            source_mtime    REAL NOT NULL,
+            skip_record     INTEGER NOT NULL DEFAULT 0,
+            lossy           INTEGER NOT NULL DEFAULT 0
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
             sid UNINDEXED,
@@ -792,6 +794,17 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    cursor_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(content_cursors)")
+    }
+    if "skip_record" not in cursor_columns:
+        conn.execute(
+            "ALTER TABLE content_cursors ADD COLUMN skip_record INTEGER NOT NULL DEFAULT 0"
+        )
+    if "lossy" not in cursor_columns:
+        conn.execute(
+            "ALTER TABLE content_cursors ADD COLUMN lossy INTEGER NOT NULL DEFAULT 0"
+        )
     if existing_version == 9:
         # v9 is structurally compatible. Preserve its potentially-gigabyte
         # FTS projection and add the manifest fields in-place; rebuilding it
@@ -1056,9 +1069,9 @@ def _refresh_codex_manifest_locked(conn: sqlite3.Connection) -> int:
     readers immediately receive a current, explicitly-pending manifest row.
     """
     known = {
-        row[0]: float(row[1] or 0)
+        row[0]: (str(row[1]), float(row[2] or 0))
         for row in conn.execute(
-            "SELECT path, source_mtime FROM sessions WHERE provider = 'codex'"
+            "SELECT path, sid, source_mtime FROM sessions WHERE provider = 'codex'"
         )
     }
     changed = 0
@@ -1067,9 +1080,18 @@ def _refresh_codex_manifest_locked(conn: sqlite3.Connection) -> int:
         path = str(record.get("path") or "")
         if not sid or not path:
             continue
-        old = conn.execute(
-            "SELECT sid FROM sessions WHERE path = ? OR sid = ?", (path, sid)
+        sid_exists = conn.execute(
+            "SELECT 1 FROM sessions WHERE sid = ?", (sid,)
+        ).fetchone() is not None
+        path_owner = conn.execute(
+            "SELECT sid FROM sessions WHERE path = ?", (path,)
         ).fetchone()
+        if path_owner is not None and str(path_owner[0]) != sid:
+            stale_sid = str(path_owner[0])
+            conn.execute("DELETE FROM sessions_fts WHERE sid = ?", (stale_sid,))
+            _delete_segments_for_sid(conn, stale_sid)
+            conn.execute("DELETE FROM content_cursors WHERE sid = ?", (stale_sid,))
+            conn.execute("DELETE FROM sessions WHERE sid = ?", (stale_sid,))
         conn.execute(
             """
             INSERT INTO sessions (
@@ -1097,9 +1119,34 @@ def _refresh_codex_manifest_locked(conn: sqlite3.Connection) -> int:
                 record.get("source_size", 0), time.time(),
             ),
         )
+        source_size = int(record.get("source_size") or 0)
+        if source_size > codex_provider._content_enrich_budget_bytes():
+            conn.execute(
+                """INSERT INTO content_cursors
+                       (sid, path, byte_offset, source_size, source_mtime,
+                        skip_record, lossy)
+                   VALUES (?, ?, 0, ?, ?, 0, 0)
+                   ON CONFLICT(sid) DO UPDATE SET
+                       path = excluded.path,
+                       byte_offset = CASE
+                           WHEN content_cursors.path != excluded.path
+                             OR content_cursors.byte_offset > excluded.source_size
+                           THEN 0 ELSE content_cursors.byte_offset END,
+                       source_size = excluded.source_size,
+                       source_mtime = excluded.source_mtime,
+                       skip_record = CASE
+                           WHEN content_cursors.path != excluded.path
+                             OR content_cursors.byte_offset > excluded.source_size
+                           THEN 0 ELSE content_cursors.skip_record END,
+                       lossy = CASE
+                           WHEN content_cursors.path != excluded.path
+                             OR content_cursors.byte_offset > excluded.source_size
+                           THEN 0 ELSE content_cursors.lossy END""",
+                (sid, path, source_size, float(record.get("mtime") or 0.0)),
+            )
         # A new manifest row should support its opening-message search before
         # the full FTS body is ready. Existing full FTS rows stay intact.
-        if old is None and record.get("first_msg"):
+        if not sid_exists and record.get("first_msg"):
             conn.execute(
                 "INSERT INTO sessions_fts (sid, cwd, title, first_msg, user_text, asst_text, boilerplate) VALUES (?, ?, ?, ?, '', '', '')",
                 (sid, str(record.get("cwd") or "").lower(), str(record.get("name") or "").lower(), str(record.get("first_msg") or "").lower()),
@@ -1113,18 +1160,58 @@ def _refresh_codex_manifest_locked(conn: sqlite3.Connection) -> int:
 def _enrich_pending_codex_append_only(conn: sqlite3.Connection) -> int:
     """Advance durable CodeX byte cursors without re-reading old content."""
     rows = conn.execute(
-        """SELECT s.sid, s.path, s.last_timestamp, c.byte_offset
+        """SELECT s.sid, s.path, s.last_timestamp, c.byte_offset, s.source_size,
+                  c.skip_record, c.lossy
            FROM sessions s JOIN content_cursors c ON c.sid = s.sid
-           WHERE s.provider = 'codex' AND s.coverage = 'pending'
+           WHERE s.provider = 'codex'
+             AND s.coverage IN ('pending', 'partial')
+             AND (c.byte_offset < s.source_size OR c.skip_record = 1)
            ORDER BY s.mtime DESC"""
     ).fetchall()
-    completed = 0
-    for sid, path, last_timestamp, offset in rows:
-        turns, next_offset, reset = codex_provider.load_session_turns_since(path, int(offset))
+    changed = 0
+    remaining_budget = codex_provider._content_enrich_budget_bytes()
+    for sid, path, last_timestamp, offset, source_size, skip_record, was_lossy in rows:
+        if remaining_budget <= 0:
+            break
+        (
+            turns,
+            next_offset,
+            reset,
+            bytes_read,
+            next_skip_record,
+            became_lossy,
+        ) = codex_provider.load_session_turns_chunk(
+            path,
+            int(offset),
+            max_bytes=remaining_budget,
+            skip_record=bool(skip_record),
+        )
         if reset:
-            # The normal full-record path below rebuilds this one session.
-            conn.execute("DELETE FROM content_cursors WHERE sid = ?", (sid,))
+            # Truncation invalidates the append-only projection. Restart this
+            # session only; other fresh manifest rows remain usable.
+            _delete_segments_for_sid(conn, sid)
+            conn.execute(
+                """UPDATE content_cursors
+                   SET byte_offset=0, source_size=?, skip_record=0, lossy=0
+                   WHERE sid=?""",
+                (int(source_size or 0), sid),
+            )
+            conn.execute(
+                "UPDATE sessions SET coverage='pending', content_mtime=0 WHERE sid=?",
+                (sid,),
+            )
+            changed += 1
             continue
+        remaining_budget -= bytes_read
+        consumed = max(0, int(next_offset) - int(offset))
+        if consumed == 0:
+            continue
+        previous = conn.execute(
+            "SELECT role, text FROM segments WHERE sid=? ORDER BY segment_idx DESC LIMIT 1",
+            (sid,),
+        ).fetchone()
+        if previous is not None and turns and tuple(previous) == turns[0]:
+            turns = turns[1:]
         start_idx = conn.execute(
             "SELECT COALESCE(MAX(segment_idx), 0) FROM segments WHERE sid = ?", (sid,)
         ).fetchone()[0]
@@ -1137,16 +1224,44 @@ def _enrich_pending_codex_append_only(conn: sqlite3.Connection) -> int:
                 "INSERT INTO segments_fts (rowid, sid, role, segment_idx, timestamp, text) VALUES (?, ?, ?, ?, ?, ?)",
                 (cur.lastrowid, sid, role, idx, last_timestamp, text),
             )
+        try:
+            observed_size = os.path.getsize(path)
+            observed_mtime = os.path.getmtime(path)
+        except OSError:
+            observed_size = int(source_size or next_offset)
+            observed_mtime = 0.0
+        complete = int(next_offset) >= observed_size and not next_skip_record
+        is_lossy = bool(was_lossy) or became_lossy
         conn.execute(
-            "UPDATE content_cursors SET byte_offset=?, source_size=?, source_mtime=? WHERE sid=?",
-            (next_offset, next_offset, os.path.getmtime(path), sid),
+            """UPDATE content_cursors
+               SET byte_offset=?, source_size=?, source_mtime=?, skip_record=?, lossy=?
+               WHERE sid=?""",
+            (
+                next_offset,
+                observed_size,
+                observed_mtime,
+                int(next_skip_record),
+                int(is_lossy),
+                sid,
+            ),
         )
-        conn.execute("UPDATE sessions SET coverage='complete', content_mtime=mtime WHERE sid=?", (sid,))
+        conn.execute(
+            """UPDATE sessions
+               SET coverage=?, content_mtime=CASE WHEN ? THEN mtime ELSE content_mtime END,
+                   source_size=MAX(source_size, ?)
+               WHERE sid=?""",
+            (
+                "partial" if is_lossy else ("complete" if complete else "pending"),
+                complete,
+                observed_size,
+                sid,
+            ),
+        )
         _reindex_semantic_windows_from_segments(conn, sid)
-        completed += 1
-    if completed:
+        changed += 1
+    if changed:
         conn.commit()
-    return completed
+    return changed
 
 
 def _dedupe_records_by_session_id(records: list[dict]) -> list[dict]:
@@ -1246,10 +1361,13 @@ def _index_record(
     _reindex_segments_for_record(conn, record, track_term_df=track_term_df)
     if record.get("provider") == "codex" and str(record.get("path") or ""):
         conn.execute(
-            """INSERT INTO content_cursors (sid, path, byte_offset, source_size, source_mtime)
-               VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO content_cursors
+                   (sid, path, byte_offset, source_size, source_mtime,
+                    skip_record, lossy)
+               VALUES (?, ?, ?, ?, ?, 0, 0)
                ON CONFLICT(sid) DO UPDATE SET path=excluded.path, byte_offset=excluded.byte_offset,
-                   source_size=excluded.source_size, source_mtime=excluded.source_mtime""",
+                   source_size=excluded.source_size, source_mtime=excluded.source_mtime,
+                   skip_record=0, lossy=0""",
             (sid, record["path"], int(record.get("source_size") or 0),
              int(record.get("source_size") or 0), float(record.get("source_mtime") or 0)),
         )
