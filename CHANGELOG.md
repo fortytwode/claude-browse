@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **Fresh sessions could disappear when one CodeX fork poisoned the shared
+  refresh.** Forked rollout files repeat ancestor metadata, and the indexer
+  incorrectly let the oldest ancestor overwrite the current child ID. That
+  created a duplicate-path database error before newly discovered Claude
+  sessions were committed. The first metadata record now owns fork identity,
+  stale parent rows migrate safely, and detached refresh failures are logged.
+  Multi-gigabyte CodeX content enrichment is newest-first and resumable within
+  a shared 64 MiB budget; oversized individual records are skipped with
+  truthful partial-coverage status instead of hanging the picker.
 - **Absolute timestamps were printed in UTC but labelled as local.** The
   preview rendered `Started:` / `Last activity:` by slicing the stored ISO
   string and swapping the `T`, with no timezone conversion, so every

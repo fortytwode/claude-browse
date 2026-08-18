@@ -1631,7 +1631,10 @@ def _refresh_index_once() -> None:
                 # IntegrityError from an indexing bug). Rebuilding would
                 # destroy a good index to mask a code bug -- and the
                 # rebuild is itself the heaviest writer in the system.
-                # Leave the index stale; the picker keeps working.
+                # Leave the index stale; the picker keeps working. Emit to
+                # the detached child's refresh log so another application
+                # bug cannot silently freeze discovery again.
+                print(f"claude-browse refresh failed: {exc}", file=sys.stderr)
                 return
             conn, _counts = fts.rebuild_from_scratch()
     finally:
