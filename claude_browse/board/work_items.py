@@ -145,64 +145,6 @@ def _provider(value: object) -> str:
     return result
 
 
-def create(
-    *,
-    title: object,
-    project_path: object = "",
-    status: object = "active",
-    due_date: object = None,
-    session_id: object = None,
-    provider: object = "claude",
-    notes: object = "",
-) -> dict:
-    clean_title = _text(title, "title", limit=500, required=True)
-    clean_path = _text(project_path, "project_path", limit=4096)
-    project = projects.resolve_project(clean_path or None)
-    clean_session = _text(session_id, "session_id", limit=500) or None
-    if clean_session is None:
-        raise ValueError("session_id is required")
-    clean_status = _status(status)
-    clean_provider = _provider(provider)
-    clean_due = _due(due_date)
-    clean_notes = _text(notes, "notes", limit=4000)
-    now = time.time()
-    task_id = str(uuid.uuid4())
-    completed_at = now if clean_status in {"done", "archived"} else None
-    with _conn() as conn:
-        try:
-            conn.execute(
-                """INSERT INTO work_items
-                   (task_id, title, project_key, project_name, project_path,
-                    status, due_date, session_id, session_provider, notes,
-                    created_at, updated_at, completed_at, title_override,
-                    title_source, session_cwd)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    task_id,
-                    clean_title,
-                    project["key"],
-                    project["name"],
-                    project["path"],
-                    clean_status,
-                    clean_due,
-                    clean_session,
-                    clean_provider,
-                    clean_notes,
-                    now,
-                    now,
-                    completed_at,
-                    clean_title,
-                    "manual",
-                    clean_path,
-                ),
-            )
-        except Exception as exc:
-            if "UNIQUE constraint failed: work_items.session_id" in str(exc):
-                raise ValueError("this thread is already in the work queue") from exc
-            raise
-    return get(task_id)  # type: ignore[return-value]
-
-
 def _folder_project(cwd: str) -> dict[str, str]:
     """Return a no-subprocess folder identity for the hook hot path."""
     if not cwd:
@@ -373,7 +315,7 @@ def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
     The returned session id is publication work for the caller to start only
     after this function's transaction has committed.
     """
-    allowed = {"title", "status", "due_date", "notes", "provider", "project_path"}
+    allowed = {"title", "status", "due_date"}
     unknown = set(changes) - allowed
     if unknown:
         raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
@@ -384,9 +326,6 @@ def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
         return None, None
     if not existing.get("session_id"):
         return None, None
-    if "provider" in changes and existing.get("session_id"):
-        raise ValueError("provider cannot change while a thread is linked")
-
     values: dict[str, object] = {}
     if "title" in changes:
         values["title"] = _text(changes["title"], "title", limit=500, required=True)
@@ -399,18 +338,6 @@ def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
         )
     if "due_date" in changes:
         values["due_date"] = _due(changes["due_date"])
-    if "notes" in changes:
-        values["notes"] = _text(changes["notes"], "notes", limit=4000)
-    if "provider" in changes:
-        values["session_provider"] = _provider(changes["provider"])
-    if "project_path" in changes:
-        clean_path = _text(changes["project_path"], "project_path", limit=4096)
-        project = projects.resolve_project(clean_path or None)
-        values.update(
-            project_key=project["key"],
-            project_name=project["name"],
-            project_path=project["path"],
-        )
     values["updated_at"] = time.time()
 
     assignments = ", ".join(f"{field} = ?" for field in values)
@@ -452,21 +379,3 @@ def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
             "SELECT * FROM work_items WHERE task_id = ?", (task_id,)
         ).fetchone()
     return (dict(result) if result is not None else None), publish_session
-
-
-def update(task_id: str, **changes: object) -> dict | None:
-    task, _publish_session = mutate(task_id, **changes)
-    return task
-
-
-def attach_session(task_id: str, session_id: str, provider: str) -> dict | None:
-    """Link the session created by a queued task's Start action."""
-    clean_session = _text(session_id, "session_id", limit=500, required=True)
-    clean_provider = _provider(provider)
-    with _conn() as conn:
-        cursor = conn.execute(
-            "UPDATE work_items SET session_id = ?, session_provider = ?, updated_at = ? "
-            "WHERE task_id = ?",
-            (clean_session, clean_provider, time.time(), task_id),
-        )
-    return get(task_id) if cursor.rowcount else None

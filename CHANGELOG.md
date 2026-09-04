@@ -8,14 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- **Local Agent Board work queue.** `claude-browse --web` now opens a
-  ClickUp-inspired Today / All-by-project task view beside Thread History.
-  Save a thread or add standalone work, edit its name/due date/status inline,
-  and open Claude or CodeX in a new Terminal window with the provider's
-  explicit full-access flag. Git-origin project grouping, safe command copy,
-  cross-provider transcript handoff, request-token protection, and automatic
-  linking of newly started sessions are included without adding a hosted PM
-  service or uploading transcripts.
+- **Automatic terminal-thread work board.** Every hook-observed Claude or
+  CodeX session now becomes one row without Add or Save. The dense local Work
+  list opens to Active and includes Today, By Project, and Done & Archived,
+  with separate Work status and Terminal state columns, persistent names and
+  due dates, and Git-origin/folder grouping that retains the exact launch cwd.
+  Done soft-reopens only on a new prompt; Archived requires manual restoration.
+  Read-only Thread History remains available beside Work.
+- **Guarded provider launches from Work and History.** One Full access toggle,
+  on by default, controls Claude and CodeX; turning it off uses safe mode.
+  Same-provider actions use native guarded resume, while cross-provider actions
+  create a recent-context continuation and a new captured row. Missing local
+  prerequisites disable only the affected action. Host checks, JSON-only
+  writes, request-token protection, CSP, server-built commands, and argv-safe
+  AppleScript remain enforced.
+- **Local-only planning metadata.** Work status, due dates, archive state, and
+  transcripts stay on the Mac. Cross-Mac Work metadata and Mission Control
+  rendering remain deferred; the existing optional sync continues to project
+  live status only.
 - **Dedicated Agent Board notification identity.** `./install.sh` builds a
   small native `Agent Board Notifier.app`, allowing just Agent Board through a
   macOS Focus instead of allowing every Script Editor alert. The existing

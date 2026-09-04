@@ -63,3 +63,24 @@ def test_readme_documents_experimental_external_providers():
     assert "--list-providers" in text
     assert "PROVIDER_API_VERSION" in text
     assert "experimental" in text.lower()
+
+
+def test_readme_documents_automatic_session_backed_work_board():
+    text = " ".join(_readme_text().split())
+    assert "Every hook-observed Claude or CodeX terminal session becomes one work row" in text
+    assert "Active, Today, By Project, and Done & Archived" in text
+    assert "Work status" in text
+    assert "Terminal state" in text
+    assert "Done returns to Active only when that same session receives a new prompt" in text
+    assert "Archived stays archived until you manually restore it" in text
+    assert "Full access" in text
+    assert "on by default" in text
+    assert "same-provider action uses the native guarded resume policy" in text
+    assert "cross-provider action starts a new context and therefore a new work row" in text
+    assert "CSRF and DNS-rebinding control" in text
+    assert "same-user local processes are trusted" in text
+    assert "Work metadata, due dates, archive state, and transcripts remain local" in text
+    assert "Cross-Mac work metadata and Mission Control rendering are deferred" in text
+    assert "Add a standalone task" not in text
+    assert "save an existing thread" not in text
+    assert "POST /api/tasks` | Add" not in text

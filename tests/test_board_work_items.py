@@ -18,44 +18,41 @@ def fresh_store(tmp_path, monkeypatch):
     projects.resolve_project.cache_clear()
 
 
-def test_work_item_crud_and_done_filter(tmp_path):
+def test_session_work_item_mutation_and_done_filter(tmp_path):
     store.upsert("crud-session", cwd=str(tmp_path), name="Plan release", provider="claude")
-    task = work_items.create(
-        title="Plan release",
-        project_path=tmp_path,
-        due_date="2026-09-05",
-        provider="claude",
-        session_id="crud-session",
-    )
+    task = work_items.ensure_for_session(store.get("crud-session"))
     assert task["project_name"] == tmp_path.name
     assert task["status"] == "active"
     assert [row["task_id"] for row in work_items.list_items()] == [task["task_id"]]
 
-    done = work_items.update(task["task_id"], title="Release", status="done")
+    done, _publish_session = work_items.mutate(
+        task["task_id"], title="Release", due_date="2026-09-05", status="done"
+    )
     assert done["title"] == "Release"
+    assert done["due_date"] == "2026-09-05"
     assert done["completed_at"] is not None
     assert work_items.list_items() == []
     assert work_items.list_items(include_done=True)[0]["task_id"] == task["task_id"]
 
 
-def test_work_item_validation_and_one_task_per_session(tmp_path):
+def test_work_item_mutation_validation_and_one_task_per_session(tmp_path):
+    store.upsert("validation", cwd=str(tmp_path), name="Validate", provider="claude")
+    task = work_items.ensure_for_session(store.get("validation"))
     with pytest.raises(ValueError, match="title is required"):
-        work_items.create(title="", project_path=tmp_path, session_id="validation")
+        work_items.mutate(task["task_id"], title="")
     with pytest.raises(ValueError, match="YYYY-MM-DD"):
-        work_items.create(title="x", project_path=tmp_path, due_date="tomorrow", session_id="date-1")
+        work_items.mutate(task["task_id"], due_date="tomorrow")
     with pytest.raises(ValueError, match="YYYY-MM-DD"):
-        work_items.create(title="x", project_path=tmp_path, due_date="20260905", session_id="date-2")
+        work_items.mutate(task["task_id"], due_date="20260905")
     with pytest.raises(ValueError, match="YYYY-MM-DD"):
-        work_items.create(title="x", project_path=tmp_path, due_date="2026-W36-6", session_id="date-3")
+        work_items.mutate(task["task_id"], due_date="2026-W36-6")
     with pytest.raises(ValueError, match="status must"):
-        work_items.create(title="x", project_path=tmp_path, status="urgent", session_id="status")
+        work_items.mutate(task["task_id"], status="urgent")
+    with pytest.raises(ValueError, match="unknown field"):
+        work_items.mutate(task["task_id"], provider="codex")
 
-    work_items.create(title="first", project_path=tmp_path, session_id="sid")
-    with pytest.raises(ValueError, match="already in"):
-        work_items.create(title="again", project_path=tmp_path, session_id="sid")
-    linked = work_items.get_for_session("sid")
-    with pytest.raises(ValueError, match="cannot change"):
-        work_items.update(linked["task_id"], provider="codex")
+    same = work_items.ensure_for_session(store.get("validation"))
+    assert same["task_id"] == task["task_id"]
 
 
 def test_project_groups_git_subfolders_by_origin(tmp_path):
@@ -194,11 +191,6 @@ def test_direct_session_cross_provider_requires_transcript(tmp_path, monkeypatch
         commands.launch_direct_session("hook-only", "codex", full_access=True)
 
 
-def test_sessionless_creation_is_rejected(tmp_path):
-    with pytest.raises(ValueError, match="session_id is required"):
-        work_items.create(title="new", project_path=tmp_path, provider="claude")
-
-
 def test_cross_provider_continuation_preserves_recent_context(tmp_path, monkeypatch):
     import claude_browse.browse as browse
 
@@ -244,7 +236,7 @@ def test_session_start_hook_automatically_creates_one_thread_row(tmp_path):
     assert created["session_cwd"] == str(tmp_path)
 
     # A later hook changes runtime state but never overwrites user metadata.
-    work_items.update(created["task_id"], title="My renamed thread", due_date="2026-09-07")
+    work_items.mutate(created["task_id"], title="My renamed thread", due_date="2026-09-07")
     hook.dispatch(
         {"hook_event_name": "UserPromptSubmit", "session_id": "created-session", "cwd": str(tmp_path), "prompt": "new prompt"},
         provider="codex",
@@ -295,7 +287,7 @@ def test_hook_lifecycle_only_prompt_reactivates_done_and_never_archived(tmp_path
             {"hook_event_name": "SessionStart", "session_id": session_id, "cwd": str(tmp_path)}
         )
         item = work_items.get_for_session(session_id)
-        work_items.update(item["task_id"], status=closed_status)
+        work_items.mutate(item["task_id"], status=closed_status)
 
         hook.dispatch({"hook_event_name": "SessionStart", "session_id": session_id, "cwd": str(tmp_path)})
         assert work_items.get_for_session(session_id)["status"] == closed_status
@@ -317,7 +309,7 @@ def test_stop_on_closed_work_finishes_runtime_without_unattended_alert(tmp_path,
         {"hook_event_name": "SessionStart", "session_id": "closed", "cwd": str(tmp_path)}
     )
     item = work_items.get_for_session("closed")
-    work_items.update(item["task_id"], status="done")
+    work_items.mutate(item["task_id"], status="done")
     store.upsert("closed", state="working", working_since=time.time() - 5)
     notifications = []
     monkeypatch.setattr(hook.notify, "notify", lambda *args: notifications.append(args))

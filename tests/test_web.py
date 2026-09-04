@@ -359,9 +359,9 @@ def test_board_normalizes_today_states_actions_and_order(web_server, monkeypatch
     _board_thread("attention", cwd=tempfile.gettempdir(), name="Attention")
     future = _board_thread("future", cwd=tempfile.gettempdir(), name="Future")
     closed = _board_thread("closed", cwd=tempfile.gettempdir(), name="Closed")
-    work_items.update(overdue["task_id"], due_date=(today - timedelta(days=1)).isoformat())
-    work_items.update(future["task_id"], due_date=(today + timedelta(days=1)).isoformat())
-    work_items.update(closed["task_id"], status="done")
+    work_items.mutate(overdue["task_id"], due_date=(today - timedelta(days=1)).isoformat())
+    work_items.mutate(future["task_id"], due_date=(today + timedelta(days=1)).isoformat())
+    work_items.mutate(closed["task_id"], status="done")
     store.upsert("attention", state="needs-input")
     store.heartbeat("attention")
 

@@ -264,7 +264,7 @@ def test_paused_automatic_namer_cannot_overwrite_manual_rename(tmp_path, monkeyp
 
     def compute_then_rename(session_id, info=None):
         item = work_items.get_for_session(session_id)
-        work_items.update(item["task_id"], title="user canonical title")
+        work_items.mutate(item["task_id"], title="user canonical title")
         return "late automatic title"
 
     monkeypatch.setattr(naming, "compute_name", compute_then_rename)
