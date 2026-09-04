@@ -32,7 +32,6 @@ from pathlib import Path
 
 from claude_browse.board import notify, store
 
-_NOTIFY_AFTER_S = 60
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENTRY_SCRIPT = _REPO_ROOT / "agent-board"
 _REPO_VENV_PYTHON = _REPO_ROOT / ".venv" / "bin" / "python"
@@ -49,8 +48,7 @@ def _unattended_min_turn_s() -> float:
     guard against is already bounded downstream: the sweep only pings once a
     completion has sat unattended for 10 minutes, pings at most twice, and
     a new prompt or an ack clears it. Env-tunable (seconds)
-    for anyone who does want a floor; unrelated to _NOTIFY_AFTER_S, which
-    gates only the local banner."""
+    for anyone who does want a floor."""
     raw = os.environ.get("AGENT_BOARD_UNATTENDED_MIN_TURN_S", "").strip()
     try:
         value = float(raw) if raw else 0.0
@@ -77,7 +75,7 @@ _IGNORED_NOTIFICATION_TYPES = {
     "auth_success",
     "elicitation_complete",
     "elicitation_response",
-    "agent_completed",  # Stop already covers completion via the duration gate
+    "agent_completed",  # Stop already covers completion
 }
 
 
@@ -293,20 +291,25 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
 
     elif event == "Stop":
         working_since = row.get("working_since") if row else None
-        _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
         turn_s = (time.time() - working_since) if working_since else 0.0
-        # Commit the completion before making its alert consumable. A sync
-        # worker may read pending_alert immediately, and must never observe a
-        # "done" alert whose done_at has not been written yet.
-        if working_since and turn_s >= _unattended_min_turn_s():
-            store.mark_done(session_id, turn_s)
-        if working_since and turn_s > _NOTIFY_AFTER_S:
+        if working_since:
+            if not store.finish_turn(
+                session_id,
+                working_since,
+                turn_s,
+                cwd=cwd,
+                host=_hostname(),
+                model_label=model_label or None,
+                mark_unattended=turn_s >= _unattended_min_turn_s(),
+            ):
+                # A duplicate Stop or a Stop for a superseded turn must not
+                # replay the banner or overwrite a newer prompt's state.
+                return False
+        else:
+            _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
+        if working_since:
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify(_notify_title("done", cwd, model_label), _notify_body(name, cwd))
-            # Same trigger as the local notification, so the async sync hook
-            # knows to post a fresh Slack message too -- chat.update alone
-            # doesn't re-notify Slack channel members (see sync.post_alert).
-            store.set_pending_alert(session_id, "done")
         return True
 
     elif event == "Notification" or event in _NEEDS_INPUT_EVENTS:

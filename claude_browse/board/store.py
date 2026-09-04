@@ -220,6 +220,51 @@ def set_state(
     upsert(session_id, **fields)
 
 
+def finish_turn(
+    session_id: str,
+    working_since: float,
+    turn_s: float,
+    *,
+    cwd: str | None,
+    host: str,
+    model_label: str | None = None,
+    mark_unattended: bool = True,
+) -> bool:
+    """Atomically commit the exact in-flight turn and its alert marker.
+
+    The compare-and-swap makes duplicate or stale Stop events harmless. If a
+    newer prompt replaced ``working_since``, its working state is preserved.
+    """
+    now = time.time()
+    with get_conn() as conn:
+        cursor = conn.execute(
+            "UPDATE sessions SET state = 'idle', working_since = NULL, "
+            "cwd = COALESCE(?, cwd), host = ?, "
+            "model_label = COALESCE(?, model_label), heartbeat_at = ?, updated_at = ?, "
+            "done_at = CASE WHEN ? THEN ? ELSE done_at END, "
+            "done_turn_s = CASE WHEN ? THEN ? ELSE done_turn_s END, "
+            "acked_at = CASE WHEN ? THEN NULL ELSE acked_at END, "
+            "pending_alert = 'done', "
+            "pending_alert_revision = COALESCE(sync_revision, 0) + 1 "
+            "WHERE session_id = ? AND working_since IS ?",
+            (
+                cwd,
+                host,
+                model_label,
+                now,
+                now,
+                mark_unattended,
+                now,
+                mark_unattended,
+                float(turn_s),
+                mark_unattended,
+                session_id,
+                working_since,
+            ),
+        )
+    return cursor.rowcount == 1
+
+
 def heartbeat(session_id: str) -> None:
     with get_conn() as conn:
         conn.execute(
@@ -333,7 +378,7 @@ def provider_of(row: dict | None) -> str:
 
 
 def mark_done(session_id: str, turn_s: float) -> None:
-    """Record that a long turn just finished and nobody has come back yet."""
+    """Record that a turn just finished and nobody has come back yet."""
     upsert(session_id, done_at=time.time(), done_turn_s=float(turn_s), acked_at=None)
 
 
@@ -348,7 +393,7 @@ def ack(session_id: str) -> None:
 
 
 def is_unattended(row: dict | None, *, now: float | None = None) -> bool:
-    """True when a long turn finished and the user has neither prompted
+    """True when a turn finished and the user has neither prompted
     again nor acknowledged it. Ended sessions still count: a run that
     finished and whose terminal was closed is exactly the thread the user
     is most likely to forget. 'working' never counts (a new turn is in

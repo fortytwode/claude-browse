@@ -28,8 +28,8 @@ def test_applescript_quote_keeps_emoji_literal_not_json_escaped():
 
 
 @pytest.mark.skipif(
-    shutil.which("osascript") is None,
-    reason="osascript is macOS-only; notify.notify degrades silently elsewhere",
+    shutil.which("osascript") is None or notify._notifications_disabled(),
+    reason="real notification smoke test is disabled or osascript is unavailable",
 )
 def test_notify_with_emoji_title_produces_valid_applescript_real_osascript_call():
     """Regression test for the confirmed bug: real (non-mocked) osascript
@@ -44,6 +44,8 @@ def test_notify_with_emoji_title_produces_valid_applescript_real_osascript_call(
 
 
 def test_notify_never_raises_when_osascript_missing(monkeypatch):
+    monkeypatch.delenv("AGENT_BOARD_DISABLE_NOTIFICATIONS", raising=False)
+
     def _raise(*args, **kwargs):
         raise FileNotFoundError("no osascript")
 
@@ -52,6 +54,7 @@ def test_notify_never_raises_when_osascript_missing(monkeypatch):
 
 
 def test_notify_includes_sound_in_the_generated_script(monkeypatch):
+    monkeypatch.delenv("AGENT_BOARD_DISABLE_NOTIFICATIONS", raising=False)
     captured = {}
 
     def _fake_run(cmd, **kwargs):
@@ -68,9 +71,19 @@ def test_notify_includes_sound_in_the_generated_script(monkeypatch):
     assert 'sound name "default"' in captured["script"]
 
 
+def test_notify_can_be_disabled_for_noninteractive_runs(monkeypatch):
+    calls = []
+    monkeypatch.setenv("AGENT_BOARD_DISABLE_NOTIFICATIONS", "1")
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: calls.append(args))
+
+    notify.notify("done", "test thread")
+
+    assert calls == []
+
+
 @pytest.mark.skipif(
-    shutil.which("osascript") is None,
-    reason="osascript is macOS-only; notify.notify degrades silently elsewhere",
+    shutil.which("osascript") is None or notify._notifications_disabled(),
+    reason="real notification smoke test is disabled or osascript is unavailable",
 )
 def test_notify_with_sound_real_osascript_call_exits_zero():
     """Real (non-mocked) call through the actual notify() function, matching

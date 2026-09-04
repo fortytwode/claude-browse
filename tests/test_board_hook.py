@@ -38,15 +38,12 @@ def test_stop_after_long_run_sets_idle_and_notifies(tmp_path, monkeypatch):
 def test_stop_records_completion_before_exposing_done_alert(tmp_path, monkeypatch):
     """A publisher consuming the alert must already see completion metadata."""
     _fresh_store(tmp_path, monkeypatch)
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
-    original_set_pending_alert = store.set_pending_alert
-    row_when_alert_was_set = []
-
-    def capture_completion_order(session_id, kind):
-        row_when_alert_was_set.append(store.get(session_id))
-        original_set_pending_alert(session_id, kind)
-
-    monkeypatch.setattr(store, "set_pending_alert", capture_completion_order)
+    row_when_notified = []
+    monkeypatch.setattr(
+        hook.notify,
+        "notify",
+        lambda title, msg: row_when_notified.append(store.get("s-ordered")),
+    )
     store.upsert(
         "s-ordered",
         host="air",
@@ -59,8 +56,9 @@ def test_stop_records_completion_before_exposing_done_alert(tmp_path, monkeypatc
         {"hook_event_name": "Stop", "session_id": "s-ordered", "cwd": "/tmp/proj"}
     )
 
-    assert row_when_alert_was_set[0]["done_at"] is not None
-    assert row_when_alert_was_set[0]["done_turn_s"] >= 60
+    assert row_when_notified[0]["done_at"] is not None
+    assert row_when_notified[0]["done_turn_s"] >= 60
+    assert row_when_notified[0]["pending_alert"] == "done"
 
 
 def test_stop_refreshes_heartbeat(tmp_path, monkeypatch):
@@ -82,7 +80,7 @@ def test_stop_refreshes_heartbeat(tmp_path, monkeypatch):
     assert store.display_state(row) == "idle"  # not 'gone', despite the stale heartbeat_at set above
 
 
-def test_stop_after_short_run_sets_idle_no_notify(tmp_path, monkeypatch):
+def test_stop_after_short_run_sets_idle_and_notifies(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
@@ -92,8 +90,114 @@ def test_stop_after_short_run_sets_idle_no_notify(tmp_path, monkeypatch):
     hook.dispatch({"hook_event_name": "Stop", "session_id": "s2", "cwd": "/tmp/proj"})
 
     assert store.get("s2")["state"] == "idle"
+    assert len(calls) == 1
+    assert "my-thread" in calls[0][1]
+    assert store.get("s2")["pending_alert"] == "done"
+
+
+def test_duplicate_stop_notifies_only_once(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+
+    store.upsert(
+        "s-duplicate-stop",
+        host="air",
+        cwd="/tmp/proj",
+        state="working",
+        working_since=time.time() - 8,
+        name="my-thread",
+    )
+    payload = {
+        "hook_event_name": "Stop",
+        "session_id": "s-duplicate-stop",
+        "cwd": "/tmp/proj",
+    }
+
+    hook.dispatch(payload)
+    first_done_at = store.get("s-duplicate-stop")["done_at"]
+    hook.dispatch(payload)
+
+    row = store.get("s-duplicate-stop")
+    assert len(calls) == 1
+    assert row["working_since"] is None
+    assert row["done_at"] == first_done_at
+
+
+def test_stale_stop_does_not_overwrite_a_newer_prompt(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    original_finish_turn = store.finish_turn
+    old_start = time.time() - 8
+    new_start = time.time()
+    store.upsert(
+        "s-stale-stop",
+        host="air",
+        cwd="/tmp/proj",
+        state="working",
+        working_since=old_start,
+        name="my-thread",
+    )
+
+    def prompt_arrives_before_stop_commits(session_id, working_since, turn_s, **fields):
+        store.upsert(session_id, state="working", working_since=new_start)
+        return original_finish_turn(session_id, working_since, turn_s, **fields)
+
+    monkeypatch.setattr(store, "finish_turn", prompt_arrives_before_stop_commits)
+
+    mutated = hook.dispatch(
+        {
+            "hook_event_name": "Stop",
+            "session_id": "s-stale-stop",
+            "cwd": "/tmp/proj",
+        }
+    )
+
+    row = store.get("s-stale-stop")
+    assert mutated is False
+    assert row["state"] == "working"
+    assert row["working_since"] == new_start
+    assert row["done_at"] is None
     assert calls == []
-    assert store.get("s2")["pending_alert"] is None  # short run -- no alert warranted
+
+
+def test_new_prompt_after_stop_commit_clears_completion_metadata(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert(
+        "s-prompt-after-stop",
+        host="air",
+        cwd="/tmp/proj",
+        state="working",
+        working_since=time.time() - 8,
+        name="my-thread",
+    )
+
+    def prompt_arrives_while_banner_is_delivered(title, message):
+        hook.dispatch(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "s-prompt-after-stop",
+                "cwd": "/tmp/proj",
+                "prompt": "continue immediately",
+            }
+        )
+
+    monkeypatch.setattr(hook.notify, "notify", prompt_arrives_while_banner_is_delivered)
+
+    hook.dispatch(
+        {
+            "hook_event_name": "Stop",
+            "session_id": "s-prompt-after-stop",
+            "cwd": "/tmp/proj",
+        }
+    )
+
+    row = store.get("s-prompt-after-stop")
+    assert row["state"] == "working"
+    assert row["working_since"] is not None
+    assert row["done_at"] is None
+    assert row["pending_alert"] is None
 
 
 @pytest.mark.parametrize(
@@ -398,6 +502,7 @@ def test_entry_script_end_to_end_working_then_idle_transition(tmp_path, monkeypa
         **__import__("os").environ,
         "AGENT_BOARD_DB_PATH": str(tmp_path / "state.db"),
         "AGENT_BOARD_DISABLE_SYNC": "1",
+        "AGENT_BOARD_DISABLE_NOTIFICATIONS": "1",
     }
 
     start_payload = json.dumps({
@@ -614,13 +719,13 @@ def test_every_completed_turn_marks_done_regardless_of_length(tmp_path, monkeypa
     row = store.get("long")
     assert store.is_unattended(row) is True
     assert 399 < row["done_turn_s"] < 405
-    assert row["pending_alert"] == "done"  # banner path unchanged (>60s)
+    assert row["pending_alert"] == "done"
 
     store.upsert("short", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 10)
     hook.dispatch({"hook_event_name": "Stop", "session_id": "short", "cwd": "/tmp/p"})
     row = store.get("short")
     assert store.is_unattended(row) is True
-    assert row["pending_alert"] is None  # <60s: no banner, but still waiting on you
+    assert row["pending_alert"] == "done"  # every completed turn notifies
 
     # No prompt ever sent (no working_since): nothing completed, nothing waits.
     store.upsert("never", host="air", cwd="/tmp/p", state="idle")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 
@@ -18,6 +19,12 @@ def _applescript_quote(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _notifications_disabled() -> bool:
+    return os.environ.get("AGENT_BOARD_DISABLE_NOTIFICATIONS", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def notify(title: str, message: str) -> None:
     """Fire a native macOS notification with sound.
 
@@ -30,6 +37,9 @@ def notify(title: str, message: str) -> None:
     programmatically -- see README's Agent Board section for how to enable
     it for whichever app ends up registered as the notification sender.
     """
+    if _notifications_disabled():
+        return
+
     try:
         script = (
             f"display notification {_applescript_quote(message)} "
