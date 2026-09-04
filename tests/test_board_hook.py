@@ -260,7 +260,15 @@ def test_main_spawns_sync_after_committing_user_prompt(tmp_path, monkeypatch):
 
     def _observe_spawn(session_id):
         row = store.get(session_id)
-        observed.append((session_id, row["state"], row["done_at"], row["done_turn_s"]))
+        observed.append(
+            (
+                session_id,
+                row["state"],
+                row["done_at"],
+                row["done_turn_s"],
+                row["sync_revision"],
+            )
+        )
 
     monkeypatch.setattr(hook, "_spawn_sync", _observe_spawn)
     monkeypatch.setattr(sys, "argv", ["agent-board", "hook"])
@@ -275,7 +283,7 @@ def test_main_spawns_sync_after_committing_user_prompt(tmp_path, monkeypatch):
         hook.main()
 
     assert exc_info.value.code == 0
-    assert observed == [("s-publish", "working", None, None)]
+    assert observed == [("s-publish", "working", None, None, 1)]
 
 
 @pytest.mark.parametrize(
@@ -493,6 +501,38 @@ def test_codex_permission_request_maps_to_needs_input(tmp_path, monkeypatch):
     assert row["state"] == "needs-input"
     assert row["pending_alert"] == "needs-input"
     assert calls == [("[team-operations] Codex needs input", "deploy sweep")]
+
+
+def test_codex_interrupt_returns_to_idle_without_marking_done(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    store.upsert(
+        "c-interrupt",
+        host="air",
+        cwd="/Users/me/team-operations",
+        state="working",
+        working_since=time.time() - 120,
+        name="deploy sweep",
+        provider="codex",
+        model_label="Codex",
+    )
+
+    assert hook.dispatch(
+        {
+            "hook_event_name": "Interrupt",
+            "session_id": "c-interrupt",
+            "cwd": "/Users/me/team-operations",
+        },
+        provider="codex",
+    ) is True
+
+    row = store.get("c-interrupt")
+    assert row["state"] == "idle"
+    assert row["done_at"] is None
+    assert row["pending_alert"] is None
+    assert store.is_unattended(row) is False
+    assert calls == []
 
 
 def test_every_completed_turn_marks_done_regardless_of_length(tmp_path, monkeypatch):

@@ -136,25 +136,16 @@ def test_push_never_raises_when_client_construction_fails(tmp_path, monkeypatch)
     assert sync.push("s3") is False  # must not raise
 
 
-def test_push_serializes_workers_and_latest_local_state_wins(tmp_path, monkeypatch):
-    monkeypatch.setattr(sync, "_PUBLICATION_LOCK_PATH", tmp_path / "publication.lock")
-    monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
-    monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)
-    local_rows = {
-        "s-race": {
-            "session_id": "s-race", "host": "air", "cwd": "/tmp/proj",
-            "state": "idle", "name": "thread", "provider": "claude",
-        }
-    }
-    reads = []
-
-    def _read_local(session_id):
-        row = local_rows.get(session_id)
-        reads.append((session_id, row["state"] if row else None))
-        return dict(row) if row else None
-
-    monkeypatch.setattr(store, "get", _read_local)
-    monkeypatch.setattr(store, "active", lambda: [dict(row) for row in local_rows.values()])
+def test_push_serializes_workers_and_drains_only_dirty_sessions(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    _quiet(monkeypatch)
+    store.upsert(
+        "s-race", host="air", cwd="/tmp/proj", state="idle", name="thread"
+    )
+    store.mark_sync_pending("s-race")
+    store.upsert(
+        "historical", host="air", cwd="/tmp/old", state="idle", name="old"
+    )
 
     first_write_started = threading.Event()
     release_first_write = threading.Event()
@@ -202,29 +193,116 @@ def test_push_serializes_workers_and_latest_local_state_wins(tmp_path, monkeypat
     first.start()
     assert first_write_started.wait(timeout=5)
 
-    local_rows["s-race"].update(state="working", done_at=None, done_turn_s=None)
+    store.upsert("s-race", state="working", done_at=None, done_turn_s=None)
+    store.mark_sync_pending("s-race")
     second = threading.Thread(target=lambda: results.append(sync.push("s-race", coalesce=True)))
     second.start()
     assert waiter_started_waiting.wait(timeout=5)
 
     # A third hook worker collapses into the existing waiter immediately,
     # rather than joining an unbounded queue behind a stalled backend.
-    local_rows["s-other"] = {
-        "session_id": "s-other", "host": "air", "cwd": "/tmp/other",
-        "state": "needs-input", "name": "other", "provider": "claude",
-    }
+    store.upsert(
+        "s-other", host="air", cwd="/tmp/other", state="needs-input", name="other"
+    )
+    store.mark_sync_pending("s-other")
     assert sync.push("s-other", coalesce=True) is False
     assert len(writes) == 1
-    assert reads == [("s-race", "idle"), ("s-race", "idle")]
     release_first_write.set()
     first.join(timeout=5)
     second.join(timeout=5)
 
     assert not first.is_alive() and not second.is_alive()
     assert results == [True, True]
-    assert [doc["state"] for doc in writes] == ["idle", "working", "needs-input"]
+    assert writes[0]["state"] == "idle"
+    assert {doc["state"] for doc in writes[1:]} == {"working", "needs-input"}
+    assert all(doc["session_id"] != "historical" for doc in writes)
     assert client.sink["air:s-race"]["state"] == "working"
     assert client.sink["air:s-other"]["state"] == "needs-input"
+
+
+def test_publish_does_not_post_or_clear_newer_same_kind_alert(
+    tmp_path, monkeypatch
+):
+    _fresh_store(tmp_path, monkeypatch)
+    _quiet(monkeypatch)
+    store.upsert(
+        "s-alert-race",
+        host="air",
+        cwd="/tmp/proj",
+        state="needs-input",
+        name="thread",
+        pending_alert="needs-input",
+    )
+    old_revision = store.mark_sync_pending("s-alert-race")
+    write_started = threading.Event()
+    release_write = threading.Event()
+
+    class BlockingDocRef(_FakeDocRef):
+        def set(self, data, merge=False):
+            write_started.set()
+            assert release_write.wait(timeout=5)
+            super().set(data, merge=merge)
+
+    class BlockingCollection(_FakeCollection):
+        def document(self, doc_id):
+            return BlockingDocRef(self.sink, doc_id)
+
+    class BlockingClient(_FakeClient):
+        def collection(self, name):
+            assert name == sync.COLLECTION
+            return BlockingCollection(self.sink)
+
+    monkeypatch.setattr(sync, "_firestore_client", lambda: BlockingClient())
+    alerts = []
+    monkeypatch.setattr(sync, "post_alert", lambda *a, **k: alerts.append((a, k)))
+
+    worker = threading.Thread(target=lambda: sync.push("s-alert-race"))
+    worker.start()
+    assert write_started.wait(timeout=5)
+
+    # A newer transition creates the same alert kind while Firestore is blocked.
+    # The old snapshot must neither emit it nor clear it.
+    store.set_pending_alert("s-alert-race", "needs-input")
+    new_revision = store.mark_sync_pending("s-alert-race")
+    assert new_revision > old_revision
+    release_write.set()
+    worker.join(timeout=5)
+
+    row = store.get("s-alert-race")
+    assert not worker.is_alive()
+    assert alerts == []
+    assert row["pending_alert"] == "needs-input"
+    assert row["pending_alert_revision"] == new_revision
+    assert row["published_revision"] == old_revision
+    assert [r["session_id"] for r in store.pending_sync()] == ["s-alert-race"]
+
+
+def test_drain_continues_after_one_session_publish_fails(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    for session_id in ("a", "b", "c"):
+        store.upsert(session_id, host="air", state="idle")
+        store.mark_sync_pending(session_id)
+
+    calls = []
+
+    def _publish(session_id):
+        calls.append(session_id)
+        if session_id == "b":
+            raise RuntimeError("backend rejected b")
+        return True
+
+    monkeypatch.setattr(sync, "_publish_session", _publish)
+    monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)
+    monkeypatch.setattr(sync, "render_slack_body", lambda: "board")
+
+    @__import__("contextlib").contextmanager
+    def _drain_lock(*, coalesce=False):
+        yield "drain"
+
+    monkeypatch.setattr(sync, "_publication_lock", _drain_lock)
+
+    assert sync.push("a", coalesce=True) is True
+    assert calls == ["a", "b", "c"]
 
 
 def test_uncontended_coalesced_push_publishes_only_requested_session(

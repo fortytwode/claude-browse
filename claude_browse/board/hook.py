@@ -1,7 +1,7 @@
 """Claude Code / Codex hook dispatcher.
 
 Entry point for SessionStart / UserPromptSubmit / Stop / Notification /
-PermissionRequest / SessionEnd. Must never break a session: every path
+PermissionRequest / Interrupt / SessionEnd. Must never break a session: every path
 through main() exits 0, and all local work is synchronous SQLite (fast).
 After a recognized event commits locally, main launches a detached
 `agent-board sync push <session-id>` worker. Network work never blocks the
@@ -16,7 +16,8 @@ NOT say is which CLI sent it, so the hook is registered as
 `agent-board hook` (Claude) in ~/.claude/settings.json; the provider is
 stored on the row and drives every resume command downstream. Codex has no
 `Notification` event; its blocked-on-you signal is `PermissionRequest`,
-which maps to the same needs-input state.
+which maps to the same needs-input state. Its `Interrupt` event returns an
+active turn to idle without treating the interrupted turn as completed.
 """
 
 from __future__ import annotations
@@ -312,6 +313,25 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             return True
         return False
 
+    elif event == "Interrupt" and provider == "codex":
+        # An interrupted turn did not complete, so it must not appear in the
+        # unattended queue or emit the same alerts as Stop. Clear any older
+        # completion metadata defensively in case a partial event sequence
+        # arrives after a resumed session.
+        store.upsert(
+            session_id,
+            host=_hostname(),
+            cwd=cwd,
+            state="idle",
+            provider=provider,
+            done_at=None,
+            done_turn_s=None,
+            pending_alert=None,
+            **({"model_label": model_label} if model_label else {}),
+        )
+        store.heartbeat(session_id)
+        return True
+
     elif event == "SessionEnd":
         # done_at deliberately survives SessionEnd, however the session ended
         # (/exit, /clear, a killed window): a finished turn you have not come
@@ -355,7 +375,9 @@ def main() -> None:
         raw = sys.stdin.read()
         payload = json.loads(raw)
         if dispatch(payload, provider=provider):
-            _spawn_sync(str(payload["session_id"]))
+            session_id = str(payload["session_id"])
+            store.mark_sync_pending(session_id)
+            _spawn_sync(session_id)
     except Exception:
         pass
     finally:

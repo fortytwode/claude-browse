@@ -247,6 +247,7 @@ def _publish_session(session_id: str) -> bool:
 
     naming.maybe_name(session_id)
     row = store.get(session_id) or row  # re-read in case the name just upgraded
+    observed_revision = int(row.get("sync_revision") or 0)
 
     host = row.get("host") or "unknown-host"
     doc_id = f"{host}:{session_id}"
@@ -259,10 +260,20 @@ def _publish_session(session_id: str) -> bool:
 
     pending_alert = row.get("pending_alert")
     if pending_alert:
+        # Firestore I/O above may have taken seconds. Consume only the exact
+        # marker in the snapshot we wrote; if a newer transition replaced it
+        # (even with the same kind), leave that marker for the next worker.
+        alert_row = store.consume_pending_alert(
+            session_id, pending_alert, row.get("pending_alert_revision")
+        )
+        if alert_row is None:
+            store.mark_sync_published(session_id, observed_revision)
+            return True
         try:
             is_current = (
-                pending_alert == "needs-input" and row.get("state") == "needs-input"
-            ) or (pending_alert == "done" and store.is_unattended(row))
+                pending_alert == "needs-input"
+                and alert_row.get("state") == "needs-input"
+            ) or (pending_alert == "done" and store.is_unattended(alert_row))
             if not is_current:
                 _log(
                     f"skipped superseded {pending_alert} alert "
@@ -272,10 +283,10 @@ def _publish_session(session_id: str) -> bool:
                 post_alert(
                     session_id,
                     pending_alert,
-                    row.get("name") or session_id,
-                    folder=os.path.basename(row.get("cwd") or "") or None,
-                    model_label=row.get("model_label") or None,
-                    provider=store.provider_of(row),
+                    alert_row.get("name") or session_id,
+                    folder=os.path.basename(alert_row.get("cwd") or "") or None,
+                    model_label=alert_row.get("model_label") or None,
+                    provider=store.provider_of(alert_row),
                 )
             else:
                 _log(
@@ -284,8 +295,7 @@ def _publish_session(session_id: str) -> bool:
                 )
         except Exception as exc:
             _log(f"post_alert failed for session_id={session_id}: {exc}")
-        finally:
-            store.clear_pending_alert(session_id)
+    store.mark_sync_published(session_id, observed_revision)
     return True
 
 
@@ -301,20 +311,24 @@ def push(session_id: str, *, coalesce: bool = False) -> bool:
                 return False
 
             # A waiter represents every hook worker that collapsed behind it,
-            # including events from other sessions. Refresh all visible local
-            # rows so none of those session-specific transitions are lost.
+            # including events from other sessions. The durable revision
+            # watermarks identify exactly which sessions still need work;
+            # scanning active() here would republish years of historical rows.
             session_ids = [session_id]
             if publication_mode == "drain":
-                session_ids.extend(
-                    str(row["session_id"])
-                    for row in store.active()
-                    if str(row["session_id"]) != session_id
-                )
+                session_ids = [str(row["session_id"]) for row in store.pending_sync()]
 
             requested_published = False
             published_any = False
             for queued_session_id in session_ids:
-                published = _publish_session(queued_session_id)
+                try:
+                    published = _publish_session(queued_session_id)
+                except Exception as exc:
+                    _log(
+                        "session publish failed for "
+                        f"session_id={queued_session_id}: {exc}"
+                    )
+                    continue
                 published_any = published_any or published
                 if queued_session_id == session_id:
                     requested_published = published
@@ -511,6 +525,7 @@ def ack_main(argv: list[str]) -> int:
     row = matches[0]
     session_id = str(row["session_id"])
     store.ack(session_id)
+    store.mark_sync_pending(session_id)
     push(session_id)
     print(f"acked {row.get('name') or session_id}")
     return 0

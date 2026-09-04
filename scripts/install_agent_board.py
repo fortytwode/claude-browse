@@ -50,10 +50,19 @@ STATUSLINE_CMD = f"{AGENT_BOARD} statusline"
 _CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "Notification", "SessionEnd")
 
 # Codex has no Notification event; PermissionRequest is its blocked-on-you
-# signal (hook.py maps it to needs-input). Event names are PascalCase in
+# signal (hook.py maps it to needs-input), while Interrupt returns an active
+# turn to idle. Event names are PascalCase in
 # ~/.codex/hooks.json exactly as in Claude's settings.json (Codex's hooks
 # engine is Claude-compatible: HooksFile{hooks: {Event: [MatcherGroup]}}).
-_CODEX_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest", "SessionEnd")
+_CODEX_EVENTS = (
+    "SessionStart",
+    "UserPromptSubmit",
+    "Stop",
+    "PermissionRequest",
+    "Interrupt",
+    "SessionEnd",
+)
+_CODEX_THREE_SECOND_EVENTS = {"Interrupt", "SessionEnd"}
 
 
 def _is_our_command(command: str | None) -> bool:
@@ -131,7 +140,8 @@ def _desired_claude(event: str) -> list[dict]:
 
 
 def _desired_codex(event: str) -> list[dict]:
-    return [_entry(CODEX_HOOK_CMD, timeout=3 if event == "SessionEnd" else 10)]
+    timeout = 3 if event in _CODEX_THREE_SECOND_EVENTS else 10
+    return [_entry(CODEX_HOOK_CMD, timeout=timeout)]
 
 
 def _drift(hooks: dict, events: tuple[str, ...], desired_fn) -> list[str]:

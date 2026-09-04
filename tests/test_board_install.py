@@ -40,6 +40,9 @@ def test_fresh_install_wires_one_post_commit_hook_per_event(installer, capsys):
     assert installer.run() == 0
 
     settings = _read(installer._settings_path())
+    assert set(settings["hooks"]) == {
+        "SessionStart", "UserPromptSubmit", "Stop", "Notification", "SessionEnd",
+    }
     for event in ("SessionStart", "UserPromptSubmit", "Stop", "Notification", "SessionEnd"):
         assert settings["hooks"][event] == [{"hooks": [{
             "type": "command", "command": installer.HOOK_CMD, "timeout": 10,
@@ -55,15 +58,17 @@ def test_fresh_install_wires_one_post_commit_hook_per_event(installer, capsys):
     codex = _read(installer._codex_hooks_path())
     assert set(codex) == {"hooks"}
     assert set(codex["hooks"]) == {
-        "SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest", "SessionEnd",
+        "SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest", "Interrupt",
+        "SessionEnd",
     }
     for event in ("SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"):
         assert codex["hooks"][event] == [{"hooks": [{
             "type": "command", "command": installer.CODEX_HOOK_CMD, "timeout": 10,
         }]}]
-    assert codex["hooks"]["SessionEnd"] == [{"hooks": [{
-        "type": "command", "command": installer.CODEX_HOOK_CMD, "timeout": 3,
-    }]}]
+    for event in ("Interrupt", "SessionEnd"):
+        assert codex["hooks"][event] == [{"hooks": [{
+            "type": "command", "command": installer.CODEX_HOOK_CMD, "timeout": 3,
+        }]}]
     assert "sync push" not in json.dumps(settings)
     assert "sync push" not in json.dumps(codex)
     assert "async" not in json.dumps(codex)
@@ -114,6 +119,37 @@ def test_codex_option_drift_is_reported_and_repaired(installer, bad_entry, capsy
     assert codex["hooks"]["Stop"] == [{"hooks": [{
         "type": "command", "command": installer.CODEX_HOOK_CMD, "timeout": 10,
     }]}]
+
+
+def test_codex_interrupt_drift_is_reported_and_repaired_without_changing_claude(
+    installer, capsys
+):
+    installer.run()
+    capsys.readouterr()
+    claude_before = installer._settings_path().read_bytes()
+    path = installer._codex_hooks_path()
+    codex = _read(path)
+    codex["hooks"]["Interrupt"] = [{
+        "matcher": "tool",
+        "hooks": [{
+            "type": "command", "command": installer.CODEX_HOOK_CMD, "timeout": 10,
+        }],
+    }]
+    path.write_text(json.dumps(codex))
+
+    assert installer.run(check_only=True) == 1
+    assert "Interrupt" in capsys.readouterr().out
+    assert installer.run() == 0
+
+    repaired = _read(path)
+    assert repaired["hooks"]["Interrupt"] == [
+        {"matcher": "tool", "hooks": []},
+        {"hooks": [{
+            "type": "command", "command": installer.CODEX_HOOK_CMD, "timeout": 3,
+        }]},
+    ]
+    assert len(_entries(repaired, "Interrupt")) == 1
+    assert installer._settings_path().read_bytes() == claude_before
 
 
 def test_managed_hook_moves_out_of_matcher_but_foreign_matched_group_stays_exact(
