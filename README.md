@@ -383,15 +383,14 @@ you miss the banner entirely -- it never auto-dismisses.
 
 This idempotently wires hooks + a statusLine command into
 `~/.claude/settings.json` and hooks into `~/.codex/hooks.json` (backing
-each up first; safe to re-run), symlinks `agent-board`, disables Claude
+each up before a change; safe to re-run), symlinks `agent-board`, disables Claude
 Code's built-in folderless push notifications so Agent Board is the only
 local alert source, and reports:
 - whether hooks/statusLine were already wired (skips if so)
-- any **stale or duplicate** registrations it removed. The sync hook
-  command embeds the interpreter path, which changes once the board-sync
-  venv exists; the old installer appended the new variant and left the old
-  one, so both fired and every Slack alert posted twice. The installer now
-  replaces stale variants and collapses exact duplicates.
+- any stale, duplicate, matcher-scoped, or option-drifted Agent Board
+  registrations it removed. Foreign hooks and their matcher groups remain
+  untouched. Each lifecycle event ends with one dedicated, matcherless Agent
+  Board hook.
 - the local notification setting (`agentPushNotifEnabled`, kept false to
   avoid duplicate lower-information banners) and how many of your recent
   sessions already have an `ai-title` -- the
@@ -404,17 +403,27 @@ To audit without changing anything (exit 1 on any drift):
 python3 scripts/install_agent_board.py --check
 ```
 
-**Codex.** Codex's hooks engine is Claude-compatible: same event names,
-same stdin envelope (`hook_event_name`, `session_id`, `cwd`, `model`),
-configured in `~/.codex/hooks.json` as `{"hooks": {Event: [...]}}` with
-`timeout_sec`. The installer registers `agent-board hook --provider codex`
+**Codex.** Codex sends the same core stdin envelope
+(`hook_event_name`, `session_id`, `cwd`, `model`) and stores definitions in
+`~/.codex/hooks.json` as `{"hooks": {Event: [...]}}`. Command handlers use
+the `timeout` field. The installer registers `agent-board hook --provider codex`
 on `SessionStart` / `UserPromptSubmit` / `Stop` / `PermissionRequest` /
 `SessionEnd` (Codex has no `Notification` event; `PermissionRequest` is its
 blocked-on-you signal and maps to `needs-input`). The provider is stored on
 the row, so Codex threads get `codex resume <id>` on every surface, never a
-`claude --resume` that cannot open them. Hooks are on by default in current
-Codex releases; if your `~/.codex/config.toml` sets `[features] hooks =
-false` the installer says so. Codex rows keep their prompt-derived name
+`claude --resume` that cannot open them. `SessionEnd` has Codex's maximum
+timeout of 3 seconds; it only commits local state and starts detached,
+nonblocking publication. Every event uses one hook: after the local commit,
+that hook starts a serialized sync worker, avoiding races between sibling
+hook commands.
+
+After a fresh or changed Codex installation, open Codex, run `/hooks`, and
+review/trust the Agent Board definitions. Codex skips new or changed hooks
+until you do this. The installer and `--check` cannot verify trust; `--check`
+validates only hook definitions and the hooks feature configuration. Hooks
+are on by default in current Codex releases; if your `~/.codex/config.toml`
+sets `[features] hooks = false`, `--check` fails and the installer warns
+without editing that file. Codex rows keep their prompt-derived name
 (the Haiku namer reads Claude transcripts only, for now). Pass `--no-codex`
 to skip.
 
@@ -433,7 +442,7 @@ notifications, `aj`) still works fully -- sync just no-ops and logs to
 ```bash
 python3 -m venv .venv
 ./.venv/bin/pip install -e ".[board-sync]"
-./install.sh   # re-run so the sync hooks point at the venv (old variant is removed)
+./install.sh   # re-run so detached publication can use the board-sync venv
 ```
 
 Firestore uses Application Default Credentials (`gcloud auth

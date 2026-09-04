@@ -1,5 +1,4 @@
-"""Tests for scripts/install_agent_board.py: idempotent wiring, dedupe of
-stale/duplicate hook commands, --check, and Codex hooks.json."""
+"""Tests for canonical Claude and Codex Agent Board hook installation."""
 
 from __future__ import annotations
 
@@ -12,6 +11,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "install_agent_board.py"
+README = REPO_ROOT / "README.md"
 
 
 @pytest.fixture
@@ -23,147 +23,190 @@ def installer(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
     (tmp_path / ".codex").mkdir()
-    # Pretend the board-sync venv doesn't exist yet (system python variant).
-    monkeypatch.setattr(mod, "VENV_PYTHON", tmp_path / "no-such-venv" / "bin" / "python")
     monkeypatch.setattr(mod, "_overlap_check", lambda settings: None)
     return mod
 
 
-def _cmds(settings, event):
-    return [h["command"] for g in settings["hooks"][event] for h in g["hooks"]]
+def _entries(settings, event):
+    return [entry for group in settings["hooks"][event] for entry in group["hooks"]]
 
 
 def _read(path):
     return json.loads(Path(path).read_text())
 
 
-def test_fresh_install_wires_claude_once_and_codex_once(installer, tmp_path):
+def test_fresh_install_wires_one_post_commit_hook_per_event(installer, capsys):
     assert installer.run() == 0
 
     settings = _read(installer._settings_path())
-    assert _cmds(settings, "SessionStart") == [installer.HOOK_CMD]
-    assert _cmds(settings, "Stop") == [installer.HOOK_CMD, installer.sync_cmd()]
-    stop_entries = settings["hooks"]["Stop"][0]["hooks"]
-    assert stop_entries[1] == {"type": "command", "command": installer.sync_cmd(),
-                               "timeout": 15, "async": True}
-    assert settings["statusLine"]["command"] == installer.STATUSLINE_CMD
+    for event in ("SessionStart", "UserPromptSubmit", "Stop", "Notification", "SessionEnd"):
+        assert settings["hooks"][event] == [{"hooks": [{
+            "type": "command", "command": installer.HOOK_CMD, "timeout": 10,
+        }]}]
+    assert settings["statusLine"] == {
+        "type": "command",
+        "command": installer.STATUSLINE_CMD,
+        "padding": 0,
+        "refreshInterval": 5,
+    }
     assert settings["agentPushNotifEnabled"] is False
 
     codex = _read(installer._codex_hooks_path())
-    assert set(codex) == {"hooks"}  # HooksFile shape: top-level "hooks" wrapper
-    assert set(codex["hooks"]) == {"SessionStart", "UserPromptSubmit", "Stop",
-                                   "PermissionRequest", "SessionEnd"}
-    stop = codex["hooks"]["Stop"][0]["hooks"]
-    assert stop[0] == {"type": "command", "command": installer.CODEX_HOOK_CMD, "timeout_sec": 10}
-    assert stop[1] == {"type": "command", "command": installer.sync_cmd(),
-                       "timeout_sec": 15, "async": True}
-    assert "timeout" not in stop[0]  # Codex spells it timeout_sec
+    assert set(codex) == {"hooks"}
+    assert set(codex["hooks"]) == {
+        "SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest", "SessionEnd",
+    }
+    for event in ("SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"):
+        assert codex["hooks"][event] == [{"hooks": [{
+            "type": "command", "command": installer.CODEX_HOOK_CMD, "timeout": 10,
+        }]}]
+    assert codex["hooks"]["SessionEnd"] == [{"hooks": [{
+        "type": "command", "command": installer.CODEX_HOOK_CMD, "timeout": 3,
+    }]}]
+    assert "sync push" not in json.dumps(settings)
+    assert "sync push" not in json.dumps(codex)
+    assert "async" not in json.dumps(codex)
+    assert "timeout_sec" not in json.dumps(codex)
+    assert "ACTION REQUIRED" in capsys.readouterr().out
 
 
-def test_second_run_is_a_no_op(installer, capsys):
+def test_second_run_is_byte_identical_and_creates_no_backup(installer, capsys):
     installer.run()
-    before_claude = installer._settings_path().read_text()
-    before_codex = installer._codex_hooks_path().read_text()
+    before_claude = installer._settings_path().read_bytes()
+    before_codex = installer._codex_hooks_path().read_bytes()
+    backups_before = list(installer._settings_path().parent.glob("*.bak-*"))
+    backups_before += list(installer._codex_hooks_path().parent.glob("*.bak-*"))
     capsys.readouterr()
 
     installer.run()
 
     out = capsys.readouterr().out
     assert "already wired cleanly" in out
-    assert installer._settings_path().read_text() == before_claude
-    assert installer._codex_hooks_path().read_text() == before_codex
-    assert not list(installer._settings_path().parent.glob("*.bak-*"))  # no backup on no-op
+    assert "ACTION REQUIRED" not in out
+    assert installer._settings_path().read_bytes() == before_claude
+    assert installer._codex_hooks_path().read_bytes() == before_codex
+    backups_after = list(installer._settings_path().parent.glob("*.bak-*"))
+    backups_after += list(installer._codex_hooks_path().parent.glob("*.bak-*"))
+    assert backups_after == backups_before
 
 
-def test_creating_the_venv_replaces_the_stale_sync_variant_instead_of_appending(
-    installer, tmp_path, monkeypatch, capsys
+@pytest.mark.parametrize(
+    "bad_entry",
+    [
+        {"type": "command", "command": "CODEX_HOOK", "timeout_sec": 10},
+        {"type": "command", "command": "CODEX_HOOK", "timeout": 999},
+        {"type": "command", "command": "CODEX_HOOK", "timeout": 10, "async": True},
+    ],
+)
+def test_codex_option_drift_is_reported_and_repaired(installer, bad_entry, capsys):
+    bad_entry = {**bad_entry, "command": installer.CODEX_HOOK_CMD}
+    path = installer._codex_hooks_path()
+    path.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [bad_entry]}]}}))
+    before = path.read_text()
+
+    assert installer.run(check_only=True) == 1
+    assert "Stop" in capsys.readouterr().out
+    assert path.read_text() == before
+
+    assert installer.run() == 0
+    codex = _read(path)
+    assert codex["hooks"]["Stop"] == [{"hooks": [{
+        "type": "command", "command": installer.CODEX_HOOK_CMD, "timeout": 10,
+    }]}]
+
+
+def test_managed_hook_moves_out_of_matcher_but_foreign_matched_group_stays_exact(
+    installer, capsys
 ):
-    """The live bug: system-python sync cmd wired first, venv created later,
-    re-run appended the venv variant and BOTH fired -> every Slack alert twice."""
-    installer.run()
-    old_sync = installer.sync_cmd()
-
-    venv_python = tmp_path / ".venv" / "bin" / "python"
-    venv_python.parent.mkdir(parents=True)
-    venv_python.write_text("")
-    monkeypatch.setattr(installer, "VENV_PYTHON", venv_python)
-    new_sync = installer.sync_cmd()
-    assert new_sync != old_sync
-
-    capsys.readouterr()
-    installer.run()
-    out = capsys.readouterr().out
-
-    settings = _read(installer._settings_path())
-    for event in ("Stop", "Notification", "SessionEnd"):
-        cmds = _cmds(settings, event)
-        assert cmds == [installer.HOOK_CMD, new_sync], event
-        assert old_sync not in cmds
-    assert f"Removed Stop hook: {old_sync}" in out
-
-    codex = _read(installer._codex_hooks_path())
-    for event in ("Stop", "PermissionRequest", "SessionEnd"):
-        cmds = [h["command"] for g in codex["hooks"][event] for h in g["hooks"]]
-        assert cmds == [installer.CODEX_HOOK_CMD, new_sync], event
-
-
-def test_exact_duplicate_registrations_are_collapsed_and_foreign_hooks_kept(installer):
-    path = installer._settings_path()
-    path.parent.mkdir(parents=True)
-    sync = installer.sync_cmd()
+    path = installer._codex_hooks_path()
+    foreign = {"type": "command", "command": "/usr/local/bin/guard", "timeout": 4}
     path.write_text(json.dumps({
+        "custom": {"preserved": True},
         "hooks": {
-            "Stop": [
-                {"hooks": [
-                    {"type": "command", "command": installer.HOOK_CMD, "timeout": 10},
-                    {"type": "command", "command": sync, "timeout": 15, "async": True},
-                    {"type": "command", "command": "say 'done'", "timeout": 5},
-                ]},
-                {"hooks": [
-                    {"type": "command", "command": sync, "timeout": 15, "async": True},
-                    {"type": "command", "command": installer.HOOK_CMD, "timeout": 10},
-                ]},
-            ],
+            "Stop": [{
+                "matcher": "shell",
+                "description": "keep this group",
+                "hooks": [foreign, {
+                    "type": "command", "command": installer.CODEX_HOOK_CMD, "timeout": 10,
+                }],
+            }],
+            "PreToolUse": [{"matcher": "python", "hooks": [foreign]}],
         },
     }))
+
+    assert installer.run(check_only=True) == 1
+    assert "Stop" in capsys.readouterr().out
+    assert installer.run() == 0
+
+    codex = _read(path)
+    assert codex["custom"] == {"preserved": True}
+    assert codex["hooks"]["PreToolUse"] == [{"matcher": "python", "hooks": [foreign]}]
+    assert codex["hooks"]["Stop"] == [
+        {"matcher": "shell", "description": "keep this group", "hooks": [foreign]},
+        {"hooks": [{
+            "type": "command", "command": installer.CODEX_HOOK_CMD, "timeout": 10,
+        }]},
+    ]
+
+
+def test_old_paths_sync_variants_duplicates_and_wrong_provider_are_removed(installer):
+    path = installer._settings_path()
+    path.parent.mkdir(parents=True)
+    foreign = {"type": "command", "command": "say done", "timeout": 5}
+    path.write_text(json.dumps({"hooks": {"Stop": [
+        {"hooks": [
+            {"type": "command", "command": "/old/repo/agent-board hook", "timeout": 10},
+            {"type": "command", "command": installer.CODEX_HOOK_CMD, "timeout": 10},
+            {"type": "command", "command": (
+                "/old/venv/python /old/repo/agent-board sync push"
+            ), "timeout": 15, "async": True},
+            foreign,
+        ]},
+        {"hooks": [{"type": "command", "command": installer.HOOK_CMD, "timeout": 999}]},
+    ]}}))
 
     assert installer.run(include_codex=False) == 0
 
     settings = _read(path)
-    assert _cmds(settings, "Stop") == [installer.HOOK_CMD, sync, "say 'done'"]
-    assert len(settings["hooks"]["Stop"]) == 1  # emptied duplicate group dropped
+    assert settings["hooks"]["Stop"] == [
+        {"hooks": [foreign]},
+        {"hooks": [{"type": "command", "command": installer.HOOK_CMD, "timeout": 10}]},
+    ]
+    assert sum("agent-board" in entry["command"] for entry in _entries(settings, "Stop")) == 1
 
 
-def test_check_mode_reports_drift_without_writing(installer, capsys):
-    path = installer._settings_path()
-    path.parent.mkdir(parents=True)
-    sync = installer.sync_cmd()
-    stale = "/old/venv/bin/python " + installer.AGENT_BOARD + " sync push"
-    path.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
-        {"type": "command", "command": installer.HOOK_CMD},
-        {"type": "command", "command": sync, "async": True},
-        {"type": "command", "command": sync, "async": True},
-        {"type": "command", "command": stale, "async": True},
-    ]}]}}))
-    before = path.read_text()
-
-    rc = installer.run(check_only=True)
-    out = capsys.readouterr().out
-
-    assert rc == 1
-    assert "duplicate registration (2x)" in out
-    assert "stale sync variant" in out
-    assert "SessionStart: missing" in out
-    assert path.read_text() == before  # never writes in --check
-
-
-def test_check_mode_clean_exit_zero(installer, capsys):
+def test_check_mode_clean_definitions_warns_that_trust_is_unverifiable(installer, capsys):
     installer.run()
     capsys.readouterr()
+
     assert installer.run(check_only=True) == 0
+
     out = capsys.readouterr().out
-    assert "OK: hooks + statusLine wired once" in out
-    assert "OK: Codex hooks wired once" in out
+    assert "OK: Codex hook definitions match" in out
+    assert "trust cannot be verified" in out
+    assert "/hooks" in out
+
+
+def test_check_mode_reports_hooks_false_and_exits_nonzero(installer, tmp_path, capsys):
+    installer.run()
+    (tmp_path / ".codex" / "config.toml").write_text("[features]\nhooks = false\n")
+    capsys.readouterr()
+
+    assert installer.run(check_only=True) == 1
+
+    out = capsys.readouterr().out
+    assert "hooks = false" in out
+    assert "/hooks" in out
+
+
+def test_install_warns_but_does_not_edit_hooks_false(installer, tmp_path, capsys):
+    config = tmp_path / ".codex" / "config.toml"
+    config.write_text("[features]\nhooks = false\n")
+
+    assert installer.run() == 0
+
+    assert config.read_text() == "[features]\nhooks = false\n"
+    assert "Codex will ignore" in capsys.readouterr().out
 
 
 def test_codex_skipped_when_codex_home_missing(installer, tmp_path, capsys):
@@ -175,20 +218,15 @@ def test_codex_skipped_when_codex_home_missing(installer, tmp_path, capsys):
     assert not installer._codex_hooks_path().exists()
 
 
-def test_codex_feature_flag_off_is_reported(installer, tmp_path, capsys):
-    (tmp_path / ".codex" / "config.toml").write_text('[features]\nhooks = false\n')
-    installer.run()
-    assert "hooks = false" in capsys.readouterr().out
+def test_readme_documents_hook_contract_and_trust_workflow():
+    text = README.read_text()
+    agent_board = text[text.index("## Agent Board") :]
 
-
-def test_codex_existing_foreign_hooks_survive(installer):
-    path = installer._codex_hooks_path()
-    path.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "shell", "hooks": [
-        {"type": "command", "command": "/usr/local/bin/guard.sh", "timeout_sec": 5}]}]}}))
-
-    installer.run()
-
-    codex = _read(path)
-    assert codex["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "/usr/local/bin/guard.sh"
-    assert codex["hooks"]["PreToolUse"][0]["matcher"] == "shell"
-    assert "Stop" in codex["hooks"]
+    assert "`timeout`" in agent_board
+    assert "`timeout_sec`" not in agent_board
+    assert "one hook" in agent_board.lower()
+    assert "detached" in agent_board.lower()
+    assert "SessionEnd" in agent_board and "3 seconds" in agent_board
+    assert "`/hooks`" in agent_board
+    assert "trust" in agent_board.lower()
+    assert "cannot verify" in agent_board.lower()

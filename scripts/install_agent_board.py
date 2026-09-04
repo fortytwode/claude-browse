@@ -1,38 +1,34 @@
 #!/usr/bin/env python3
-"""Idempotently wire agent-board into ~/.claude/settings.json and
-~/.codex/hooks.json.
+"""Idempotently wire Agent Board into Claude and Codex hook configuration.
 
-Run by install.sh. Safe to re-run: reconciles our hook commands into whatever
-groups already exist for each event (never wholesale-replaces a user's other
-hooks for that event), removes STALE VARIANTS of our own commands (a sync
-command that embeds an older python path) and EXACT DUPLICATES (the same
-command registered twice, which double-posts every Slack alert), and backs up
-each file before writing anything.
+Run by install.sh. Safe to re-run: canonicalizes every lifecycle event to one
+dedicated, matcherless Agent Board hook while preserving all foreign handlers
+and group metadata. Old install paths, sync siblings, duplicates, and entries
+whose provider or options drifted are removed before the canonical hook is
+appended. Each file is backed up before it is changed.
 
     python3 scripts/install_agent_board.py           # wire + report
     python3 scripts/install_agent_board.py --check   # report only, exit 1 on drift
     python3 scripts/install_agent_board.py --no-codex
 
-Why the dedupe exists (found live, 2026-09-03): the sync hook command embeds
-the interpreter path, which changes from system python3 to .venv/bin/python
-once the board-sync venv is created. The old installer only ever APPENDED the
-new command, so both fired on every Stop -- two Slack posts per event, and a
-naming race between the two processes that made the same session alternate
-between two names seconds apart.
+The hook commits local state and then launches detached publication itself.
+Registering sync as a sibling is both redundant and racy because hook runners
+may launch matching commands concurrently.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import sys
 import time
+from copy import deepcopy
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 AGENT_BOARD = str(REPO_DIR / "agent-board")
-VENV_PYTHON = REPO_DIR / ".venv" / "bin" / "python"
 
 
 def _settings_path() -> Path:
@@ -47,137 +43,108 @@ def _codex_hooks_path() -> Path:
     return _codex_home() / "hooks.json"
 
 
-# Prefer the board-sync venv when it exists (has google-cloud-firestore,
-# requests, anthropic); fall back to system python3 otherwise, so the async
-# sync hook -- and with it, the Haiku namer in naming.py, which is only ever
-# invoked from sync.push() -- is at least *reachable* on a fresh install
-# before the optional venv is set up, rather than failing to launch at all.
-# Re-running install.sh after creating the venv upgrades this automatically
-# AND removes the previous variant (see _reconcile_event).
-def _sync_python() -> str:
-    return str(VENV_PYTHON) if VENV_PYTHON.exists() else (sys.executable or "python3")
-
-
 HOOK_CMD = f"{AGENT_BOARD} hook"
 CODEX_HOOK_CMD = f"{AGENT_BOARD} hook --provider codex"
 STATUSLINE_CMD = f"{AGENT_BOARD} statusline"
 
-
-def sync_cmd() -> str:
-    return f"{_sync_python()} {AGENT_BOARD} sync push"
-
-
-_SIMPLE_EVENTS = ("SessionStart", "UserPromptSubmit")
-_SYNC_EVENTS = ("Stop", "Notification", "SessionEnd")
+_CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "Notification", "SessionEnd")
 
 # Codex has no Notification event; PermissionRequest is its blocked-on-you
 # signal (hook.py maps it to needs-input). Event names are PascalCase in
 # ~/.codex/hooks.json exactly as in Claude's settings.json (Codex's hooks
 # engine is Claude-compatible: HooksFile{hooks: {Event: [MatcherGroup]}}).
-_CODEX_SIMPLE_EVENTS = ("SessionStart", "UserPromptSubmit")
-_CODEX_SYNC_EVENTS = ("Stop", "PermissionRequest", "SessionEnd")
+_CODEX_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest", "SessionEnd")
 
 
 def _is_our_command(command: str | None) -> bool:
-    return bool(command) and "agent-board" in command and (
-        command.endswith(" hook")
-        or command.endswith(" hook --provider codex")
-        or command.endswith(" sync push")
-        or command.endswith(" statusline")
-    )
+    """Recognize every lifecycle handler managed by current or old installers."""
+    if not isinstance(command, str):
+        return False
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+    for index, part in enumerate(parts):
+        if Path(part).name != "agent-board":
+            continue
+        action = parts[index + 1 :]
+        return bool(
+            action
+            and (
+                action[0] in {"hook", "statusline"}
+                or action[:2] == ["sync", "push"]
+            )
+        )
+    return False
 
 
-def _is_sync_variant(command: str | None) -> bool:
-    """Any '<python> <path>/agent-board sync push' from any install/venv."""
-    return bool(command) and command.endswith(" sync push") and "agent-board" in command
+def _entry(command: str, *, timeout: int = 10) -> dict:
+    return {"type": "command", "command": command, "timeout": timeout}
 
 
-def _entry(command: str, *, timeout: int = 10, is_async: bool = False, codex: bool = False) -> dict:
-    e: dict = {"type": "command", "command": command}
-    if codex:
-        e["timeout_sec"] = timeout
-    else:
-        e["timeout"] = timeout
-    if is_async:
-        e["async"] = True
-    return e
+def _canonical_event(groups: object, desired: list[dict]) -> tuple[list, list[str]]:
+    """Return matcher-safe canonical groups plus removed managed commands."""
+    existing = groups if isinstance(groups, list) else []
+    canonical: list = []
+    removed: list[str] = []
+    for raw_group in existing:
+        if not isinstance(raw_group, dict):
+            canonical.append(deepcopy(raw_group))
+            continue
+        group = deepcopy(raw_group)
+        entries = group.get("hooks")
+        if not isinstance(entries, list):
+            canonical.append(group)
+            continue
+        kept = []
+        for entry in entries:
+            command = entry.get("command") if isinstance(entry, dict) else None
+            if _is_our_command(command):
+                removed.append(command)
+            else:
+                kept.append(entry)
+        group["hooks"] = kept
+        # A bare group containing only managed handlers is installer residue.
+        # A matcher or any other metadata belongs to the user and is retained.
+        if kept or set(group) != {"hooks"}:
+            canonical.append(group)
+    canonical.append({"hooks": deepcopy(desired)})
+    return canonical, removed
 
 
 def _reconcile_event(hooks: dict, event: str, desired: list[dict]) -> dict:
-    """Make `event`'s groups contain exactly one of each desired command.
-
-    - Removes stale variants of the sync command (different interpreter path).
-    - Removes exact duplicates of any of our commands (keeps the first).
-    - Leaves every command that isn't ours untouched, in place.
-    - Appends missing desired entries to the first group.
-    Returns {"removed": [...], "added": [...]}.
-    """
-    desired_cmds = [d["command"] for d in desired]
-    groups = hooks.setdefault(event, [])
-    if not groups:
-        groups.append({"hooks": []})
-
-    removed: list[str] = []
-    seen: set[str] = set()
-    for group in groups:
-        kept = []
-        for entry in group.get("hooks", []):
-            cmd = entry.get("command")
-            stale_sync = _is_sync_variant(cmd) and cmd not in desired_cmds
-            duplicate = _is_our_command(cmd) and cmd in seen
-            if stale_sync or duplicate:
-                removed.append(cmd)
-                continue
-            if _is_our_command(cmd):
-                seen.add(cmd)
-            kept.append(entry)
-        group["hooks"] = kept
-
-    # Drop groups we emptied entirely (but never a group that still carries
-    # someone else's hooks), so a file doesn't accrete empty {"hooks": []}.
-    hooks[event] = [g for g in groups if g.get("hooks") or g.get("matcher")] or [{"hooks": []}]
-    groups = hooks[event]
-
-    added: list[str] = []
-    present = {h.get("command") for g in groups for h in g.get("hooks", [])}
-    for d in desired:
-        if d["command"] not in present:
-            groups[0].setdefault("hooks", []).append(d)
-            added.append(d["command"])
-    return {"removed": removed, "added": added}
+    """Replace all managed variants with one exact matcherless definition."""
+    before = hooks.get(event, [])
+    canonical, removed = _canonical_event(before, desired)
+    changed = before != canonical
+    if changed:
+        hooks[event] = canonical
+    return {
+        "removed": removed if changed else [],
+        "added": [entry["command"] for entry in desired] if changed else [],
+        "changed": changed,
+    }
 
 
 def _desired_claude(event: str) -> list[dict]:
-    if event in _SIMPLE_EVENTS:
-        return [_entry(HOOK_CMD)]
-    return [_entry(HOOK_CMD), _entry(sync_cmd(), timeout=15, is_async=True)]
+    return [_entry(HOOK_CMD)]
 
 
 def _desired_codex(event: str) -> list[dict]:
-    if event in _CODEX_SIMPLE_EVENTS:
-        return [_entry(CODEX_HOOK_CMD, codex=True)]
-    return [
-        _entry(CODEX_HOOK_CMD, codex=True),
-        _entry(sync_cmd(), timeout=15, is_async=True, codex=True),
-    ]
+    return [_entry(CODEX_HOOK_CMD, timeout=3 if event == "SessionEnd" else 10)]
 
 
 def _drift(hooks: dict, events: tuple[str, ...], desired_fn) -> list[str]:
-    """Human-readable list of problems, empty when fully wired and clean."""
+    """Compare full definitions and placement using the writer's canonical form."""
     problems: list[str] = []
     for event in events:
-        cmds = [h.get("command") for g in hooks.get(event, []) for h in g.get("hooks", [])]
-        for d in desired_fn(event):
-            if d["command"] not in cmds:
-                problems.append(f"{event}: missing {d['command']!r}")
-        ours = [c for c in cmds if _is_our_command(c)]
-        for c in set(ours):
-            if ours.count(c) > 1:
-                problems.append(f"{event}: duplicate registration ({ours.count(c)}x) {c!r}")
-        desired_cmds = {d["command"] for d in desired_fn(event)}
-        for c in ours:
-            if _is_sync_variant(c) and c not in desired_cmds:
-                problems.append(f"{event}: stale sync variant {c!r}")
+        current = hooks.get(event, [])
+        canonical, removed = _canonical_event(current, desired_fn(event))
+        if current != canonical:
+            detail = f"; replacing {len(removed)} managed variant(s)" if removed else ""
+            problems.append(
+                f"{event}: Agent Board hook definition or placement differs from canonical{detail}"
+            )
     return problems
 
 
@@ -201,8 +168,14 @@ def _load_json(path: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 def check_claude(settings: dict) -> list[str]:
-    problems = _drift(settings.get("hooks", {}), _SIMPLE_EVENTS + _SYNC_EVENTS, _desired_claude)
-    if (settings.get("statusLine") or {}).get("command") != STATUSLINE_CMD:
+    problems = _drift(settings.get("hooks", {}), _CLAUDE_EVENTS, _desired_claude)
+    desired_statusline = {
+        "type": "command",
+        "command": STATUSLINE_CMD,
+        "padding": 0,
+        "refreshInterval": 5,
+    }
+    if settings.get("statusLine") != desired_statusline:
         problems.append("statusLine: not agent-board's")
     if settings.get("agentPushNotifEnabled") is not False:
         problems.append("agentPushNotifEnabled: not false (duplicate folderless banners)")
@@ -213,13 +186,13 @@ def wire_claude(settings: dict) -> tuple[dict, bool]:
     """Returns (settings, changed)."""
     hooks = settings.setdefault("hooks", {})
     changed = False
-    for event in _SIMPLE_EVENTS + _SYNC_EVENTS:
+    for event in _CLAUDE_EVENTS:
         result = _reconcile_event(hooks, event, _desired_claude(event))
         for cmd in result["removed"]:
             print(f"  Removed {event} hook: {cmd}")
         for cmd in result["added"]:
             print(f"  Added {event} hook: {cmd}")
-        changed = changed or bool(result["removed"] or result["added"])
+        changed = changed or result["changed"]
 
     desired_statusline = {
         "type": "command",
@@ -252,41 +225,54 @@ def wire_claude(settings: dict) -> tuple[dict, bool]:
 # ---------------------------------------------------------------------------
 
 def check_codex(hooks_file: dict) -> list[str]:
-    return _drift(
-        hooks_file.get("hooks", {}), _CODEX_SIMPLE_EVENTS + _CODEX_SYNC_EVENTS, _desired_codex
-    )
+    return _drift(hooks_file.get("hooks", {}), _CODEX_EVENTS, _desired_codex)
 
 
 def wire_codex(hooks_file: dict) -> tuple[dict, bool]:
     hooks = hooks_file.setdefault("hooks", {})
     changed = False
-    for event in _CODEX_SIMPLE_EVENTS + _CODEX_SYNC_EVENTS:
+    for event in _CODEX_EVENTS:
         result = _reconcile_event(hooks, event, _desired_codex(event))
         for cmd in result["removed"]:
             print(f"  Removed Codex {event} hook: {cmd}")
         for cmd in result["added"]:
             print(f"  Added Codex {event} hook: {cmd}")
-        changed = changed or bool(result["removed"] or result["added"])
+        changed = changed or result["changed"]
     return hooks_file, changed
 
 
-def _codex_hooks_feature_note() -> str | None:
+def _codex_hooks_feature_problem() -> str | None:
     """Codex's hooks engine is on by default in current releases; older ones
     needed `[features] hooks = true` in ~/.codex/config.toml. We never edit
     config.toml (no stdlib TOML writer, and it holds the user's model/auth
-    settings) -- we only read it and say what to add if the flag is
-    explicitly off."""
+    settings) -- we only read it and say what to add if the flag is off or
+    the feature configuration cannot be verified."""
     config_path = _codex_home() / "config.toml"
     if not config_path.exists():
         return None
+    text = config_path.read_text()
     try:
         import tomllib  # py3.11+
-    except ImportError:  # pragma: no cover - py3.9/3.10
-        return None
-    try:
-        data = tomllib.loads(config_path.read_text())
-    except Exception as exc:
-        return f"could not parse {config_path}: {exc}"
+    except ImportError:  # pragma: no cover - exercised on supported py3.9/3.10
+        # We only need two booleans from one table. Keep older supported
+        # Pythons useful without adding a TOML dependency to this installer.
+        in_features = False
+        disabled = False
+        for raw_line in text.splitlines():
+            line = raw_line.split("#", 1)[0].strip()
+            if line.startswith("[") and line.endswith("]"):
+                in_features = line == "[features]"
+                continue
+            if in_features and "=" in line:
+                key, value = (part.strip() for part in line.split("=", 1))
+                if key in {"hooks", "codex_hooks"} and value.lower() == "false":
+                    disabled = True
+        data = {"features": {"hooks": False}} if disabled else {}
+    else:
+        try:
+            data = tomllib.loads(text)
+        except Exception as exc:
+            return f"could not parse {config_path}: {exc}"
     features = data.get("features") or {}
     if features.get("hooks") is False or features.get("codex_hooks") is False:
         return (
@@ -335,6 +321,9 @@ def run(*, check_only: bool = False, include_codex: bool = True) -> int:
     codex_present = _codex_home().exists()
     codex_file = _load_json(codex_path) if codex_present else {}
     codex_problems = check_codex(codex_file) if (include_codex and codex_present) else []
+    feature_problem = (
+        _codex_hooks_feature_problem() if include_codex and codex_present else None
+    )
 
     if check_only:
         print(f"  {settings_path}:")
@@ -345,9 +334,15 @@ def run(*, check_only: bool = False, include_codex: bool = True) -> int:
                 print(f"  {codex_path}: Codex home not found, skipped")
             else:
                 print(f"  {codex_path}:")
-                for p in codex_problems or ["    OK: Codex hooks wired once, no stale/duplicate commands"]:
+                for p in codex_problems or ["    OK: Codex hook definitions match canonical configuration"]:
                     print(f"    {p}")
-        return 1 if (problems or codex_problems) else 0
+                if feature_problem:
+                    print(f"    {feature_problem}")
+                print(
+                    "    NOTE: hook trust cannot be verified by --check. "
+                    "Open Codex, run /hooks, and review/trust the Agent Board definitions."
+                )
+        return 1 if (problems or codex_problems or feature_problem) else 0
 
     # --- Claude ---
     if not problems:
@@ -363,6 +358,7 @@ def run(*, check_only: bool = False, include_codex: bool = True) -> int:
 
     # --- Codex ---
     if include_codex:
+        codex_changed = False
         if not codex_present:
             print(f"  Codex home {_codex_home()} not found; skipping Codex hooks (install Codex, re-run)")
         elif not codex_problems:
@@ -374,9 +370,14 @@ def run(*, check_only: bool = False, include_codex: bool = True) -> int:
             if changed:
                 codex_path.write_text(json.dumps(codex_file, indent=2) + "\n")
                 print(f"  Wired agent-board hooks into {codex_path}")
-        note = _codex_hooks_feature_note()
-        if note:
-            print(f"  NOTE: {note}")
+                codex_changed = True
+        if feature_problem:
+            print(f"  WARNING: {feature_problem}")
+        if codex_changed:
+            print(
+                "  ACTION REQUIRED: Open Codex, run /hooks, and review/trust the "
+                "Agent Board definitions. Codex skips new or changed hooks until trusted."
+            )
 
     _overlap_check(settings)
     return 0
