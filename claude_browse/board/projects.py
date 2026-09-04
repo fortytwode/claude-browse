@@ -47,7 +47,13 @@ def resolve_project(cwd: str | None) -> dict[str, str]:
 
     expanded = os.path.abspath(os.path.expanduser(cwd))
     canonical = os.path.realpath(expanded)
-    probe = canonical if os.path.isdir(canonical) else str(Path(canonical).parent)
+    if not os.path.isdir(canonical):
+        return {
+            "key": f"path:{canonical}",
+            "name": Path(canonical).name or canonical,
+            "path": canonical,
+        }
+    probe = canonical
     git_root = _git(probe, "rev-parse", "--show-toplevel")
     root = os.path.realpath(git_root) if git_root else canonical
     origin = _git(root, "remote", "get-url", "origin") if git_root else None
@@ -60,4 +66,3 @@ def resolve_project(cwd: str | None) -> dict[str, str]:
         name = Path(root).name or root
         key = f"path:{root}"
     return {"key": key, "name": name or "Inbox", "path": root}
-

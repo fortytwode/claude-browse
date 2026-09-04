@@ -13,13 +13,14 @@ import tempfile
 import threading
 import urllib.error
 import urllib.request
+from datetime import date, timedelta
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from claude_browse import fts, web
-from claude_browse.board import hook, store
+from claude_browse.board import hook, store, work_items
 
 
 def _seed(conn, sid, *, cwd="/w/home", provider="claude", path="", title=None):
@@ -122,6 +123,18 @@ def _mutate_json(url, method, payload, *, token="test-token"):
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
         return resp.status, json.loads(resp.read().decode())
+
+
+def _board_thread(sid, *, cwd="/w/home", provider="claude", name=None):
+    store.upsert(
+        sid,
+        cwd=cwd,
+        provider=provider,
+        name=name or f"Thread {sid}",
+        state="idle",
+        heartbeat_at=1700000000.0,
+    )
+    return work_items.ensure_for_session(store.get(sid))
 
 
 def test_sessions_lists_seeded_rows_current_folder_first(web_server):
@@ -242,47 +255,117 @@ def test_assets_are_served_with_content_types(web_server):
             assert len(resp.read()) > 0
 
 
-def test_task_create_update_and_board_roundtrip(web_server):
+def test_automatic_thread_update_and_board_roundtrip(web_server):
     base, _server = web_server
-    status, created = _mutate_json(
-        base + "/api/tasks",
-        "POST",
-        {
-            "title": "Ship the work queue",
-            "project_path": "/w/home",
-            "due_date": "2026-09-05",
-            "provider": "codex",
-        },
-    )
-    assert status == 201
-    task = created["task"]
+    _board_thread("automatic", provider="codex", name="Ship the work queue")
+    _status, board = _get_json(base + "/api/board")
+    task = board["tasks"][0]
     assert task["title"] == "Ship the work queue"
-    assert task["due_date"] == "2026-09-05"
-    assert task["runtime_state"] == "not-started"
+    assert task["due_date"] is None
     assert "codex" in task["full_command"]
     assert "--dangerously-bypass-approvals-and-sandbox" in task["full_command"]
 
     _status, updated = _mutate_json(
         base + "/api/tasks/" + task["task_id"],
         "PATCH",
-        {"title": "Ship it", "status": "waiting", "due_date": None},
+        {"title": "Ship it", "status": "active", "due_date": None},
     )
     assert updated["task"]["title"] == "Ship it"
-    assert updated["task"]["status"] == "waiting"
+    assert updated["task"]["work_status"] == "active"
     assert updated["task"]["due_date"] is None
 
     _status, board = _get_json(base + "/api/board")
     assert [item["title"] for item in board["tasks"]] == ["Ship it"]
 
 
-def test_add_session_to_queue_uses_index_metadata(web_server):
+def test_every_observed_terminal_session_is_automatically_listed(web_server):
     base, _server = web_server
-    _status, created = _mutate_json(
-        base + "/api/tasks", "POST", {"session_id": "home1", "title": "Review it"}
+    _board_thread("first", name="First terminal")
+    _board_thread("second", provider="codex", name="Second terminal")
+    _status, board = _get_json(base + "/api/board")
+    assert {task["session_id"] for task in board["tasks"]} == {"first", "second"}
+    assert all(task["work_status"] == "active" for task in board["tasks"])
+
+
+def test_board_get_is_read_only_and_does_not_enroll_fts_only_or_late_runtime_rows(
+    web_server, monkeypatch
+):
+    base, _server = web_server
+    store.upsert("late-runtime", cwd="/w/late", name="Late")
+    monkeypatch.setattr(
+        work_items,
+        "ensure_for_session",
+        lambda *_args, **_kwargs: pytest.fail("GET /api/board must be read-only"),
     )
-    assert created["task"]["session_id"] == "home1"
-    assert created["task"]["session_provider"] == "claude"
-    assert "claude --resume home1" in created["task"]["full_command"]
+
+    _status, board = _get_json(base + "/api/board")
+
+    assert board["tasks"] == []
+    assert work_items.get_for_session("late-runtime") is None
+
+
+def test_board_normalizes_today_states_actions_and_order(web_server, monkeypatch):
+    base, _server = web_server
+    monkeypatch.setattr(web, "_provider_available", lambda _provider: True)
+    today = date.today()
+    _board_thread("quiet", cwd=tempfile.gettempdir(), name="Quiet")
+    overdue = _board_thread("overdue", cwd=tempfile.gettempdir(), name="Overdue")
+    _board_thread("attention", cwd=tempfile.gettempdir(), name="Attention")
+    future = _board_thread("future", cwd=tempfile.gettempdir(), name="Future")
+    closed = _board_thread("closed", cwd=tempfile.gettempdir(), name="Closed")
+    work_items.update(overdue["task_id"], due_date=(today - timedelta(days=1)).isoformat())
+    work_items.update(future["task_id"], due_date=(today + timedelta(days=1)).isoformat())
+    work_items.update(closed["task_id"], status="done")
+    store.upsert("attention", state="needs-input")
+    store.heartbeat("attention")
+
+    _status, board = _get_json(base + "/api/board")
+    tasks = {task["session_id"]: task for task in board["tasks"]}
+
+    assert [task["session_id"] for task in board["tasks"]][:2] == ["attention", "overdue"]
+    assert tasks["attention"]["terminal_state"] == "needs-input"
+    assert tasks["attention"]["work_status"] == "active"
+    assert tasks["attention"]["in_today"] is True
+    assert tasks["overdue"]["in_today"] is True
+    assert tasks["quiet"]["in_today"] is False
+    assert tasks["future"]["in_today"] is False
+    assert tasks["closed"]["in_today"] is False
+    assert set(tasks["quiet"]["actions"]) == {"claude", "codex"}
+    assert tasks["quiet"]["actions"]["claude"]["label"] == "Resume"
+    assert tasks["quiet"]["actions"]["codex"]["label"] == "Continue in Codex"
+    assert tasks["quiet"]["actions"]["codex"]["available"] is False
+    assert "transcript" in tasks["quiet"]["actions"]["codex"]["reason"].lower()
+
+
+def test_closing_row_acknowledges_and_publishes_only_after_commit(web_server, monkeypatch):
+    base, _server = web_server
+    item = _board_thread("close-http", cwd=tempfile.gettempdir(), name="Close")
+    store.upsert(
+        "close-http", state="idle", done_at=10, acked_at=None, pending_alert="done"
+    )
+    observed = []
+
+    def capture(session_id):
+        runtime = store.get(session_id)
+        observed.append((session_id, runtime["acked_at"], runtime["sync_revision"]))
+
+    monkeypatch.setattr(hook, "_spawn_sync", capture)
+    _status, payload = _mutate_json(
+        base + f"/api/tasks/{item['task_id']}", "PATCH", {"status": "archived"}
+    )
+
+    assert payload["task"]["work_status"] == "archived"
+    assert observed and observed[0][0] == "close-http"
+    assert observed[0][1] >= 10
+    assert observed[0][2] == 1
+
+
+def test_manual_create_and_attention_ack_routes_are_removed(web_server):
+    base, _server = web_server
+    for path in ("/api/tasks", "/api/sessions/home1/ack"):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _mutate_json(base + path, "POST", {})
+        assert exc_info.value.code == 404
 
 
 def test_mutations_require_csrf_token_and_valid_json(web_server):
@@ -306,30 +389,25 @@ def test_launch_is_server_built_and_rejects_missing_project(web_server, monkeypa
     base, _server = web_server
     opened = []
     monkeypatch.setattr(web.commands, "open_in_terminal", opened.append)
-    _status, created = _mutate_json(
-        base + "/api/tasks",
-        "POST",
-        {"title": "Start here", "project_path": tempfile.gettempdir(), "provider": "claude"},
-    )
-    task_id = created["task"]["task_id"]
+    _board_thread("launchable", cwd=tempfile.gettempdir(), provider="claude", name="Start here")
+    _status, board = _get_json(base + "/api/board")
+    task_id = board["tasks"][0]["task_id"]
     _status, launched = _mutate_json(
         base + f"/api/tasks/{task_id}/launch",
         "POST",
-        {"provider": "codex", "full_access": True, "command": "rm -rf /"},
+        {"provider": "claude", "full_access": True, "command": "rm -rf /"},
     )
     assert launched["command"] == opened[0]
     assert "rm -rf" not in opened[0]
-    assert "codex" in opened[0]
-    assert "--dangerously-bypass-approvals-and-sandbox" in opened[0]
+    assert "claude" in opened[0]
+    assert "--dangerously-skip-permissions" in opened[0]
 
-    _status, missing = _mutate_json(
-        base + "/api/tasks",
-        "POST",
-        {"title": "Missing", "project_path": "/definitely/not/here"},
-    )
+    _board_thread("missing", cwd="/definitely/not/here", name="Missing")
+    _status, board = _get_json(base + "/api/board")
+    missing = next(task for task in board["tasks"] if task["session_id"] == "missing")
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         _mutate_json(
-            base + f"/api/tasks/{missing['task']['task_id']}/launch", "POST", {}
+            base + f"/api/tasks/{missing['task_id']}/launch", "POST", {}
         )
     assert exc_info.value.code == 400
 
@@ -337,29 +415,13 @@ def test_launch_is_server_built_and_rejects_missing_project(web_server, monkeypa
 def test_launch_rejects_non_boolean_full_access(web_server, monkeypatch):
     base, _server = web_server
     monkeypatch.setattr(web.commands, "open_in_terminal", lambda _command: None)
-    _status, created = _mutate_json(
-        base + "/api/tasks",
-        "POST",
-        {"title": "Typed launch", "project_path": tempfile.gettempdir()},
-    )
+    _board_thread("typed", cwd=tempfile.gettempdir(), name="Typed launch")
+    _status, board = _get_json(base + "/api/board")
+    task = board["tasks"][0]
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         _mutate_json(
-            base + f"/api/tasks/{created['task']['task_id']}/launch",
+            base + f"/api/tasks/{task['task_id']}/launch",
             "POST",
             {"full_access": "false"},
         )
     assert exc_info.value.code == 400
-
-
-def test_ack_marks_sync_pending_and_spawns_publication(web_server, monkeypatch):
-    base, _server = web_server
-    store.upsert("attention", state="idle", done_at=1.0, acked_at=None)
-    spawned = []
-    monkeypatch.setattr(hook, "_spawn_sync", spawned.append)
-    _status, payload = _mutate_json(
-        base + "/api/sessions/attention/ack", "POST", {}
-    )
-    assert payload == {"ok": True}
-    assert store.get("attention")["acked_at"] is not None
-    assert store.get("attention")["sync_revision"] == 1
-    assert spawned == ["attention"]

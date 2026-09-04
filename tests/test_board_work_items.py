@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from claude_browse.board import commands, hook, projects, store, work_items
+from claude_browse.board import commands, hook, projects, store, sync, work_items
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +70,56 @@ def test_project_groups_git_subfolders_by_origin(tmp_path):
     assert project["key"] == "repo:github.com/acme/widget"
     assert project["name"] == "widget"
     assert project["path"] == str(repo)
+
+
+def test_project_normalizes_ssh_and_https_origins_and_falls_back_to_exact_folder(
+    tmp_path, monkeypatch
+):
+    responses = iter([str(tmp_path), "git@github.com:Acme/Widget.git"])
+    monkeypatch.setattr(projects, "_git", lambda *_args: next(responses))
+    ssh = projects.resolve_project(str(tmp_path))
+    projects.resolve_project.cache_clear()
+    responses = iter([str(tmp_path), "https://github.com/acme/widget.git"])
+    https = projects.resolve_project(str(tmp_path))
+    assert ssh["key"] == https["key"] == "repo:github.com/acme/widget"
+
+    projects.resolve_project.cache_clear()
+    missing = tmp_path / "missing" / "nested"
+    monkeypatch.setattr(
+        projects,
+        "_git",
+        lambda *_args: pytest.fail("missing cwd must use immediate folder fallback"),
+    )
+    fallback = projects.resolve_project(str(missing))
+    assert fallback == {
+        "key": f"path:{missing}",
+        "name": "nested",
+        "path": str(missing),
+    }
+
+
+def test_startup_reconciliation_is_bulk_idempotent_and_retains_exact_cwd(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    nested = repo / "packages" / "app"
+    nested.mkdir(parents=True)
+    store.upsert("older", cwd=str(nested), name="Older", provider="claude")
+    store.upsert("newer", cwd=str(nested), name="Newer", provider="codex")
+    store._raw_set_updated_at("older", 10)
+    store._raw_set_updated_at("newer", 20)
+    monkeypatch.setattr(
+        projects,
+        "resolve_project",
+        lambda cwd: {"key": "repo:example/project", "name": "project", "path": str(repo)},
+    )
+
+    assert work_items.reconcile_sessions() == 2
+    assert work_items.reconcile_sessions() == 0
+    rows = work_items.list_items(include_done=True)
+    assert [row["session_id"] for row in rows] == ["newer", "older"]
+    assert all(row["project_path"] == str(repo) for row in rows)
+    assert all(row["session_cwd"] == str(nested) for row in rows)
 
 
 def test_resume_commands_are_cwd_qualified_and_provider_correct(tmp_path):
@@ -203,6 +253,54 @@ def test_stop_on_closed_work_finishes_runtime_without_unattended_alert(tmp_path,
     assert store.is_unattended(runtime) is False
     assert runtime["pending_alert"] is None
     assert notifications == []
+
+
+def test_atomic_close_acknowledges_runtime_and_returns_post_commit_publication(tmp_path):
+    store.upsert(
+        "close-me",
+        cwd=str(tmp_path),
+        name="Close me",
+        state="idle",
+        done_at=20,
+        acked_at=None,
+        pending_alert="done",
+        sync_revision=4,
+    )
+    item = work_items.ensure_for_session(store.get("close-me"))
+
+    updated, publish_session = work_items.mutate(item["task_id"], status="done")
+
+    runtime = store.get("close-me")
+    assert updated["status"] == "done"
+    assert runtime["acked_at"] >= runtime["done_at"]
+    assert runtime["pending_alert"] is None
+    assert runtime["sync_revision"] == 5
+    assert publish_session == "close-me"
+
+
+def test_live_state_projection_excludes_local_work_and_transcript_fields():
+    projected = sync.session_doc(
+        {
+            "session_id": "private",
+            "provider": "claude",
+            "cwd": "/repo",
+            "transcript": "secret",
+            "transcript_path": "/secret/thread.jsonl",
+            "due_date": "2026-09-05",
+            "work_status": "archived",
+            "status": "archived",
+            "continuation_brief": "private brief",
+        }
+    )
+    forbidden = {
+        "transcript",
+        "transcript_path",
+        "due_date",
+        "work_status",
+        "status",
+        "continuation_brief",
+    }
+    assert forbidden.isdisjoint(projected)
 
 
 def test_legacy_overlay_migration_is_idempotent_and_preserves_sessionless_rows(
