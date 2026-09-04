@@ -255,6 +255,51 @@ def test_assets_are_served_with_content_types(web_server):
             assert len(resp.read()) > 0
 
 
+def test_web_assets_define_dense_work_and_history_contract():
+    assets = Path(web.__file__).with_name("webassets")
+    html = (assets / "index.html").read_text()
+    javascript = (assets / "app.js").read_text()
+    stylesheet = (assets / "app.css").read_text()
+
+    assert 'id="work-search"' in html
+    assert 'id="full-access"' in html
+    assert 'Full access (skip permissions)' in html
+    assert 'id="full-access" type="checkbox" checked' in html
+    assert 'data-mode="active"' in html
+    assert 'data-mode="today"' in html
+    assert 'data-mode="projects"' in html
+    assert 'data-mode="done"' in html
+
+    for heading in (
+        "Name / Project",
+        "Due date",
+        "Work status",
+        "Terminal state",
+        "Agent / activity",
+        "Actions",
+    ):
+        assert heading in javascript
+    for searchable_field in (
+        "task.title",
+        "task.project_name",
+        "task.session_provider",
+        "task.session_id",
+    ):
+        assert searchable_field in javascript
+
+    assert "task.actions[provider]" in javascript
+    assert "action.label" in javascript
+    assert "fullAccessEnabled()" in javascript
+    assert 'setAttribute("aria-invalid", "true")' in javascript
+    assert 'setAttribute("role", "alert")' in javascript
+    assert "flushPendingEdits" in javascript
+    assert "rowMutationTails" in javascript
+    assert "hasProtectedWorkControls" in javascript
+    assert "History is read-only" in html
+    assert "disabled-reason" in stylesheet
+    assert "grid-template-areas" in stylesheet
+
+
 def test_automatic_thread_update_and_board_roundtrip(web_server):
     base, _server = web_server
     _board_thread("automatic", provider="codex", name="Ship the work queue")
@@ -413,7 +458,11 @@ def test_launch_is_server_built_and_rejects_missing_project(web_server, monkeypa
     assert exc_info.value.code == 400
 
 
-def test_launch_rejects_non_boolean_full_access(web_server, monkeypatch):
+@pytest.mark.parametrize(
+    "payload",
+    ({}, {"full_access": None}, {"full_access": "false"}, {"full_access": 0}),
+)
+def test_launch_rejects_non_boolean_full_access(web_server, monkeypatch, payload):
     base, _server = web_server
     monkeypatch.setattr(web.commands, "open_in_terminal", lambda _command: None)
     _board_thread("typed", cwd=tempfile.gettempdir(), name="Typed launch")
@@ -423,7 +472,28 @@ def test_launch_rejects_non_boolean_full_access(web_server, monkeypatch):
         _mutate_json(
             base + f"/api/tasks/{task['task_id']}/launch",
             "POST",
-            {"full_access": "false"},
+            payload,
+        )
+    assert exc_info.value.code == 400
+
+
+@pytest.mark.parametrize("full_access", (None, "true", 1))
+def test_history_launch_rejects_non_boolean_full_access(
+    web_server, monkeypatch, full_access
+):
+    base, _server = web_server
+    monkeypatch.setattr(web, "_provider_available", lambda _provider: True)
+    monkeypatch.setattr(web.commands, "open_in_terminal", lambda _command: None)
+    conn = fts.open_db(fts.DB_PATH)
+    conn.execute("UPDATE sessions SET cwd = ? WHERE sid = 'home1'", (tempfile.gettempdir(),))
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        _mutate_json(
+            base + "/api/sessions/home1/launch",
+            "POST",
+            {"provider": "claude", "full_access": full_access},
         )
     assert exc_info.value.code == 400
 
