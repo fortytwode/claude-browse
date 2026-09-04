@@ -126,6 +126,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
 _conn_cache: sqlite3.Connection | None = None
 _conn_cache_path: Path | None = None
 _conn_cache_owner: tuple[int, int] | None = None
+_conn_setup_lock = threading.Lock()
 
 
 def get_conn() -> sqlite3.Connection:
@@ -148,17 +149,29 @@ def get_conn() -> sqlite3.Connection:
     ):
         return _conn_cache
 
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(_DB_PATH, timeout=3)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=3000")
-    conn.execute(_SCHEMA)
-    _migrate(conn)
-    _conn_cache = conn
-    _conn_cache_path = _DB_PATH
-    _conn_cache_owner = owner
-    return conn
+    # SQLite can serialize ordinary WAL writes itself, but first-use setup is
+    # different: several hook threads racing through journal-mode/schema
+    # initialization can raise ``database is locked`` before busy_timeout is
+    # installed. Serialize only this cold path; normal hook reads/writes stay
+    # concurrent after each thread owns a configured connection.
+    with _conn_setup_lock:
+        if (
+            _conn_cache is not None
+            and _conn_cache_path == _DB_PATH
+            and _conn_cache_owner == owner
+        ):
+            return _conn_cache
+        _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(_DB_PATH, timeout=3)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=3000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(_SCHEMA)
+        _migrate(conn)
+        _conn_cache = conn
+        _conn_cache_path = _DB_PATH
+        _conn_cache_owner = owner
+        return conn
 
 
 def upsert(session_id: str, **fields: object) -> None:
