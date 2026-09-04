@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Dedicated Agent Board notification identity.** `./install.sh` builds a
+  small native `Agent Board Notifier.app`, allowing just Agent Board through a
+  macOS Focus instead of allowing every Script Editor alert. The existing
+  AppleScript path remains a fail-open fallback when the helper is unavailable.
 - **Codex sessions on the Agent Board.** Codex's hooks engine is
   Claude-compatible (same events, same stdin envelope), so the installer now
   writes `~/.codex/hooks.json` registering `agent-board hook --provider

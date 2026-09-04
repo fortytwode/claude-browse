@@ -364,16 +364,22 @@ dozen-plus alerts from three threads). The local banner still fires, and
 "done" Slack post: `export AGENT_BOARD_IMMEDIATE_DONE_ALERT=1` in the
 environment the hooks run in.
 
-**Notification persistence:** the banner plays a sound (your System
-Settings > Sound > Alert sound), but still auto-dismisses after a few
-seconds by default -- that auto-dismiss timing is a per-app Notification
-Center setting, not something this code can set programmatically. To make
-it stay on screen until you dismiss it: System Settings > Notifications >
-find the app that's actually registered as the sender (likely "Script
-Editor", or whichever terminal app you run Claude Code in -- Terminal,
-iTerm2, etc.; check both if unsure) > set Alert Style to "Alerts" instead
-of "Banners". The Slack `#agent-status` board is the durable fallback if
-you miss the banner entirely -- it never auto-dismisses.
+**Dedicated notification identity and persistence:** `./install.sh` builds a
+small local `~/Applications/Agent Board Notifier.app` with the stable identity
+`Agent Board`. That lets macOS grant Agent Board an exception under System
+Settings > Focus > your Focus > Allowed Apps > Agent Board Notifier without
+also allowing every Script Editor notification. If the Mac has no Swift
+compiler, delivery falls back safely to Script Editor and the installer
+reports that downgrade.
+
+The banner plays a sound (your System Settings > Sound > Alert sound), but
+still auto-dismisses after a few seconds by default -- that timing is a per-app
+Notification Center setting. To make it stay until you dismiss it: System
+Settings > Notifications > Agent Board > set Alert Style to "Persistent"
+instead of "Temporary". Focus cannot be bypassed programmatically: add Agent
+Board Notifier to Allowed Apps for each Focus that should permit completion
+alerts. The Slack `#agent-status` board is the durable fallback if you miss
+the banner entirely -- it never auto-dismisses.
 
 **Setup (one machine):**
 

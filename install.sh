@@ -104,6 +104,9 @@ esac
 # Wire agent-board hooks + statusLine into ~/.claude/settings.json (idempotent, backs up first)
 echo ""
 echo "Agent Board setup:"
+if ! python3 "$SCRIPT_DIR/scripts/install_notifier_app.py"; then
+    echo "  NOTE: dedicated notifier unavailable; Script Editor remains the fallback."
+fi
 python3 "$SCRIPT_DIR/scripts/install_agent_board.py"
 
 echo ""

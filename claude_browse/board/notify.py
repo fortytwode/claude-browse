@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from pathlib import Path
 
 
 def _applescript_quote(s: str) -> str:
@@ -25,19 +26,44 @@ def _notifications_disabled() -> bool:
     }
 
 
+def _notifier_executable() -> Path:
+    override = os.environ.get("AGENT_BOARD_NOTIFIER_EXECUTABLE")
+    if override:
+        return Path(override).expanduser()
+    return (
+        Path.home()
+        / "Applications/Agent Board Notifier.app/Contents/MacOS/AgentBoardNotifier"
+    )
+
+
+def _launch_dedicated_notifier(title: str, message: str) -> bool:
+    executable = _notifier_executable()
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        return False
+    try:
+        subprocess.Popen(
+            [str(executable), "--title", title, "--message", message],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        return False
+    return True
+
+
 def notify(title: str, message: str) -> None:
     """Fire a native macOS notification with sound.
 
-    `sound name "default"` plays the user's configured System Settings >
-    Sound > Alert sound -- an audio cue matters here because the banner
-    itself auto-dismisses after a few seconds by default (a visual-only
-    notification is easy to miss if you're not looking at the screen right
-    then). True persistence (the banner staying until manually dismissed)
-    is a per-app Notification Center setting this code cannot set
-    programmatically -- see README's Agent Board section for how to enable
-    it for whichever app ends up registered as the notification sender.
+    Prefer the dedicated Agent Board app so macOS exposes an isolated
+    Notification/Focus identity. Fall back to AppleScript when it is missing
+    or cannot launch, keeping clone installs useful even without swiftc.
     """
     if _notifications_disabled():
+        return
+
+    if _launch_dedicated_notifier(title, message):
         return
 
     try:
