@@ -107,6 +107,19 @@ def test_task_reorder_is_atomic_bounded_and_project_scoped(tmp_path, monkeypatch
     assert [row["position"] for row in reordered] == original_slots
     assert {row["priority"] for row in reordered} == {"high"}
 
+    for sid, priority in (("one", "urgent"), ("two", "low"), ("three", "normal")):
+        work_items.mutate(rows[sid]["task_id"], priority=priority)
+    mixed = work_items.reorder_tasks(
+        f"path:{first_dir}",
+        [rows["two"]["task_id"], rows["three"]["task_id"], rows["one"]["task_id"]],
+    )
+    assert [row["session_id"] for row in mixed] == ["two", "three", "one"]
+    assert {row["session_id"]: row["priority"] for row in mixed} == {
+        "one": "urgent",
+        "two": "low",
+        "three": "normal",
+    }
+
     snapshot = {sid: work_items.get(rows[sid]["task_id"]) for sid in rows}
     invalid_orders = (
         [rows["one"]["task_id"], rows["one"]["task_id"]],

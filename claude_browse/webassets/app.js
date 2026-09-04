@@ -2,9 +2,14 @@
 (function () {
   "use strict";
   var csrfToken = "", activeSid = null, activeSessionMeta = null;
-  var queueMode = "active", latestBoard = null, currentTurns = null;
+  var queueMode = "all", groupBy = "priority", selectedProject = null;
+  var latestBoard = null, currentTurns = null, draggedTask = null, draggedProject = null;
   var sessionsSeq = 0, boardTimer = null, editSequence = 0;
   var rowMutationTails = Object.create(null), editStates = [];
+  var PRIORITY_GROUPS = ["urgent", "high", "normal", "low"];
+  var TERMINAL_GROUPS = ["needs-input", "working", "idle", "ended", "gone"];
+  var PRIORITY_LABELS = { urgent: "Urgent", high: "High", normal: "Normal", low: "Low" };
+  var TERMINAL_LABELS = { "needs-input": "Needs input", working: "Working", idle: "Idle", ended: "Ended", gone: "Gone" };
 
   function $(id) { return document.getElementById(id); }
   function element(tag, className, textValue) {
@@ -34,6 +39,7 @@
     node.className = isError ? "show error-toast" : "show";
     setTimeout(function () { node.className = ""; }, 2800);
   }
+  function announce(message) { $("work-announcer").textContent = ""; setTimeout(function () { $("work-announcer").textContent = message; }, 10); }
   function emptyMessage(root, message) { root.replaceChildren(element("div", "empty-card", message)); }
   function debounce(fn, wait) {
     var timer = null;
@@ -75,7 +81,7 @@
 
   function hasProtectedWorkControls() {
     var active = document.activeElement;
-    var focused = Boolean(active && $("board-view").contains(active) && active.matches(".work-edit"));
+    var focused = Boolean(active && $("board-view").contains(active) && active.matches(".work-edit, #project-description"));
     return focused || editStates.some(function (state) { return Boolean(state.timer || state.inFlight || state.failed); });
   }
   function mergeSavedTask(saved) {
@@ -143,12 +149,112 @@
     });
     choice.append(button, reason); return choice;
   }
+  function restoreFocus(token) {
+    if (!token) return;
+    var control = Array.prototype.find.call(document.querySelectorAll("[data-focus-key]"), function (item) { return item.dataset.focusKey === token; });
+    if (control) control.focus();
+  }
+  function reorderLocked() { return Boolean($("work-search").value.trim()); }
+  function updateReorderReason() {
+    var reason = reorderLocked() ? "Reordering is disabled while searching." : "Drag a handle, or use Move up and Move down.";
+    $("reorder-reason").textContent = reason;
+  }
+  function taskGroupKey(task) { return groupBy === "priority" ? task.priority : task.terminal_state; }
+  function visibleTasks() {
+    if (!latestBoard) return [];
+    return latestBoard.tasks.filter(function (task) {
+      if (!workSearchMatches(task)) return false;
+      if (selectedProject && task.project_key !== selectedProject) return false;
+      if (queueMode === "closed") return task.work_status === "done" || task.work_status === "archived";
+      if (task.work_status !== "active") return false;
+      return queueMode !== "today" || task.in_today;
+    });
+  }
+  function sortByOrder(tasks) { return tasks.slice().sort(function (a, b) { return Number(a.order) - Number(b.order) || String(a.task_id).localeCompare(String(b.task_id)); }); }
+  function mergeReorderedTasks(tasks) { tasks.forEach(mergeSavedTask); }
+  function refreshAfterMutation(focus, successMessage) {
+    return fetchBoard(true).then(function () { restoreFocus(focus); if (successMessage) announce(successMessage); });
+  }
+  function taskReorderPayload(task, destinationKey, beforeTaskId) {
+    var groupTasks = sortByOrder(visibleTasks().filter(function (item) {
+      return item.task_id !== task.task_id && item.project_key === task.project_key && item.work_status === task.work_status && taskGroupKey(item) === destinationKey;
+    }));
+    var beforeIndex = groupTasks.findIndex(function (item) { return item.task_id === beforeTaskId; });
+    if (beforeIndex < 0) beforeIndex = groupTasks.length;
+    groupTasks.splice(beforeIndex, 0, task);
+    var payload = { project_key: task.project_key, task_ids: groupTasks.map(function (item) { return item.task_id; }) };
+    if (groupBy === "priority" && queueMode !== "closed") payload.priority = destinationKey;
+    return payload;
+  }
+  function performTaskReorder(taskId, destinationKey, beforeTaskId, focus) {
+    if (reorderLocked()) { announce("Reordering is disabled while searching."); restoreFocus(focus); return; }
+    var task = latestBoard.tasks.find(function (item) { return item.task_id === taskId; });
+    if (!task) return;
+    var beforeTask = beforeTaskId && latestBoard.tasks.find(function (item) { return item.task_id === beforeTaskId; });
+    if (beforeTask && beforeTask.project_key !== task.project_key) { announce("Tasks cannot move between projects."); restoreFocus(focus); return; }
+    if (beforeTask && beforeTask.work_status !== task.work_status) { announce("Done and archived rows keep their planning status while reordering."); restoreFocus(focus); return; }
+    if (selectedProject && task.project_key !== selectedProject) { announce("Tasks cannot move between projects."); restoreFocus(focus); return; }
+    if (queueMode === "closed" && task.work_status === "active") { announce("Done and archived work can reorder only in the closed view."); restoreFocus(focus); return; }
+    if (queueMode === "closed" && groupBy === "priority" && destinationKey !== task.priority) { announce("Closed rows cannot change priority by dragging."); restoreFocus(focus); return; }
+    if (groupBy === "terminal" && destinationKey !== task.terminal_state) {
+      announce("Terminal state is runtime truth; tasks cannot move between terminal groups."); restoreFocus(focus); return;
+    }
+    var snapshot = latestBoard;
+    var payload = taskReorderPayload(task, destinationKey, beforeTaskId);
+    mutate("/api/tasks/reorder", "POST", payload).then(function (response) {
+      mergeReorderedTasks(response.tasks || []);
+      return refreshAfterMutation(focus, "Moved " + (task.title || "thread") + ".");
+    }).catch(function (error) {
+      latestBoard = snapshot; renderBoard(snapshot); restoreFocus(focus);
+      announce("Move failed. " + error.message); toast(error.message, true);
+    });
+  }
+  function moveTask(task, direction, focus) {
+    if (reorderLocked()) { announce("Reordering is disabled while searching."); return; }
+    var peers = sortByOrder(visibleTasks().filter(function (item) { return item.project_key === task.project_key && item.work_status === task.work_status && taskGroupKey(item) === taskGroupKey(task); }));
+    var index = peers.findIndex(function (item) { return item.task_id === task.task_id; });
+    var swap = index + direction;
+    if (index < 0 || swap < 0 || swap >= peers.length) { announce("Thread is already at the " + (direction < 0 ? "top" : "bottom") + " of its group."); return; }
+    var before = direction < 0 ? peers[swap].task_id : (peers[swap + 1] || {}).task_id;
+    performTaskReorder(task.task_id, taskGroupKey(task), before, focus);
+  }
+  function performPriorityChange(task, next, focus) {
+    if (reorderLocked()) { announce("Reordering is disabled while searching."); renderBoard(latestBoard); restoreFocus(focus); return; }
+    var snapshot = latestBoard, destination = sortByOrder(visibleTasks().filter(function (item) { return item.task_id !== task.task_id && item.project_key === task.project_key && item.work_status === "active" && item.priority === next; }));
+    destination.push(task);
+    mutate("/api/tasks/reorder", "POST", { project_key: task.project_key, task_ids: destination.map(function (item) { return item.task_id; }), priority: next }).then(function (response) {
+      mergeReorderedTasks(response.tasks || []); return refreshAfterMutation(focus, "Set priority " + PRIORITY_LABELS[next] + ".");
+    }).catch(function (error) { latestBoard = snapshot; renderBoard(snapshot); restoreFocus(focus); announce("Priority change failed. " + error.message); toast(error.message, true); });
+  }
+  function prioritySelect(task) {
+    var select = element("select", "priority-select work-edit");
+    select.setAttribute("aria-label", "Set priority for " + task.title); select.dataset.focusKey = "priority-" + task.task_id;
+    select.disabled = reorderLocked() || task.work_status !== "active";
+    PRIORITY_GROUPS.forEach(function (priority) { var option = element("option", "", PRIORITY_LABELS[priority]); option.value = priority; option.selected = task.priority === priority; select.appendChild(option); });
+    select.addEventListener("change", function () {
+      var focus = select.dataset.focusKey, next = select.value;
+      if (task.work_status !== "active") {
+        select.value = task.priority; announce("Closed rows cannot change priority."); return;
+      }
+      performPriorityChange(task, next, focus);
+    });
+    return select;
+  }
   function headerCell(textValue, className) { var cell = element("th", className, textValue); cell.scope = "col"; return cell; }
   function renderTaskRow(task) {
-    var row = element("tr", "work-row");
+    var row = element("tr", "work-row"); row.dataset.taskId = task.task_id; row.dataset.projectKey = task.project_key; row.dataset.groupKey = taskGroupKey(task);
+    var orderCell = element("td", "work-order"), orderControls = element("div", "order-controls");
+    var handle = element("button", "drag-handle", "⋮⋮"); handle.type = "button"; handle.draggable = !reorderLocked(); handle.disabled = reorderLocked(); handle.setAttribute("aria-label", "Drag " + task.title); handle.dataset.focusKey = "drag-" + task.task_id;
+    var up = element("button", "move-button", "↑"), down = element("button", "move-button", "↓");
+    up.type = down.type = "button"; up.title = "Move up"; down.title = "Move down"; up.setAttribute("aria-label", "Move up " + task.title); down.setAttribute("aria-label", "Move down " + task.title); up.dataset.focusKey = "up-" + task.task_id; down.dataset.focusKey = "down-" + task.task_id; up.disabled = down.disabled = reorderLocked();
+    handle.addEventListener("dragstart", function (event) { draggedTask = task.task_id; event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", task.task_id); });
+    handle.addEventListener("dragend", function () { draggedTask = null; });
+    up.addEventListener("click", function () { moveTask(task, -1, up.dataset.focusKey); }); down.addEventListener("click", function () { moveTask(task, 1, down.dataset.focusKey); });
+    orderControls.append(handle, up, down); orderCell.appendChild(orderControls);
     var identity = element("td", "work-identity"), title = element("input", "task-title work-edit");
     title.value = task.title || ""; title.maxLength = 500; title.setAttribute("aria-label", "Name for " + (task.title || task.session_id));
-    identity.append(title, registerEdit(task, "title", title, function () { return title.value; }, 450), element("div", "task-project", task.project_name || "Unknown project"), element("div", "session-id", task.session_id));
+    identity.append(title, registerEdit(task, "title", title, function () { return title.value; }, 450), element("div", "task-summary", task.summary), element("div", "task-project", task.project_name || "Unknown project"), element("div", "session-id", task.session_id));
+    var priorityCell = element("td", "work-priority"); priorityCell.append(prioritySelect(task), element("span", "sr-only", "Set priority"));
     var dueCell = element("td", "work-due"), due = element("input", "work-edit");
     due.type = "date"; due.value = task.due_date || ""; due.title = dueLabel(task.due_date); due.setAttribute("aria-label", "Due date for " + task.title);
     dueCell.append(due, registerEdit(task, "due_date", due, function () { return due.value || null; }, 0));
@@ -164,43 +270,72 @@
     activityCell.append(element("strong", "provider", providerName(task.session_provider)), element("span", "updated", relativeTime(task.last_activity_at)));
     var actionCell = element("td", "work-actions"), actions = element("div", "task-actions");
     actions.append(launchChoice(task, "claude"), launchChoice(task, "codex")); actionCell.appendChild(actions);
-    row.append(identity, dueCell, statusCell, terminalCell, activityCell, actionCell); return row;
+    row.append(orderCell, identity, priorityCell, dueCell, statusCell, terminalCell, activityCell, actionCell); return row;
   }
-  function appendGroup(root, name, tasks) {
-    var section = element("section", "project-group"), heading = element("h4", "project-heading");
+  function appendGroup(root, key, name, tasks) {
+    var section = element("section", "project-group"), heading = element("h4", "project-heading"); section.dataset.groupKey = key;
     heading.append(element("span", "project-name", name), element("span", "count", tasks.length + (tasks.length === 1 ? " thread" : " threads")));
     var table = element("table", "work-table"), caption = element("caption", "sr-only", name + " terminal threads");
     var head = document.createElement("thead"), headRow = document.createElement("tr"), body = document.createElement("tbody");
-    headRow.append(headerCell("Name / Project", "column-name"), headerCell("Due date", "column-due"), headerCell("Work status", "column-status"), headerCell("Terminal state", "column-terminal"), headerCell("Agent / activity", "column-activity"), headerCell("Actions", "column-actions"));
-    head.appendChild(headRow); tasks.forEach(function (task) { body.appendChild(renderTaskRow(task)); });
+    headRow.append(headerCell("Order", "column-order"), headerCell("Name / Project", "column-name"), headerCell("Priority", "column-priority"), headerCell("Due date", "column-due"), headerCell("Work status", "column-status"), headerCell("Terminal state", "column-terminal"), headerCell("Agent / activity", "column-activity"), headerCell("Actions", "column-actions"));
+    head.appendChild(headRow); sortByOrder(tasks).forEach(function (task) { var row = renderTaskRow(task); row.addEventListener("dragover", function (event) { if (draggedTask && !reorderLocked()) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }); row.addEventListener("drop", function (event) { event.preventDefault(); var focus = "drag-" + draggedTask; performTaskReorder(draggedTask, key, task.task_id, focus); }); body.appendChild(row); });
+    section.addEventListener("dragover", function (event) { if (draggedTask && !reorderLocked()) event.preventDefault(); }); section.addEventListener("drop", function (event) { if (event.target.closest("tr")) return; event.preventDefault(); performTaskReorder(draggedTask, key, null, "drag-" + draggedTask); });
     table.append(caption, head, body); section.append(heading, table); root.appendChild(section);
   }
   function workSearchMatches(task) {
     var query = $("work-search").value.trim().toLowerCase(); if (!query) return true;
-    var haystack = [task.title, task.project_name, task.session_provider, task.session_id].join(" ").toLowerCase();
+    var haystack = [task.title, task.summary, task.project_name, task.session_provider, task.session_id].join(" ").toLowerCase();
     return haystack.indexOf(query) !== -1;
+  }
+  function renderProjectSidebar(data) {
+    $("all-count").textContent = data.tasks.filter(function (task) { return task.work_status === "active"; }).length;
+    $("today-count").textContent = data.tasks.filter(function (task) { return task.work_status === "active" && task.in_today; }).length;
+    $("closed-count").textContent = data.tasks.filter(function (task) { return task.work_status !== "active"; }).length;
+    var list = $("project-list"); list.replaceChildren();
+    data.projects.forEach(function (project) {
+      var row = element("div", "project-nav-row" + (selectedProject === project.project_key ? " active" : "")); row.dataset.projectKey = project.project_key;
+      var drag = element("button", "project-drag", "⋮⋮"); drag.type = "button"; drag.draggable = !reorderLocked(); drag.disabled = reorderLocked(); drag.setAttribute("aria-label", "Drag project " + project.name); drag.dataset.focusKey = "project-drag-" + project.project_key; drag.addEventListener("dragstart", function (event) { draggedProject = project.project_key; event.dataTransfer.setData("text/plain", project.project_key); }); drag.addEventListener("dragend", function () { draggedProject = null; });
+      var select = element("button", "project-select"); select.type = "button"; select.setAttribute("aria-pressed", String(selectedProject === project.project_key)); select.append(element("span", "project-nav-name", project.name), element("span", "nav-count", String(project.counts.active))); select.addEventListener("click", function () { selectedProject = project.project_key; queueMode = "all"; renderBoard(latestBoard); });
+      var projectMoves = element("span", "project-moves"), up = element("button", "project-move", "↑"), down = element("button", "project-move", "↓"); up.type = down.type = "button"; up.title = "Move project up"; down.title = "Move project down"; up.setAttribute("aria-label", "Move project up " + project.name); down.setAttribute("aria-label", "Move project down " + project.name); up.dataset.focusKey = "project-up-" + project.project_key; down.dataset.focusKey = "project-down-" + project.project_key; up.disabled = down.disabled = reorderLocked(); up.addEventListener("click", function () { moveProject(project.project_key, -1, up.dataset.focusKey); }); down.addEventListener("click", function () { moveProject(project.project_key, 1, down.dataset.focusKey); }); projectMoves.append(up, down);
+      row.addEventListener("dragover", function (event) { if (draggedProject && !reorderLocked()) event.preventDefault(); }); row.addEventListener("drop", function (event) { event.preventDefault(); reorderProject(draggedProject, project.project_key, "project-drag-" + draggedProject); });
+      row.append(drag, select, projectMoves); list.appendChild(row);
+    });
+  }
+  function moveProject(projectKey, direction, focus) {
+    var keys = latestBoard.projects.map(function (project) { return project.project_key; }), index = keys.indexOf(projectKey), swap = index + direction;
+    if (swap < 0 || swap >= keys.length) { announce("Project is already at the " + (direction < 0 ? "top." : "bottom.")); return; }
+    var before = direction < 0 ? keys[swap] : keys[swap + 1]; reorderProject(projectKey, before, focus);
+  }
+  function reorderProject(projectKey, beforeKey, focus) {
+    if (!projectKey || reorderLocked()) { announce("Reordering is disabled while searching."); return; }
+    var snapshot = latestBoard.projects.slice(), keys = snapshot.map(function (project) { return project.project_key; }).filter(function (key) { return key !== projectKey; });
+    var index = keys.indexOf(beforeKey); keys.splice(index < 0 ? keys.length : index, 0, projectKey);
+    mutate("/api/projects/reorder", "POST", { project_keys: keys }).then(function () { return fetchBoard(true); }).then(function () { restoreFocus(focus); announce("Project order saved."); }).catch(function (error) { latestBoard.projects = snapshot; renderProjectSidebar(latestBoard); restoreFocus(focus); announce("Project move failed. " + error.message); toast(error.message, true); });
+  }
+  function selectedProjectData() { return latestBoard && latestBoard.projects.find(function (project) { return project.project_key === selectedProject; }); }
+  function renderProjectDetail() {
+    var project = selectedProjectData(), detail = $("project-detail"); detail.hidden = !project; if (!project) return;
+    $("project-name").textContent = project.name; $("project-path").textContent = project.path;
+    $("project-counts").textContent = project.counts.active + " active · " + project.counts.today + " today · " + project.counts.needs_input + " needs input";
+    var description = $("project-description"); if (document.activeElement !== description && !description.getAttribute("aria-invalid")) description.value = project.description || "";
+    $("description-limit").textContent = description.value.length + " / 1000";
   }
   function renderBoard(data) {
     latestBoard = data; editStates = [];
     $("task-count").textContent = data.tasks.length + (data.tasks.length === 1 ? " thread" : " threads");
+    if (selectedProject && !selectedProjectData()) selectedProject = null;
+    renderProjectSidebar(data); renderProjectDetail(); updateReorderReason();
+    Array.prototype.forEach.call(document.querySelectorAll(".work-scope"), function (button) { var active = button.dataset.scope === queueMode; button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active)); });
+    var heading = queueMode === "all" ? "All active" : queueMode === "today" ? "Today" : "Done & Archived"; if (selectedProjectData()) heading = selectedProjectData().name;
+    $("work-heading").textContent = heading;
     var root = $("task-groups"); root.replaceChildren();
-    var visible = data.tasks.filter(function (task) {
-      if (!workSearchMatches(task)) return false;
-      if (queueMode === "done") return task.work_status === "done" || task.work_status === "archived";
-      if (task.work_status !== "active") return false;
-      return queueMode !== "today" || task.in_today;
-    });
+    var visible = visibleTasks(); $("visible-count").textContent = visible.length + (visible.length === 1 ? " thread" : " threads");
     if (!visible.length) { emptyMessage(root, "No threads match this view."); return; }
-    if (queueMode === "projects") {
-      var groups = Object.create(null), order = [];
-      visible.forEach(function (task) { if (!groups[task.project_key]) { groups[task.project_key] = []; order.push(task.project_key); } groups[task.project_key].push(task); });
-      order.forEach(function (key) { appendGroup(root, groups[key][0].project_name, groups[key]); });
-    } else {
-      appendGroup(root, queueMode === "active" ? "Active" : queueMode === "today" ? "Today" : "Done & Archived", visible);
-    }
+    var keys = groupBy === "priority" ? PRIORITY_GROUPS : TERMINAL_GROUPS, labels = groupBy === "priority" ? PRIORITY_LABELS : TERMINAL_LABELS;
+    keys.forEach(function (key) { var tasks = visible.filter(function (task) { return taskGroupKey(task) === key; }); appendGroup(root, key, labels[key], tasks); });
   }
-  function fetchBoard() {
-    if (hasProtectedWorkControls()) return Promise.resolve();
+  function fetchBoard(force) {
+    if (!force && hasProtectedWorkControls()) return Promise.resolve();
     return request("/api/board").then(function (data) { $("board-error").hidden = true; renderBoard(data); }).catch(function (error) { $("board-error").hidden = false; $("board-error").textContent = error.message; });
   }
 
@@ -273,18 +408,25 @@
   Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (tab) {
     tab.addEventListener("click", function () { flushPendingEdits(false).then(function () { activateTab(tab); }); });
   });
-  Array.prototype.forEach.call(document.querySelectorAll(".queue-mode"), function (button) {
+  Array.prototype.forEach.call(document.querySelectorAll(".work-scope"), function (button) {
     button.addEventListener("click", function () {
       flushPendingEdits(false).then(function () {
-        queueMode = button.dataset.mode;
-        Array.prototype.forEach.call(document.querySelectorAll(".queue-mode"), function (item) {
-          var selected = item === button; item.classList.toggle("active", selected); item.setAttribute("aria-pressed", String(selected));
-        });
+        queueMode = button.dataset.scope; selectedProject = null;
         if (latestBoard) renderBoard(latestBoard);
       });
     });
   });
+  $("group-by").addEventListener("change", function () { groupBy = $("group-by").value; if (latestBoard) renderBoard(latestBoard); });
   $("work-search").addEventListener("input", debounce(function () { if (latestBoard && !hasProtectedWorkControls()) renderBoard(latestBoard); }, 120));
+  $("project-description").addEventListener("input", function () { $("description-limit").textContent = $("project-description").value.length + " / 1000"; });
+  $("cancel-description").addEventListener("click", function () { var project = selectedProjectData(); if (!project) return; $("project-description").value = project.description || ""; $("project-description").removeAttribute("aria-invalid"); $("description-error").hidden = true; renderProjectDetail(); });
+  $("save-description").addEventListener("click", function () {
+    var project = selectedProjectData(), description = $("project-description"), value = description.value; if (!project) return;
+    var button = $("save-description"); button.disabled = true; description.setAttribute("aria-busy", "true");
+    mutate("/api/projects/" + encodeURIComponent(project.project_key), "PATCH", { description: value }).then(function (response) {
+      project.description = response.project.description; description.removeAttribute("aria-invalid"); $("description-error").hidden = true; announce("Project description saved."); toast("Project description saved");
+    }).catch(function (error) { description.setAttribute("aria-invalid", "true"); $("description-error").textContent = "Could not save: " + error.message; $("description-error").hidden = false; description.focus(); announce("Description save failed. Your text is retained."); toast(error.message, true); }).finally(function () { button.disabled = false; description.removeAttribute("aria-busy"); });
+  });
   $("search-input").addEventListener("input", debounce(fetchSessions, 250));
   $("here-toggle").addEventListener("change", fetchSessions);
   $("thread-search").addEventListener("input", debounce(function () { renderTranscript($("thread-search").value); }, 150));

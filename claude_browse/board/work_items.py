@@ -515,17 +515,12 @@ def reorder_tasks(
         if any(row["project_key"] != key for row in ordered):
             raise ValueError("task_ids must belong to the same project")
         statuses = {row["status"] for row in ordered}
-        priorities = {row["priority"] for row in ordered}
         if len(statuses) != 1:
             raise ValueError("task_ids must belong to the same work-status group")
         status = next(iter(statuses))
         if status in {"done", "archived"}:
             if destination_priority is not None:
                 raise ValueError("closed tasks cannot change priority")
-            if len(priorities) != 1:
-                raise ValueError("closed tasks may reorder only within their group")
-        elif destination_priority is None and len(priorities) != 1:
-            raise ValueError("active tasks may reorder only within one priority group")
 
         slots = sorted(int(row["position"]) for row in ordered)
         now = time.time()

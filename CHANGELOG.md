@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **ClickUp-style project and priority navigation.** Work now has a responsive
+  persistent project sidebar, project paths/counts/local descriptions, row
+  transcript previews, four fixed priorities, and Priority or Terminal-state
+  grouping. Drag handles and keyboard controls persist same-project task and
+  project order, with atomic priority drops, search locking, terminal-state
+  rejection, closed-view boundaries, accessible announcements, and rollback
+  on failed mutations.
 - **Automatic terminal-thread work board.** Every hook-observed Claude or
   CodeX session now becomes one row without Add or Save. The dense local Work
   list opens to Active and includes Today, By Project, and Done & Archived,

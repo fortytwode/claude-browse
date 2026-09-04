@@ -68,7 +68,7 @@ def test_readme_documents_experimental_external_providers():
 def test_readme_documents_automatic_session_backed_work_board():
     text = " ".join(_readme_text().split())
     assert "Every hook-observed Claude or CodeX terminal session becomes one work row" in text
-    assert "Active, Today, By Project, and Done & Archived" in text
+    assert "All active, Today, Done & Archived" in text
     assert "Work status" in text
     assert "Terminal state" in text
     assert "Done returns to Active only when that same session receives a new prompt" in text
@@ -79,8 +79,22 @@ def test_readme_documents_automatic_session_backed_work_board():
     assert "cross-provider action starts a new context and therefore a new work row" in text
     assert "CSRF and DNS-rebinding control" in text
     assert "same-user local processes are trusted" in text
-    assert "Work metadata, due dates, archive state, and transcripts remain local" in text
+    assert "Work metadata, due dates, priorities, manual order, project descriptions, archive state, and transcripts remain local" in text
     assert "Cross-Mac work metadata and Mission Control rendering are deferred" in text
     assert "Add a standalone task" not in text
     assert "save an existing thread" not in text
     assert "POST /api/tasks` | Add" not in text
+
+
+def test_readme_documents_project_priority_navigation():
+    text = " ".join(_readme_text().split())
+    assert "persistent project sidebar" in text
+    assert "Urgent, High, Normal, or Low" in text
+    assert "Priority or Terminal state" in text
+    assert "local project description" in text
+    assert "one-line transcript preview" in text
+    assert "Reordering is disabled while searching" in text
+    assert "tasks never move between projects" in text
+    assert "POST /api/tasks/reorder" in text
+    assert "POST /api/projects/reorder" in text
+    assert "PATCH /api/projects/<project-key>" in text

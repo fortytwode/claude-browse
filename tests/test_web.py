@@ -312,6 +312,54 @@ def test_web_assets_define_dense_work_and_history_contract():
     assert "grid-template-areas" in stylesheet
 
 
+def test_web_assets_define_project_priority_and_reorder_contract():
+    assets = Path(web.__file__).with_name("webassets")
+    html = (assets / "index.html").read_text()
+    javascript = (assets / "app.js").read_text()
+    stylesheet = (assets / "app.css").read_text()
+
+    for element_id in (
+        "work-sidebar",
+        "project-list",
+        "project-detail",
+        "project-description",
+        "group-by",
+        "reorder-reason",
+        "work-announcer",
+    ):
+        assert f'id="{element_id}"' in html
+    assert 'maxlength="1000"' in html
+    assert 'data-scope="all"' in html
+    assert 'data-scope="today"' in html
+    assert 'data-scope="closed"' in html
+
+    for contract in (
+        'var PRIORITY_GROUPS = ["urgent", "high", "normal", "low"]',
+        'var TERMINAL_GROUPS = ["needs-input", "working", "idle", "ended", "gone"]',
+        'mutate("/api/tasks/reorder"',
+        'mutate("/api/projects/reorder"',
+        '"/api/projects/" + encodeURIComponent',
+        'task.summary',
+        'task.priority',
+        'dragstart',
+        'dragover',
+        'Move up',
+        'Move down',
+        'Set priority',
+        'Reordering is disabled while searching.',
+        'Terminal state is runtime truth',
+        'queueMode = "all"',
+        'Closed rows cannot change priority by dragging.',
+        'restoreFocus',
+    ):
+        assert contract in javascript
+
+    assert "grid-template-columns:240px minmax(0,1fr)" in stylesheet
+    assert "work-sidebar" in stylesheet
+    assert "task-summary" in stylesheet
+    assert "@media (max-width:760px)" in stylesheet
+
+
 def test_automatic_thread_update_and_board_roundtrip(web_server):
     base, _server = web_server
     _board_thread("automatic", provider="codex", name="Ship the work queue")
@@ -402,6 +450,17 @@ def test_reorder_and_project_routes_are_protected_and_transactional(web_server):
     _status, response = _mutate_json(base + "/api/tasks/reorder", "POST", payload)
     assert [task["task_id"] for task in response["tasks"]] == payload["task_ids"]
     assert {task["priority"] for task in response["tasks"]} == {"urgent"}
+
+    _mutate_json(base + "/api/tasks/" + one["task_id"], "PATCH", {"priority": "low"})
+    mixed_payload = {
+        "project_key": one["project_key"],
+        "task_ids": [one["task_id"], two["task_id"]],
+    }
+    _status, response = _mutate_json(
+        base + "/api/tasks/reorder", "POST", mixed_payload
+    )
+    assert [task["task_id"] for task in response["tasks"]] == mixed_payload["task_ids"]
+    assert [task["priority"] for task in response["tasks"]] == ["low", "urgent"]
 
     project_url = base + "/api/projects/" + urllib.parse.quote(
         one["project_key"], safe=""

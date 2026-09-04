@@ -101,12 +101,21 @@ sync. Every hook-observed Claude or CodeX terminal session becomes one work row
 automatically, including multiple sessions opened in the same folder. There is
 no Add or Save step.
 
-Work opens to **Active** on every page load and offers **Active, Today, By
-Project, and Done & Archived**, plus a separate read-only **Thread History**.
-Today contains active work that needs input, has an unattended completion, is
-overdue, or is due today. By Project groups by normalized Git origin when one
-is available and otherwise by canonical folder, while each row retains the
-session's exact working directory for launch.
+Work opens to **All active** with a persistent project sidebar for **All
+active, Today, Done & Archived**, and every real Git repository or canonical
+folder. Today contains active work that needs input, has an unattended
+completion, is overdue, or is due today. Selecting a project filters the list
+and shows its exact path, counts, and local project description; each row also
+shows a one-line transcript preview derived from the search index.
+
+Every thread has exactly one planning priority: **Urgent, High, Normal, or
+Low**. The list groups in fixed order by **Priority or Terminal state**.
+Drag handles persist manual task order, including a priority change when a row
+crosses priority groups; keyboard Move up, Move down, and Set priority controls
+provide the same operations. Projects can be presentation-reordered in the
+sidebar, but tasks never move between projects. Terminal state is runtime
+truth, so cross-state drops are rejected. Closed work can reorder only in Done
+& Archived, and **Reordering is disabled while searching**.
 
 The dense list labels **Work status** and **Terminal state** separately. Work
 status is the planning choice (`Active`, `Done`, or `Archived`); Terminal state
@@ -134,7 +143,8 @@ sidebar past the default 100 sessions.
 
 Queue metadata is stored in `~/.claude/agent-board/state.db`, separately from
 the rebuildable search index and hook-owned live session state. Work metadata,
-due dates, archive state, and transcripts remain local to this Mac. Cross-Mac
+due dates, priorities, manual order, project descriptions, archive state, and
+transcripts remain local to this Mac. Cross-Mac
 work metadata and Mission Control rendering are deferred; optional sync carries
 only the existing live-status projection, not the Work overlay or transcript.
 
@@ -152,10 +162,13 @@ server prints its URL to stderr on startup; the port is OS-assigned):
 | Endpoint | Returns |
 | -------- | ------- |
 | `GET /api/meta` | Viewer settings, detected launch project, and the per-server request token |
-| `GET /api/board` | All session-backed work rows, including Work status, Terminal state, project identity, and available actions |
+| `GET /api/board` | All session-backed work rows and real projects, including priorities, ordering, summaries, counts, Terminal state, and available actions |
 | `GET /api/sessions?q=<query>&here=1` | `{"sessions": [...]}` -- session list; `q` runs the same ranked search as the fzf picker, `here=1` scopes to the launch folder. Each session carries `session_id`, `provider`, `provider_name`, `folder`, `cwd`, `title`, `first_msg`, `last_msg`, `msg_count`, `timestamp`, `last_timestamp`, and a preformatted `when` |
 | `GET /api/session/<sid>` | `{"meta": {...}, "turns": [{"role", "text"}, ...]}` -- the full prose transcript, newlines preserved |
-| `PATCH /api/tasks/<task-id>` | Change `title`, `due_date`, or `status` (`active`, `done`, or `archived`) on an automatic row |
+| `PATCH /api/tasks/<task-id>` | Change `title`, `due_date`, `priority`, or `status` (`active`, `done`, or `archived`) on an automatic row |
+| `POST /api/tasks/reorder` | Persist the supplied same-project visible group order, optionally changing active rows to one priority |
+| `PATCH /api/projects/<project-key>` | Save a local project description (maximum 1000 characters) |
+| `POST /api/projects/reorder` | Persist the presentation order of all real projects |
 | `POST /api/tasks/<task-id>/launch` | Launch a Work row in Claude or CodeX |
 | `POST /api/sessions/<sid>/launch` | Launch a Thread History session in Claude or CodeX |
 

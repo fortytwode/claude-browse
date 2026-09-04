@@ -16,24 +16,41 @@
   <label id="full-access-label"><input id="full-access" type="checkbox" checked>Full access (skip permissions)</label>
 </header>
 <main id="board-view" class="page">
-  <section class="hero"><div><h2>Your terminal threads</h2><p>Plan and resume every Claude and CodeX terminal conversation.</p></div></section>
   <div id="board-error" class="error" role="alert" hidden></div>
-  <section aria-labelledby="work-heading">
-    <div class="section-heading queue-heading">
-      <div><h3 id="work-heading">Work</h3><span id="task-count" class="count"></span></div>
-      <div class="work-tools">
-        <label class="search-label" for="work-search">Search work</label>
-        <input id="work-search" type="search" placeholder="Title, project, agent, or session ID" autocomplete="off">
-        <div class="queue-modes" aria-label="Work view">
-          <button class="queue-mode active" data-mode="active" aria-pressed="true">Active</button>
-          <button class="queue-mode" data-mode="today" aria-pressed="false">Today</button>
-          <button class="queue-mode" data-mode="projects" aria-pressed="false">By Project</button>
-          <button class="queue-mode" data-mode="done" aria-pressed="false">Done &amp; Archived</button>
+  <div class="work-shell">
+    <aside id="work-sidebar" aria-label="Work navigation">
+      <div class="work-sidebar-heading"><h2>Work</h2><span id="task-count" class="count"></span></div>
+      <nav class="work-scopes" aria-label="Saved work views">
+        <button class="work-scope active" data-scope="all" data-mode="active" aria-pressed="true"><span>All active</span><span id="all-count" class="nav-count"></span></button>
+        <button class="work-scope" data-scope="today" data-mode="today" aria-pressed="false"><span>Today</span><span id="today-count" class="nav-count"></span></button>
+        <button class="work-scope" data-scope="closed" data-mode="done" aria-pressed="false"><span>Done &amp; Archived</span><span id="closed-count" class="nav-count"></span></button>
+      </nav>
+      <div class="project-list-heading"><h3>Projects</h3><span>Drag to order</span></div>
+      <div id="project-list" data-mode="projects"></div>
+    </aside>
+    <section class="work-main" aria-labelledby="work-heading">
+      <div id="project-detail" class="project-detail" hidden>
+        <div class="project-title-line"><div><h2 id="project-name"></h2><p id="project-path"></p></div><div id="project-counts" class="project-counts"></div></div>
+        <div class="description-editor">
+          <label for="project-description">Project description</label>
+          <textarea id="project-description" maxlength="1000" rows="2" placeholder="Add local context for this project…"></textarea>
+          <div class="description-actions"><span id="description-limit">0 / 1000</span><button id="save-description" type="button">Save</button><button id="cancel-description" type="button">Cancel</button></div>
+          <p id="description-error" class="field-error" role="alert" hidden></p>
         </div>
       </div>
-    </div>
-    <div id="task-groups"></div>
-  </section>
+      <div class="section-heading queue-heading">
+        <div><h3 id="work-heading">All active</h3><span id="visible-count" class="count"></span></div>
+        <div class="work-tools">
+          <label class="search-label" for="work-search">Search work</label>
+          <input id="work-search" type="search" placeholder="Title, summary, project, agent, or session ID" autocomplete="off">
+          <label class="search-label" for="group-by">Group by</label>
+          <select id="group-by"><option value="priority">Priority</option><option value="terminal">Terminal state</option></select>
+        </div>
+      </div>
+      <p id="reorder-reason" class="reorder-reason" aria-live="polite"></p>
+      <div id="task-groups"></div>
+    </section>
+  </div>
 </main>
 <main id="history-view" hidden>
   <aside id="sidebar" aria-label="Thread History">
@@ -61,6 +78,7 @@
   </section>
 </main>
 <div id="toast" role="status" aria-live="polite"></div>
+<div id="work-announcer" class="sr-only" role="status" aria-live="assertive" aria-atomic="true"></div>
 <script src="/app.js"></script>
 </body>
 </html>
