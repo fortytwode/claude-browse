@@ -1,9 +1,9 @@
 """Cross-laptop sync: mirrors local session state to Firestore, and (U7)
 renders the Slack #agent-status board from it.
 
-Invoked out-of-band as an async hook sibling on Stop/Notification/SessionEnd
-(see settings.json) -- never from the hot hook path in board/hook.py, so a
-slow or failing network call can never block a turn.
+Invoked out-of-band by a detached worker launched only after board/hook.py
+commits the local transition. Workers serialize before reading SQLite, so a
+late-starting process always publishes the newest committed local state.
 
 Firestore auth: Application Default Credentials (already verified to
 resolve to the team-projects-480520 project on this machine via
@@ -18,6 +18,8 @@ import json
 import os
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from claude_browse.board import naming, store
@@ -37,6 +39,7 @@ META_DOC = "slack"
 SLACK_CHANNEL = "C0BFW39EXBJ"
 
 _LOG_PATH = Path.home() / ".claude" / "agent-board" / "sync.log"
+_PUBLICATION_LOCK_PATH = _LOG_PATH.with_name("publication.lock")
 _DEFAULT_ENV_FILE = Path.home() / "team-operations" / ".env"
 
 
@@ -188,69 +191,80 @@ def session_doc(row: dict) -> dict:
     }
 
 
-def push(session_id: str) -> None:
-    """Mirror this session's local state to Firestore. Best-effort, never raises."""
+@contextmanager
+def _publication_lock() -> Iterator[None]:
+    """Serialize this host's workers across the complete publication cycle."""
+    import fcntl
+
+    _PUBLICATION_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_PUBLICATION_LOCK_PATH, "a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def push(session_id: str) -> bool:
+    """Publish the newest local state. Best-effort, never raises.
+
+    True means the Firestore document was merged. Slack alerts and the board
+    remain independently best-effort, preserving the offline hook contract.
+    """
     try:
-        row = store.get(session_id)
-        if row is None:
-            return
+        with _publication_lock():
+            # Do not snapshot state until this worker owns publication order.
+            row = store.get(session_id)
+            if row is None:
+                return False
 
-        naming.maybe_name(session_id)
-        row = store.get(session_id) or row  # re-read in case the name just upgraded
+            naming.maybe_name(session_id)
+            row = store.get(session_id) or row  # re-read in case the name just upgraded
 
-        host = row.get("host") or "unknown-host"
-        doc_id = f"{host}:{session_id}"
+            host = row.get("host") or "unknown-host"
+            doc_id = f"{host}:{session_id}"
 
-        client = _firestore_client()
-        # merge=True: the team-operations sweep owns its own fields on this
-        # doc (alert_count, last_alert_at, alert_ts). A plain set() would
-        # wipe them on every turn and the sweep would re-alert forever.
-        client.collection(COLLECTION).document(doc_id).set(session_doc(row), merge=True)
+            client = _firestore_client()
+            # merge=True: the team-operations sweep owns its own fields on this
+            # doc (alert_count, last_alert_at, alert_ts). A plain set() would
+            # wipe them on every turn and the sweep would re-alert forever.
+            client.collection(COLLECTION).document(doc_id).set(session_doc(row), merge=True)
+
+            pending_alert = row.get("pending_alert")
+            if pending_alert:
+                try:
+                    if pending_alert == "needs-input" or _immediate_done_alert_enabled():
+                        post_alert(
+                            session_id,
+                            pending_alert,
+                            row.get("name") or session_id,
+                            folder=os.path.basename(row.get("cwd") or "") or None,
+                            model_label=row.get("model_label") or None,
+                            provider=store.provider_of(row),
+                        )
+                    else:
+                        _log(
+                            f"skipped immediate done alert for session_id={session_id} "
+                            "(AGENT_BOARD_IMMEDIATE_DONE_ALERT off; sweep handles unattended)"
+                        )
+                except Exception as exc:
+                    _log(f"post_alert failed for session_id={session_id}: {exc}")
+                finally:
+                    store.clear_pending_alert(session_id)
+
+            try:
+                post_or_update_slack(render_slack_body())
+            except Exception as exc:
+                _log(f"slack board update failed for session_id={session_id}: {exc}")
+            return True
     except Exception as exc:
         _log(f"push failed for session_id={session_id}: {exc}")
-        return
-
-    pending_alert = row.get("pending_alert")
-    if pending_alert:
-        try:
-            if pending_alert == "needs-input" or _immediate_done_alert_enabled():
-                post_alert(
-                    session_id,
-                    pending_alert,
-                    row.get("name") or session_id,
-                    folder=os.path.basename(row.get("cwd") or "") or None,
-                    model_label=row.get("model_label") or None,
-                    provider=store.provider_of(row),
-                )
-            else:
-                _log(
-                    f"skipped immediate done alert for session_id={session_id} "
-                    "(AGENT_BOARD_IMMEDIATE_DONE_ALERT off; sweep handles unattended)"
-                )
-        except Exception as exc:
-            _log(f"post_alert failed for session_id={session_id}: {exc}")
-        finally:
-            store.clear_pending_alert(session_id)
-
-    try:
-        post_or_update_slack(render_slack_body())
-    except Exception as exc:
-        _log(f"slack board update failed for session_id={session_id}: {exc}")
+        return False
 
 
-def push_ack(session_id: str) -> None:
-    """Mirror an explicit ack to Firestore (acked_at only). Best-effort."""
-    try:
-        row = store.get(session_id)
-        if row is None:
-            return
-        host = row.get("host") or "unknown-host"
-        client = _firestore_client()
-        client.collection(COLLECTION).document(f"{host}:{session_id}").set(
-            {"acked_at": row.get("acked_at")}, merge=True
-        )
-    except Exception as exc:
-        _log(f"push_ack failed for session_id={session_id}: {exc}")
+def push_ack(session_id: str) -> bool:
+    """Backward-compatible explicit-ack entry point; publish the full board."""
+    return push(session_id)
 
 
 def _fetch_all_session_docs():
@@ -412,7 +426,7 @@ def check() -> str:
 def ack_main(argv: list[str]) -> int:
     """`agent-board ack <session-id-prefix | name-substring>`: mark a finished
     session as seen so no surface keeps re-surfacing it. Local first (so the
-    statusline/aj reflect it instantly), then mirrored to Firestore."""
+    statusline/aj reflect it instantly), then publish the full board."""
     if not argv:
         print("usage: agent-board ack <session-id-prefix | name-substring>", file=sys.stderr)
         return 1
@@ -429,7 +443,7 @@ def ack_main(argv: list[str]) -> int:
     row = matches[0]
     session_id = str(row["session_id"])
     store.ack(session_id)
-    push_ack(session_id)
+    push(session_id)
     print(f"acked {row.get('name') or session_id}")
     return 0
 
@@ -444,9 +458,12 @@ def main(argv: list[str]) -> None:
 
     if subcommand == "push":
         try:
-            raw = sys.stdin.read()
-            payload = json.loads(raw)
-            session_id = payload.get("session_id")
+            if len(argv) > 1:
+                session_id = argv[1]
+            else:
+                raw = sys.stdin.read()
+                payload = json.loads(raw)
+                session_id = payload.get("session_id")
             if session_id:
                 push(session_id)
         except Exception as exc:

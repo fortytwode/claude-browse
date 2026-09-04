@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import sys
+import threading
+import time
 
 import pytest
 
@@ -17,6 +20,7 @@ from claude_browse.board import store, sync  # noqa: E402
 
 def _fresh_store(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "_DB_PATH", tmp_path / "state.db")
+    monkeypatch.setattr(sync, "_PUBLICATION_LOCK_PATH", tmp_path / "publication.lock")
 
 
 def test_firestore_client_is_constructed_once_and_cached(monkeypatch):
@@ -130,7 +134,68 @@ def test_push_never_raises_when_client_construction_fails(tmp_path, monkeypatch)
 
     monkeypatch.setattr(sync, "_firestore_client", _raise)
 
-    sync.push("s3")  # must not raise
+    assert sync.push("s3") is False  # must not raise
+
+
+def test_push_serializes_workers_and_latest_local_state_wins(tmp_path, monkeypatch):
+    monkeypatch.setattr(sync, "_PUBLICATION_LOCK_PATH", tmp_path / "publication.lock")
+    monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
+    monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)
+    local_row = {
+        "session_id": "s-race", "host": "air", "cwd": "/tmp/proj",
+        "state": "idle", "name": "thread", "provider": "claude",
+    }
+    reads = []
+
+    def _read_local(session_id):
+        reads.append((session_id, local_row["state"]))
+        return dict(local_row)
+
+    monkeypatch.setattr(store, "get", _read_local)
+
+    first_write_started = threading.Event()
+    release_first_write = threading.Event()
+    writes = []
+
+    class BlockingDocRef(_FakeDocRef):
+        def set(self, data, merge=False):
+            writes.append(dict(data))
+            if len(writes) == 1:
+                first_write_started.set()
+                assert release_first_write.wait(timeout=5)
+            super().set(data, merge=merge)
+
+    class BlockingCollection(_FakeCollection):
+        def document(self, doc_id):
+            return BlockingDocRef(self.sink, doc_id)
+
+    class BlockingClient(_FakeClient):
+        def collection(self, name):
+            assert name == sync.COLLECTION
+            return BlockingCollection(self.sink)
+
+    client = BlockingClient()
+    monkeypatch.setattr(sync, "_firestore_client", lambda: client)
+    results = []
+    first = threading.Thread(target=lambda: results.append(sync.push("s-race")))
+    first.start()
+    assert first_write_started.wait(timeout=5)
+
+    local_row.update(state="working", done_at=None, done_turn_s=None)
+    second = threading.Thread(target=lambda: results.append(sync.push("s-race")))
+    second.start()
+    time.sleep(0.05)
+    assert len(writes) == 1
+    assert reads == [("s-race", "idle"), ("s-race", "idle")]
+    release_first_write.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert results == [True, True]
+    assert [doc["state"] for doc in writes] == ["idle", "working"]
+    assert reads[-2:] == [("s-race", "working"), ("s-race", "working")]
+    assert client.sink["air:s-race"]["state"] == "working"
 
 
 def test_push_calls_post_alert_when_pending_alert_set_and_clears_it(tmp_path, monkeypatch):
@@ -405,14 +470,70 @@ def test_ack_main_marks_local_and_pushes(tmp_path, monkeypatch, capsys):
     _fresh_store(tmp_path, monkeypatch)
     store.upsert("abc-1", host="air", cwd="/tmp/p", state="idle", name="deploy mission control")
     store.mark_done("abc-1", 600)
-    fake_client = _FakeClient()
-    monkeypatch.setattr(sync, "_firestore_client", lambda: fake_client)
+    calls = []
+
+    def _push(session_id):
+        row = store.get(session_id)
+        calls.append((session_id, row["acked_at"]))
+        return True
+
+    monkeypatch.setattr(sync, "push", _push)
 
     assert sync.ack_main(["mission"]) == 0
 
     assert store.is_unattended(store.get("abc-1")) is False
-    assert fake_client.sink["air:abc-1"]["acked_at"] is not None
+    assert calls[0][0] == "abc-1" and calls[0][1] is not None
     assert "acked deploy mission control" in capsys.readouterr().out
+
+
+def test_ack_full_push_refreshes_slack_with_rendered_body(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(sync, "_PUBLICATION_LOCK_PATH", tmp_path / "publication.lock")
+    store.upsert("abc-2", host="air", cwd="/tmp/p", state="idle", name="review launch")
+    store.mark_done("abc-2", 600)
+    monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
+    monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
+    monkeypatch.setattr(sync, "render_slack_body", lambda: "rendered board after ack")
+    bodies = []
+    monkeypatch.setattr(sync, "post_or_update_slack", bodies.append)
+
+    assert sync.ack_main(["launch"]) == 0
+
+    assert bodies == ["rendered board after ack"]
+
+
+def test_ack_stays_locally_successful_when_publication_fails(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("abc-3", host="air", cwd="/tmp/p", state="idle", name="offline task")
+    store.mark_done("abc-3", 600)
+    monkeypatch.setattr(sync, "push", lambda session_id: False)
+
+    assert sync.ack_main(["offline"]) == 0
+    assert store.is_unattended(store.get("abc-3")) is False
+
+
+def test_sync_push_accepts_session_id_argv(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sync, "push", lambda session_id: calls.append(session_id))
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO("not json and must not be read"))
+
+    with pytest.raises(SystemExit) as exc_info:
+        sync.main(["push", "from-argv"])
+
+    assert exc_info.value.code == 0
+    assert calls == ["from-argv"]
+
+
+def test_sync_push_retains_stdin_json_fallback(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sync, "push", lambda session_id: calls.append(session_id))
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO('{"session_id":"from-stdin"}'))
+
+    with pytest.raises(SystemExit) as exc_info:
+        sync.main(["push"])
+
+    assert exc_info.value.code == 0
+    assert calls == ["from-stdin"]
 
 
 def test_ack_main_refuses_ambiguous_match(tmp_path, monkeypatch, capsys):

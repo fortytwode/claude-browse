@@ -230,9 +230,88 @@ def test_main_exits_zero_even_if_dispatch_raises(monkeypatch):
     assert exc_info.value.code == 0
 
 
+def test_main_spawns_sync_after_committing_user_prompt(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("s-publish", host="air", cwd="/tmp/proj", state="idle",
+                 name="thread", done_at=123.0, done_turn_s=45.0)
+    observed = []
+
+    def _observe_spawn(session_id):
+        row = store.get(session_id)
+        observed.append((session_id, row["state"], row["done_at"], row["done_turn_s"]))
+
+    monkeypatch.setattr(hook, "_spawn_sync", _observe_spawn)
+    monkeypatch.setattr(sys, "argv", ["agent-board", "hook"])
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(json.dumps({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "s-publish",
+        "cwd": "/tmp/proj",
+        "prompt": "continue the work",
+    })))
+
+    with pytest.raises(SystemExit) as exc_info:
+        hook.main()
+
+    assert exc_info.value.code == 0
+    assert observed == [("s-publish", "working", None, None)]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not valid json {{{",
+        json.dumps({"hook_event_name": "Stop", "cwd": "/tmp/proj"}),
+        json.dumps({
+            "hook_event_name": "Notification",
+            "session_id": "s-ignore",
+            "cwd": "/tmp/proj",
+            "notification_type": "idle_prompt",
+        }),
+        json.dumps({"hook_event_name": "UnknownEvent", "session_id": "s-unknown"}),
+    ],
+)
+def test_main_does_not_spawn_sync_for_non_mutating_input(tmp_path, monkeypatch, raw):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook, "_spawn_sync", calls.append)
+    monkeypatch.setattr(sys, "argv", ["agent-board", "hook"])
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(raw))
+
+    with pytest.raises(SystemExit) as exc_info:
+        hook.main()
+
+    assert exc_info.value.code == 0
+    assert calls == []
+
+
+def test_spawn_sync_uses_detached_repo_command_and_preferred_interpreter(monkeypatch):
+    calls = []
+    monkeypatch.delenv("AGENT_BOARD_DISABLE_SYNC", raising=False)
+    monkeypatch.setattr(hook, "_SYNC_INTERPRETER", Path("/repo/.venv/bin/python"))
+    monkeypatch.setattr(hook, "_ENTRY_SCRIPT", Path("/repo/agent-board"))
+    monkeypatch.setattr(hook.subprocess, "Popen", lambda command, **kwargs: calls.append((command, kwargs)))
+
+    hook._spawn_sync("session-123")
+
+    assert calls == [(
+        ["/repo/.venv/bin/python", "/repo/agent-board", "sync", "push", "session-123"],
+        {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "start_new_session": True,
+            "close_fds": True,
+        },
+    )]
+
+
 def test_entry_script_end_to_end_working_then_idle_transition(tmp_path, monkeypatch):
     """Integration: pipe real JSON through the actual `agent-board hook` entry script."""
-    env = {**__import__("os").environ, "AGENT_BOARD_DB_PATH": str(tmp_path / "state.db")}
+    env = {
+        **__import__("os").environ,
+        "AGENT_BOARD_DB_PATH": str(tmp_path / "state.db"),
+        "AGENT_BOARD_DISABLE_SYNC": "1",
+    }
 
     start_payload = json.dumps({
         "hook_event_name": "UserPromptSubmit",
@@ -465,7 +544,11 @@ def test_session_end_always_preserves_done_at(tmp_path, monkeypatch, reason):
 def test_entry_script_accepts_provider_flag_end_to_end(tmp_path, monkeypatch):
     """The real shim, the real argv, a Codex-shaped payload on stdin."""
     db = tmp_path / "state.db"
-    env = {**dict(__import__("os").environ), "AGENT_BOARD_DB_PATH": str(db)}
+    env = {
+        **dict(__import__("os").environ),
+        "AGENT_BOARD_DB_PATH": str(db),
+        "AGENT_BOARD_DISABLE_SYNC": "1",
+    }
     payload = json.dumps({"hook_event_name": "SessionStart", "session_id": "codex-e2e",
                           "cwd": "/tmp/proj", "model": "gpt-5-codex", "transcript_path": "/nope",
                           "permission_mode": "default", "source": "startup"})

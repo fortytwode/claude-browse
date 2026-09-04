@@ -3,10 +3,10 @@
 Entry point for SessionStart / UserPromptSubmit / Stop / Notification /
 PermissionRequest / SessionEnd. Must never break a session: every path
 through main() exits 0, and all local work is synchronous SQLite (fast).
-Network work (Haiku naming, Firestore/Slack sync) is deliberately NOT
-triggered from here -- it runs from a separate `agent-board sync` command
-registered as an async hook, so a slow or failing network call can never
-block a turn (see board/sync.py, U6).
+After a recognized event commits locally, main launches a detached
+`agent-board sync push <session-id>` worker. Network work never blocks the
+hook, and sync.py serializes workers before reading SQLite so an older worker
+cannot overwrite a newer local transition.
 
 Providers: Claude Code and Codex both deliver the same hook envelope on
 stdin (`hook_event_name`, `session_id`, `cwd`, `model`, `transcript_path`,
@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -31,6 +32,10 @@ from pathlib import Path
 from claude_browse.board import notify, store
 
 _NOTIFY_AFTER_S = 60
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ENTRY_SCRIPT = _REPO_ROOT / "agent-board"
+_REPO_VENV_PYTHON = _REPO_ROOT / ".venv" / "bin" / "python"
+_SYNC_INTERPRETER = _REPO_VENV_PYTHON if _REPO_VENV_PYTHON.exists() else Path(sys.executable)
 
 
 def _unattended_min_turn_s() -> float:
@@ -225,11 +230,12 @@ def _parse_provider(argv: list[str]) -> str:
     return store.DEFAULT_PROVIDER
 
 
-def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
+def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
+    """Apply one recognized state transition and report whether it mutated."""
     event = payload.get("hook_event_name")
     session_id = payload.get("session_id")
     if not session_id:
-        return
+        return False
     cwd = payload.get("cwd")
     row = store.get(session_id)
     model_label = _model_label(payload, row)
@@ -252,6 +258,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
                 fields["model_label"] = model_label
             store.upsert(session_id, **fields)
         store.heartbeat(session_id)
+        return True
 
     elif event == "UserPromptSubmit":
         fields = {
@@ -277,6 +284,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
                 fields["name_source"] = "provisional"
         store.upsert(session_id, **fields)
         store.heartbeat(session_id)
+        return True
 
     elif event == "Stop":
         working_since = row.get("working_since") if row else None
@@ -291,6 +299,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
             store.set_pending_alert(session_id, "done")
         if working_since and turn_s >= _unattended_min_turn_s():
             store.mark_done(session_id, turn_s)
+        return True
 
     elif event == "Notification" or event in _NEEDS_INPUT_EVENTS:
         notification_type = payload.get("notification_type")
@@ -299,6 +308,8 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify(_notify_title("needs input", cwd, model_label), _notify_body(name, cwd))
             store.set_pending_alert(session_id, "needs-input")
+            return True
+        return False
 
     elif event == "SessionEnd":
         # done_at deliberately survives SessionEnd, however the session ended
@@ -306,6 +317,34 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
         # back to is still a thread you can resume, and the board's job is
         # to keep it visible until you do, or ack it.
         _set_state(session_id, "ended", cwd=cwd, model_label=model_label or None)
+        return True
+
+    return False
+
+
+def _spawn_sync(session_id: str) -> None:
+    """Launch best-effort publication without extending hook latency."""
+    if os.environ.get("AGENT_BOARD_DISABLE_SYNC", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        return
+    try:
+        subprocess.Popen(
+            [
+                str(_SYNC_INTERPRETER),
+                str(_ENTRY_SCRIPT),
+                "sync",
+                "push",
+                session_id,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception:
+        pass
 
 
 def main() -> None:
@@ -313,7 +352,8 @@ def main() -> None:
         provider = _parse_provider(sys.argv[1:])
         raw = sys.stdin.read()
         payload = json.loads(raw)
-        dispatch(payload, provider=provider)
+        if dispatch(payload, provider=provider):
+            _spawn_sync(str(payload["session_id"]))
     except Exception:
         pass
     finally:
