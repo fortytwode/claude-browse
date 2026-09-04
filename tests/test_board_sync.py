@@ -323,6 +323,67 @@ def test_uncontended_coalesced_push_publishes_only_requested_session(
     assert "air:s-other" not in client.sink
 
 
+def test_uncontended_coalesced_push_retries_other_dirty_sessions(
+    tmp_path, monkeypatch
+):
+    _fresh_store(tmp_path, monkeypatch)
+    _quiet(monkeypatch)
+    for session_id in ("b-retry", "d-requested", "historical"):
+        store.upsert(
+            session_id,
+            host="air",
+            cwd=f"/tmp/{session_id}",
+            state="idle",
+            name=session_id,
+        )
+    store.mark_sync_pending("b-retry")
+
+    calls = []
+    failed_once = False
+    original_publish = sync._publish_session
+
+    def _fail_b_once(session_id):
+        nonlocal failed_once
+        calls.append(session_id)
+        if session_id == "b-retry" and not failed_once:
+            failed_once = True
+            raise RuntimeError("transient backend failure")
+        return original_publish(session_id)
+
+    client = _FakeClient()
+    monkeypatch.setattr(sync, "_publish_session", _fail_b_once)
+    monkeypatch.setattr(sync, "_firestore_client", lambda: client)
+
+    assert sync.push("b-retry", coalesce=True) is False
+    assert [row["session_id"] for row in store.pending_sync()] == ["b-retry"]
+
+    # This requested row deliberately has no sync revision. A later detached
+    # worker must still publish it first, then retry every durable dirty row.
+    assert sync.push("d-requested", coalesce=True) is True
+
+    assert calls == ["b-retry", "d-requested", "b-retry"]
+    assert store.pending_sync() == []
+    assert "historical" not in calls
+    assert {"air:b-retry", "air:d-requested"} <= client.sink.keys()
+
+
+def test_direct_push_does_not_drain_other_dirty_sessions(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    for session_id in ("manual", "other-dirty"):
+        store.upsert(session_id, host="air", state="idle")
+    store.mark_sync_pending("other-dirty")
+
+    calls = []
+    monkeypatch.setattr(
+        sync, "_publish_session", lambda session_id: calls.append(session_id) or True
+    )
+    monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)
+    monkeypatch.setattr(sync, "render_slack_body", lambda: "board")
+
+    assert sync.push("manual") is True
+    assert calls == ["manual"]
+
+
 def test_push_calls_post_alert_when_pending_alert_set_and_clears_it(tmp_path, monkeypatch):
     """The fix for the real gap found in production: chat.update (what the
     board itself uses) doesn't re-notify Slack channel members, so a

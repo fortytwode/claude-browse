@@ -71,6 +71,9 @@ _NEEDS_INPUT_EVENTS = {"PermissionRequest"}
 # exactly the failure this feature exists to prevent.
 _IGNORED_NOTIFICATION_TYPES = {
     "idle_prompt",  # fires on ~60s of user inactivity -- not "needs you", just "hasn't typed"
+    # Claude emits this when a quota pause ends and work resumes by itself.
+    # Treating it as needs-input would announce precisely the opposite state.
+    "quota_auto_resume_fired",
     "auth_success",
     "elicitation_complete",
     "elicitation_response",
@@ -292,6 +295,11 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
         working_since = row.get("working_since") if row else None
         _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
         turn_s = (time.time() - working_since) if working_since else 0.0
+        # Commit the completion before making its alert consumable. A sync
+        # worker may read pending_alert immediately, and must never observe a
+        # "done" alert whose done_at has not been written yet.
+        if working_since and turn_s >= _unattended_min_turn_s():
+            store.mark_done(session_id, turn_s)
         if working_since and turn_s > _NOTIFY_AFTER_S:
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify(_notify_title("done", cwd, model_label), _notify_body(name, cwd))
@@ -299,8 +307,6 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             # knows to post a fresh Slack message too -- chat.update alone
             # doesn't re-notify Slack channel members (see sync.post_alert).
             store.set_pending_alert(session_id, "done")
-        if working_since and turn_s >= _unattended_min_turn_s():
-            store.mark_done(session_id, turn_s)
         return True
 
     elif event == "Notification" or event in _NEEDS_INPUT_EVENTS:
@@ -324,6 +330,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             cwd=cwd,
             state="idle",
             provider=provider,
+            working_since=None,
             done_at=None,
             done_turn_s=None,
             pending_alert=None,

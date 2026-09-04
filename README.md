@@ -408,8 +408,10 @@ python3 scripts/install_agent_board.py --check
 `~/.codex/hooks.json` as `{"hooks": {Event: [...]}}`. Command handlers use
 the `timeout` field. The installer registers `agent-board hook --provider codex`
 on `SessionStart` / `UserPromptSubmit` / `Stop` / `PermissionRequest` /
-`SessionEnd` (Codex has no `Notification` event; `PermissionRequest` is its
-blocked-on-you signal and maps to `needs-input`). The provider is stored on
+`Interrupt` / `SessionEnd` (Codex has no `Notification` event;
+`PermissionRequest` is its blocked-on-you signal and maps to `needs-input`).
+`Interrupt` returns the thread to `idle` and does not record a completion,
+because interrupted work did not finish. The provider is stored on
 the row, so Codex threads get `codex resume <id>` on every surface, never a
 `claude --resume` that cannot open them. `SessionEnd` has Codex's maximum
 timeout of 3 seconds; it only commits local state and starts detached,

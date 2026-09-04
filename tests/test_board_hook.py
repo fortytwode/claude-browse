@@ -35,6 +35,34 @@ def test_stop_after_long_run_sets_idle_and_notifies(tmp_path, monkeypatch):
     assert store.get("s1")["pending_alert"] == "done"  # so sync.py posts a fresh Slack alert too
 
 
+def test_stop_records_completion_before_exposing_done_alert(tmp_path, monkeypatch):
+    """A publisher consuming the alert must already see completion metadata."""
+    _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    original_set_pending_alert = store.set_pending_alert
+    row_when_alert_was_set = []
+
+    def capture_completion_order(session_id, kind):
+        row_when_alert_was_set.append(store.get(session_id))
+        original_set_pending_alert(session_id, kind)
+
+    monkeypatch.setattr(store, "set_pending_alert", capture_completion_order)
+    store.upsert(
+        "s-ordered",
+        host="air",
+        cwd="/tmp/proj",
+        state="working",
+        working_since=time.time() - 90,
+    )
+
+    hook.dispatch(
+        {"hook_event_name": "Stop", "session_id": "s-ordered", "cwd": "/tmp/proj"}
+    )
+
+    assert row_when_alert_was_set[0]["done_at"] is not None
+    assert row_when_alert_was_set[0]["done_turn_s"] >= 60
+
+
 def test_stop_refreshes_heartbeat(tmp_path, monkeypatch):
     """Stop fires reliably on every turn per the verified hook contract,
     making it a more dependable liveness signal than statusline's refresh
@@ -127,6 +155,28 @@ def test_notification_ignored_types_do_not_change_state_or_notify(tmp_path, monk
     })
 
     assert store.get("s4")["state"] == "working"
+    assert calls == []
+
+
+def test_quota_auto_resume_notification_does_not_claim_user_input_is_needed(
+    tmp_path, monkeypatch
+):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    store.upsert("quota-resumed", host="air", cwd="/tmp/proj", state="working")
+
+    mutated = hook.dispatch(
+        {
+            "hook_event_name": "Notification",
+            "session_id": "quota-resumed",
+            "cwd": "/tmp/proj",
+            "notification_type": "quota_auto_resume_fired",
+        }
+    )
+
+    assert mutated is False
+    assert store.get("quota-resumed")["state"] == "working"
     assert calls == []
 
 
@@ -529,6 +579,23 @@ def test_codex_interrupt_returns_to_idle_without_marking_done(tmp_path, monkeypa
 
     row = store.get("c-interrupt")
     assert row["state"] == "idle"
+    assert row["working_since"] is None
+    assert row["done_at"] is None
+    assert row["pending_alert"] is None
+    assert store.is_unattended(row) is False
+    assert calls == []
+
+    # Codex may still deliver a delayed or duplicate Stop for the interrupted
+    # turn. It must not reinterpret that stale turn start as a completion.
+    hook.dispatch(
+        {
+            "hook_event_name": "Stop",
+            "session_id": "c-interrupt",
+            "cwd": "/Users/me/team-operations",
+        },
+        provider="codex",
+    )
+    row = store.get("c-interrupt")
     assert row["done_at"] is None
     assert row["pending_alert"] is None
     assert store.is_unattended(row) is False

@@ -310,13 +310,19 @@ def push(session_id: str, *, coalesce: bool = False) -> bool:
             if publication_mode is None:
                 return False
 
-            # A waiter represents every hook worker that collapsed behind it,
-            # including events from other sessions. The durable revision
-            # watermarks identify exactly which sessions still need work;
-            # scanning active() here would republish years of historical rows.
             session_ids = [session_id]
-            if publication_mode == "drain":
-                session_ids = [str(row["session_id"]) for row in store.pending_sync()]
+            if coalesce:
+                # Every detached worker is also a retry opportunity. Put its
+                # requested session first even when that row predates revision
+                # tracking, then drain only durable dirty revisions. This
+                # recovers transient failures without republishing historical
+                # clean rows, including when the worker acquired the lock
+                # immediately rather than waiting behind another publisher.
+                session_ids.extend(
+                    str(row["session_id"])
+                    for row in store.pending_sync()
+                    if row["session_id"] != session_id
+                )
 
             requested_published = False
             published_any = False

@@ -264,20 +264,18 @@ def _codex_hooks_feature_problem() -> str | None:
     try:
         import tomllib  # py3.11+
     except ImportError:  # pragma: no cover - exercised on supported py3.9/3.10
-        # We only need two booleans from one table. Keep older supported
-        # Pythons useful without adding a TOML dependency to this installer.
-        in_features = False
-        disabled = False
-        for raw_line in text.splitlines():
-            line = raw_line.split("#", 1)[0].strip()
-            if line.startswith("[") and line.endswith("]"):
-                in_features = line == "[features]"
-                continue
-            if in_features and "=" in line:
-                key, value = (part.strip() for part in line.split("=", 1))
-                if key in {"hooks", "codex_hooks"} and value.lower() == "false":
-                    disabled = True
-        data = {"features": {"hooks": False}} if disabled else {}
+        # Python 3.9/3.10 has no standard-library TOML parser. Recognize the
+        # relevant boolean conservatively (including dotted and quoted keys),
+        # but never claim a whole config is valid after only a partial parse.
+        # This makes --check fail closed instead of silently passing malformed
+        # TOML or an unfamiliar spelling.
+        if _fallback_hooks_are_disabled(text):
+            data = {"features": {"hooks": False}}
+        else:
+            return (
+                f"could not verify {config_path}: Python {sys.version_info.major}."
+                f"{sys.version_info.minor} has no standard-library TOML parser"
+            )
     else:
         try:
             data = tomllib.loads(text)
@@ -290,6 +288,60 @@ def _codex_hooks_feature_problem() -> str | None:
             "Set it to true (or delete the line) to enable."
         )
     return None
+
+
+def _toml_key_parts(raw: str) -> tuple[str, ...] | None:
+    """Parse the small TOML key-path subset needed by the fallback scanner."""
+    parts: list[str] = []
+    current: list[str] = []
+    quote = ""
+    for char in raw.strip():
+        if quote:
+            if char == quote:
+                quote = ""
+            else:
+                current.append(char)
+        elif char in {"'", '"'}:
+            if current:
+                return None
+            quote = char
+        elif char == ".":
+            part = "".join(current).strip()
+            if not part:
+                return None
+            parts.append(part)
+            current = []
+        else:
+            current.append(char)
+    part = "".join(current).strip()
+    if quote or not part:
+        return None
+    parts.append(part)
+    return tuple(parts)
+
+
+def _fallback_hooks_are_disabled(text: str) -> bool:
+    """Find an explicit features hooks=false without pretending to parse TOML."""
+    table: tuple[str, ...] = ()
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]") and not line.startswith("[["):
+            parsed = _toml_key_parts(line[1:-1])
+            table = parsed or ()
+            continue
+        if "=" not in line:
+            continue
+        raw_key, raw_value = line.split("=", 1)
+        key = _toml_key_parts(raw_key)
+        if key is None:
+            continue
+        full_key = table + key
+        if full_key in {("features", "hooks"), ("features", "codex_hooks")}:
+            if raw_value.strip().lower() == "false":
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------

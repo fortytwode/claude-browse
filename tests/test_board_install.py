@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib.util
 import json
 import sys
@@ -246,6 +247,54 @@ def test_install_warns_but_does_not_edit_hooks_false(installer, tmp_path, capsys
     assert "Codex will ignore" in capsys.readouterr().out
 
 
+def _disable_tomllib(monkeypatch):
+    real_import = builtins.__import__
+
+    def without_tomllib(name, *args, **kwargs):
+        if name == "tomllib":
+            raise ImportError("simulated Python < 3.11")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_tomllib)
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    [
+        "[features]\nhooks = false\n",
+        "features.hooks = false\n",
+        '"features"."hooks" = false\n',
+        "['features']\n'hooks' = false\n",
+    ],
+)
+def test_python_pre_311_fallback_detects_hooks_false(
+    installer, tmp_path, monkeypatch, capsys, config_text
+):
+    installer.run()
+    (tmp_path / ".codex" / "config.toml").write_text(config_text)
+    capsys.readouterr()
+    _disable_tomllib(monkeypatch)
+
+    assert installer.run(check_only=True) == 1
+
+    assert "hooks = false" in capsys.readouterr().out
+
+
+def test_python_pre_311_fallback_rejects_unverifiable_malformed_toml(
+    installer, tmp_path, monkeypatch, capsys
+):
+    installer.run()
+    (tmp_path / ".codex" / "config.toml").write_text("[features\nhooks = true\n")
+    capsys.readouterr()
+    _disable_tomllib(monkeypatch)
+
+    assert installer.run(check_only=True) == 1
+
+    out = capsys.readouterr().out
+    assert "could not verify" in out
+    assert "config.toml" in out
+
+
 def test_codex_skipped_when_codex_home_missing(installer, tmp_path, capsys):
     import shutil
 
@@ -267,6 +316,9 @@ def test_readme_documents_hook_contract_and_trust_workflow():
     assert "`/hooks`" in agent_board
     assert "trust" in agent_board.lower()
     assert "cannot verify" in agent_board.lower()
+    assert "`Interrupt`" in agent_board
+    assert "returns the thread to `idle`" in agent_board
+    assert "does not record a completion" in agent_board
 
 
 def test_sync_setup_documents_automatic_venv_selection_without_hook_rewiring():
