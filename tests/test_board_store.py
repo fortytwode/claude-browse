@@ -195,3 +195,74 @@ def test_migration_adds_new_columns_to_a_pre_existing_older_schema_db(tmp_path, 
     row = store.get("pre-existing-row")
     assert row["named_at_msg_count"] == 7
     assert row["model_label"] == "Opus"
+
+
+# ---------------------------------------------------------------------------
+# Unattended-completion helpers (2026-09 redesign)
+# ---------------------------------------------------------------------------
+
+def test_new_columns_migrate_onto_an_old_schema_db(tmp_path, monkeypatch):
+    """A machine that ran the pre-redesign board has a sessions table without
+    provider/done_at/done_turn_s/acked_at; _migrate must add them."""
+    import sqlite3
+
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, host TEXT, cwd TEXT, name TEXT, "
+        "name_source TEXT, state TEXT, working_since REAL, heartbeat_at REAL, updated_at REAL, "
+        "msg_count INTEGER, named_at_msg_count INTEGER, model_label TEXT, pending_alert TEXT)"
+    )
+    conn.execute("INSERT INTO sessions (session_id, state) VALUES ('legacy', 'idle')")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(store, "_DB_PATH", db)
+    monkeypatch.setattr(store, "_conn_cache", None)
+
+    row = store.get("legacy")
+    assert row["provider"] is None and row["done_at"] is None
+    assert store.provider_of(row) == "claude"  # legacy rows are Claude
+
+
+def test_mark_done_then_prompt_clears_and_ack_supersedes(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "_DB_PATH", tmp_path / "state.db")
+    store.upsert("s", host="air", cwd="/tmp/p", state="idle")
+    assert store.is_unattended(store.get("s")) is False
+
+    store.mark_done("s", 720.0)
+    row = store.get("s")
+    assert row["done_turn_s"] == 720.0
+    assert store.is_unattended(row) is True
+    assert [r["session_id"] for r in store.unattended()] == ["s"]
+
+    store.ack("s")
+    assert store.is_unattended(store.get("s")) is False
+
+    store.mark_done("s", 800.0)  # a later completion re-opens it despite the old ack
+    assert store.is_unattended(store.get("s")) is True
+
+    store.clear_done("s")
+    assert store.is_unattended(store.get("s")) is False
+
+
+def test_is_unattended_ignores_working_and_counts_ended(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "_DB_PATH", tmp_path / "state.db")
+    store.upsert("w", host="air", cwd="/tmp/p", state="working")
+    store.mark_done("w", 400.0)
+    store.upsert("w", state="working")
+    assert store.is_unattended(store.get("w")) is False
+
+    store.upsert("e", host="air", cwd="/tmp/p", state="idle")
+    store.mark_done("e", 400.0)
+    store.upsert("e", state="ended")
+    assert store.is_unattended(store.get("e")) is True  # closed window != picked up
+
+
+def test_find_matches_id_prefix_and_name_substring(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "_DB_PATH", tmp_path / "state.db")
+    store.upsert("53a5d575-aaaa", host="air", cwd="/tmp/p", state="idle", name="Review beat structure")
+    store.upsert("372809ec-bbbb", host="air", cwd="/tmp/p", state="idle", name="cash reporting fixes")
+
+    assert [r["session_id"] for r in store.find("53a5")] == ["53a5d575-aaaa"]
+    assert [r["session_id"] for r in store.find("CASH report")] == ["372809ec-bbbb"]
+    assert store.find("") == []

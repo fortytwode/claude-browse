@@ -55,3 +55,42 @@ def test_main_runs_without_raising(tmp_path, monkeypatch, capsys):
     cli.main()
     captured = capsys.readouterr()
     assert "foo" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Per-row provider + unattended section (2026-09 redesign)
+# ---------------------------------------------------------------------------
+
+def test_render_board_uses_each_rows_provider_for_resume(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("c-1", host="air", cwd="/tmp/a", state="idle", name="codex thread", provider="codex")
+    store.upsert("k-1", host="air", cwd="/tmp/b", state="idle", name="claude thread")
+
+    output = cli.render_board()
+    codex_line = next(line for line in output.splitlines() if "codex thread" in line)
+    claude_line = next(line for line in output.splitlines() if "claude thread" in line)
+
+    assert "codex resume c-1 --dangerously-bypass-approvals-and-sandbox" in codex_line
+    assert "claude --resume k-1 --dangerously-skip-permissions" in claude_line
+
+
+def test_render_board_leads_with_unattended_section(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("u-1", host="air", cwd="/tmp/a", state="idle", name="backfill done")
+    store.mark_done("u-1", 900)
+    store._raw_set_updated_at("u-1", time.time())
+    store.upsert("u-2", host="air", cwd="/tmp/b", state="working", name="still running")
+
+    output = cli.render_board()
+    lines = output.splitlines()
+
+    assert lines[0].startswith("⏳ finished, not picked up (1)")
+    assert "backfill done" in lines[1] and "ago" in lines[1]
+    assert "still running" not in "\n".join(lines[:3])
+
+
+def test_render_board_no_unattended_section_when_none(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("n-1", host="air", cwd="/tmp/a", state="idle", name="plain")
+    output = cli.render_board()
+    assert "not picked up" not in output

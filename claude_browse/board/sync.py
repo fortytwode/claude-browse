@@ -104,12 +104,28 @@ def _firestore_client():
     return _firestore_client_cache
 
 
+def _immediate_done_alert_enabled() -> bool:
+    """Whether a "done" transition posts a fresh Slack message the instant
+    the turn ends. Default OFF since the unattended redesign: an immediate
+    "done" cannot tell a run you walked away from apart from a turn you sat
+    and watched, so on an interactive evening it produced ~15 alerts from 3
+    threads and trained the channel to be ignored. Unattended completions
+    are now surfaced by the team-operations sweep only once you have NOT
+    come back for a while. "needs-input" is always immediate -- a blocked
+    session is urgent regardless of whether you're watching.
+    Set AGENT_BOARD_IMMEDIATE_DONE_ALERT=1 to restore the old behaviour."""
+    return os.environ.get("AGENT_BOARD_IMMEDIATE_DONE_ALERT", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def post_alert(
     session_id: str,
     kind: str,
     name: str,
     folder: str | None = None,
     model_label: str | None = None,
+    provider: str = store.DEFAULT_PROVIDER,
 ) -> None:
     """Post a fresh Slack message (chat.postMessage, not update) for a
     transition that needs the user's attention. chat.update -- what the
@@ -122,13 +138,12 @@ def post_alert(
     alert to a repo at a glance -- user feedback: the auto-name alone
     didn't say which project the thread belonged to.
     """
-    from claude_browse.providers import get_provider
-
     # yolo=True per user request: alert resume commands include the
     # provider's skip-permissions flag so re-entry is one paste. Built via
     # the provider (not a hardcoded string) so each provider's own flag is
-    # used automatically.
-    resume_hint = " ".join(get_provider("claude").native_resume_cmd(session_id, yolo=True))
+    # used automatically -- and via the ROW's provider, so a Codex thread
+    # gets `codex resume`, never a `claude --resume` that cannot open it.
+    resume_hint = resume_command(session_id, provider)
     tag = f" `[{folder}]`" if folder else ""
     model = f" · {model_label}" if model_label else ""
     if kind == "needs-input":
@@ -136,6 +151,41 @@ def post_alert(
     else:
         body = f"✅ *{name}*{tag}{model} — done\n`{resume_hint}`"
     _slack_post_message(body)
+
+
+def resume_command(session_id: str, provider: str | None) -> str:
+    """One-paste resume command for a session, built from its provider."""
+    from claude_browse.providers import get_provider
+
+    provider_id = provider or store.DEFAULT_PROVIDER
+    try:
+        spec = get_provider(provider_id)
+    except Exception:
+        spec = get_provider(store.DEFAULT_PROVIDER)
+    return " ".join(spec.native_resume_cmd(session_id, yolo=True))
+
+
+def session_doc(row: dict) -> dict:
+    """The Firestore projection of a local row. Every field the cross-machine
+    consumers need (Slack board, team-operations unattended sweep, Mission
+    Control web board, morning briefing) and nothing hot-path-only."""
+    cwd = row.get("cwd")
+    return {
+        "session_id": row.get("session_id"),
+        "host": row.get("host") or "unknown-host",
+        "name": row.get("name"),
+        "state": row.get("state"),
+        "cwd": cwd,
+        "folder": os.path.basename(cwd or "") or None,
+        "updated_at": row.get("updated_at"),
+        "heartbeat_at": row.get("heartbeat_at"),
+        "model_label": row.get("model_label"),
+        "provider": store.provider_of(row),
+        "done_at": row.get("done_at"),
+        "done_turn_s": row.get("done_turn_s"),
+        "acked_at": row.get("acked_at"),
+        "resume_command": resume_command(str(row.get("session_id")), store.provider_of(row)),
+    }
 
 
 def push(session_id: str) -> None:
@@ -152,18 +202,10 @@ def push(session_id: str) -> None:
         doc_id = f"{host}:{session_id}"
 
         client = _firestore_client()
-        client.collection(COLLECTION).document(doc_id).set(
-            {
-                "session_id": session_id,
-                "host": host,
-                "name": row.get("name"),
-                "state": row.get("state"),
-                "cwd": row.get("cwd"),
-                "updated_at": row.get("updated_at"),
-                "heartbeat_at": row.get("heartbeat_at"),
-                "model_label": row.get("model_label"),
-            }
-        )
+        # merge=True: the team-operations sweep owns its own fields on this
+        # doc (alert_count, last_alert_at, alert_ts). A plain set() would
+        # wipe them on every turn and the sweep would re-alert forever.
+        client.collection(COLLECTION).document(doc_id).set(session_doc(row), merge=True)
     except Exception as exc:
         _log(f"push failed for session_id={session_id}: {exc}")
         return
@@ -171,13 +213,20 @@ def push(session_id: str) -> None:
     pending_alert = row.get("pending_alert")
     if pending_alert:
         try:
-            post_alert(
-                session_id,
-                pending_alert,
-                row.get("name") or session_id,
-                folder=os.path.basename(row.get("cwd") or "") or None,
-                model_label=row.get("model_label") or None,
-            )
+            if pending_alert == "needs-input" or _immediate_done_alert_enabled():
+                post_alert(
+                    session_id,
+                    pending_alert,
+                    row.get("name") or session_id,
+                    folder=os.path.basename(row.get("cwd") or "") or None,
+                    model_label=row.get("model_label") or None,
+                    provider=store.provider_of(row),
+                )
+            else:
+                _log(
+                    f"skipped immediate done alert for session_id={session_id} "
+                    "(AGENT_BOARD_IMMEDIATE_DONE_ALERT off; sweep handles unattended)"
+                )
         except Exception as exc:
             _log(f"post_alert failed for session_id={session_id}: {exc}")
         finally:
@@ -189,9 +238,33 @@ def push(session_id: str) -> None:
         _log(f"slack board update failed for session_id={session_id}: {exc}")
 
 
+def push_ack(session_id: str) -> None:
+    """Mirror an explicit ack to Firestore (acked_at only). Best-effort."""
+    try:
+        row = store.get(session_id)
+        if row is None:
+            return
+        host = row.get("host") or "unknown-host"
+        client = _firestore_client()
+        client.collection(COLLECTION).document(f"{host}:{session_id}").set(
+            {"acked_at": row.get("acked_at")}, merge=True
+        )
+    except Exception as exc:
+        _log(f"push_ack failed for session_id={session_id}: {exc}")
+
+
 def _fetch_all_session_docs():
     client = _firestore_client()
     return list(client.collection(COLLECTION).stream())
+
+
+def _fmt_age(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{seconds / 3600:.1f}h".replace(".0h", "h")
+    return f"{seconds / 86400:.1f}d".replace(".0d", "d")
 
 
 def render_slack_body() -> str:
@@ -199,21 +272,36 @@ def render_slack_body() -> str:
 
     Includes a resume command per row (R6, plan scenario S4) -- built the
     same way cli.py's local board does, via the real provider, not
-    reimplemented here.
+    reimplemented here. Leads with the "finished, not picked up" section:
+    that is the list the user actually needs at a glance; everything else
+    is context.
     """
-    from claude_browse.providers import get_provider
-
     docs = _fetch_all_session_docs()
     rows = [d.to_dict() for d in docs]
     if not rows:
         return "*#agent-status* — all clear, no active sessions"
 
-    provider = get_provider("claude")
+    now = time.time()
+    lines = ["*#agent-status*"]
+
+    waiting = [r for r in rows if store.is_unattended(r) and store.display_state(r) != "gone"]
+    waiting.sort(key=lambda r: r.get("done_at") or 0)
+    if waiting:
+        lines.append(f"\n*⏳ finished, not picked up ({len(waiting)})*")
+        for row in waiting:
+            name = row.get("name") or row.get("cwd") or row.get("session_id")
+            folder = f" `[{row['folder']}]`" if row.get("folder") else ""
+            model = f" · {row.get('model_label')}" if row.get("model_label") else ""
+            age = _fmt_age(now - float(row.get("done_at") or now))
+            resume = row.get("resume_command") or resume_command(
+                str(row.get("session_id")), row.get("provider")
+            )
+            lines.append(f"⏳ *{name}*{folder}{model} — {age} ago — `{resume}`")
+
     by_host: dict[str, list[dict]] = {}
     for row in rows:
         by_host.setdefault(row.get("host") or "unknown-host", []).append(row)
 
-    lines = ["*#agent-status*"]
     for host in sorted(by_host):
         lines.append(f"\n*{host}*")
         host_rows = sorted(by_host[host], key=lambda r: store.STATE_ORDER.get(store.display_state(r), 5))
@@ -222,7 +310,9 @@ def render_slack_body() -> str:
             name = row.get("name") or row.get("cwd") or row.get("session_id")
             model = f" · {row.get('model_label')}" if row.get("model_label") else ""
             icon = store.STATE_ICON.get(state, "?")
-            resume = " ".join(provider.native_resume_cmd(row.get("session_id"), yolo=True))
+            resume = row.get("resume_command") or resume_command(
+                str(row.get("session_id")), row.get("provider")
+            )
             lines.append(f"{icon} {name}{model} — `{state}` — `{resume}`")
 
     return "\n".join(lines)
@@ -319,9 +409,34 @@ def check() -> str:
     return "\n".join(lines)
 
 
+def ack_main(argv: list[str]) -> int:
+    """`agent-board ack <session-id-prefix | name-substring>`: mark a finished
+    session as seen so no surface keeps re-surfacing it. Local first (so the
+    statusline/aj reflect it instantly), then mirrored to Firestore."""
+    if not argv:
+        print("usage: agent-board ack <session-id-prefix | name-substring>", file=sys.stderr)
+        return 1
+    query = " ".join(argv)
+    matches = store.find(query)
+    if not matches:
+        print(f"no session matches {query!r}", file=sys.stderr)
+        return 1
+    if len(matches) > 1:
+        print(f"{len(matches)} sessions match {query!r}; be more specific:", file=sys.stderr)
+        for row in matches:
+            print(f"  {row.get('session_id')}  {row.get('name')}", file=sys.stderr)
+        return 1
+    row = matches[0]
+    session_id = str(row["session_id"])
+    store.ack(session_id)
+    push_ack(session_id)
+    print(f"acked {row.get('name') or session_id}")
+    return 0
+
+
 def main(argv: list[str]) -> None:
     if not argv:
-        print("usage: agent-board sync <push|check>", file=sys.stderr)
+        print("usage: agent-board sync <push|check|ack <id-or-name>>", file=sys.stderr)
         sys.exit(1)
 
     subcommand = argv[0]
@@ -341,6 +456,9 @@ def main(argv: list[str]) -> None:
     elif subcommand == "check":
         print(check())
         sys.exit(0)
+
+    elif subcommand == "ack":
+        sys.exit(ack_main(argv[1:]))
 
     else:
         print(f"unknown sync subcommand: {subcommand}", file=sys.stderr)

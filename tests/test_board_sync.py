@@ -46,8 +46,17 @@ class _FakeDocRef:
         self.sink = sink
         self.doc_id = doc_id
 
-    def set(self, data):
-        self.sink[self.doc_id] = data
+    def set(self, data, merge=False):
+        # Mirrors Firestore semantics closely enough: merge=True overlays
+        # onto whatever the doc already holds (so sweep-owned fields
+        # survive a push), merge=False replaces the doc wholesale.
+        if merge and self.doc_id in self.sink:
+            merged = dict(self.sink[self.doc_id])
+            merged.update(data)
+            self.sink[self.doc_id] = merged
+        else:
+            self.sink[self.doc_id] = dict(data)
+        self.sink.setdefault("__merge_flags__", []).append(merge)
 
 
 class _FakeCollection:
@@ -139,7 +148,7 @@ def test_push_calls_post_alert_when_pending_alert_set_and_clears_it(tmp_path, mo
     monkeypatch.setattr(
         sync,
         "post_alert",
-        lambda sid, kind, name, folder=None, model_label=None:
+        lambda sid, kind, name, folder=None, model_label=None, provider="claude":
             calls.append((sid, kind, name, model_label)),
     )
 
@@ -160,7 +169,7 @@ def test_push_does_not_call_post_alert_when_none_pending(tmp_path, monkeypatch):
     monkeypatch.setattr(
         sync,
         "post_alert",
-        lambda sid, kind, name, folder=None, model_label=None:
+        lambda sid, kind, name, folder=None, model_label=None, provider="claude":
             calls.append((sid, kind, name, model_label)),
     )
 
@@ -179,7 +188,7 @@ def test_push_clears_pending_alert_even_if_post_alert_raises(tmp_path, monkeypat
     monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)
     monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
 
-    def _raise(sid, kind, name, folder=None, model_label=None):
+    def _raise(sid, kind, name, folder=None, model_label=None, provider="claude"):
         raise RuntimeError("slack down")
 
     monkeypatch.setattr(sync, "post_alert", _raise)
@@ -261,3 +270,161 @@ def test_post_alert_includes_folder_tag_when_provided(monkeypatch):
 
     assert "[claude-browse]" in captured["body"]
     assert "my-thread" in captured["body"]
+
+
+# ---------------------------------------------------------------------------
+# Unattended-completion fields + provider-aware push (2026-09 redesign)
+# ---------------------------------------------------------------------------
+
+def _quiet(monkeypatch):
+    monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
+    monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)
+
+
+def test_push_merges_and_carries_provider_and_unattended_fields(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    _quiet(monkeypatch)
+    store.upsert("s-u", host="air", cwd="/Users/me/team-operations", state="idle",
+                 name="backfill toggl", provider="codex")
+    store.mark_done("s-u", 900.0)
+
+    fake_client = _FakeClient()
+    # Pre-existing sweep-owned fields must survive the push.
+    fake_client.sink["air:s-u"] = {"alert_count": 2, "last_alert_at": 123.0}
+    monkeypatch.setattr(sync, "_firestore_client", lambda: fake_client)
+
+    sync.push("s-u")
+
+    doc = fake_client.sink["air:s-u"]
+    assert doc["alert_count"] == 2 and doc["last_alert_at"] == 123.0  # merge=True kept them
+    assert fake_client.sink["__merge_flags__"] == [True]
+    assert doc["provider"] == "codex"
+    assert doc["folder"] == "team-operations"
+    assert doc["done_at"] is not None and doc["done_turn_s"] == 900.0
+    assert doc["acked_at"] is None
+    assert doc["resume_command"].startswith("codex resume s-u")
+
+
+def test_push_skips_immediate_done_alert_by_default_but_clears_pending(tmp_path, monkeypatch):
+    """The redesign: a 'done' no longer posts a fresh Slack message the
+    instant the turn ends (it could not tell attended from unattended).
+    The unattended sweep in team-operations owns that now."""
+    _fresh_store(tmp_path, monkeypatch)
+    _quiet(monkeypatch)
+    monkeypatch.delenv("AGENT_BOARD_IMMEDIATE_DONE_ALERT", raising=False)
+    store.upsert("s-d", host="air", cwd="/tmp/p", state="idle", name="t", pending_alert="done")
+    monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
+    calls = []
+    monkeypatch.setattr(sync, "post_alert", lambda *a, **k: calls.append((a, k)))
+
+    sync.push("s-d")
+
+    assert calls == []
+    assert store.get("s-d")["pending_alert"] is None
+
+
+def test_push_immediate_done_alert_opt_in(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    _quiet(monkeypatch)
+    monkeypatch.setenv("AGENT_BOARD_IMMEDIATE_DONE_ALERT", "1")
+    store.upsert("s-d2", host="air", cwd="/tmp/p", state="idle", name="t", pending_alert="done")
+    monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
+    calls = []
+    monkeypatch.setattr(sync, "post_alert", lambda *a, **k: calls.append((a, k)))
+
+    sync.push("s-d2")
+
+    assert len(calls) == 1 and calls[0][0][1] == "done"
+
+
+def test_push_needs_input_alert_is_always_immediate(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    _quiet(monkeypatch)
+    monkeypatch.delenv("AGENT_BOARD_IMMEDIATE_DONE_ALERT", raising=False)
+    store.upsert("s-n", host="air", cwd="/tmp/p", state="needs-input", name="t",
+                 pending_alert="needs-input", provider="codex")
+    monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
+    calls = []
+    monkeypatch.setattr(sync, "post_alert", lambda *a, **k: calls.append((a, k)))
+
+    sync.push("s-n")
+
+    assert len(calls) == 1
+    assert calls[0][0][1] == "needs-input"
+    assert calls[0][1]["provider"] == "codex"
+
+
+def test_post_alert_uses_codex_resume_for_codex_rows(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(sync, "_slack_post_message", lambda body: captured.setdefault("body", body))
+
+    sync.post_alert("abc-123", "needs-input", "my-thread", provider="codex")
+
+    assert "codex resume abc-123 --dangerously-bypass-approvals-and-sandbox" in captured["body"]
+    assert "claude --resume" not in captured["body"]
+
+
+def test_render_slack_body_leads_with_unattended_section(monkeypatch):
+    import time as _t
+
+    now = _t.time()
+    docs = [
+        _FakeDocFirestore({"session_id": "s1", "host": "air", "name": "thread-a", "state": "idle",
+                           "cwd": "/tmp/a", "folder": "a", "heartbeat_at": now, "updated_at": now,
+                           "provider": "codex", "done_at": now - 1500, "acked_at": None,
+                           "resume_command": "codex resume s1 --dangerously-bypass-approvals-and-sandbox"}),
+        _FakeDocFirestore({"session_id": "s2", "host": "air", "name": "thread-b", "state": "idle",
+                           "cwd": "/tmp/b", "heartbeat_at": now, "updated_at": now,
+                           "done_at": now - 1500, "acked_at": now}),  # acked -> not listed
+        _FakeDocFirestore({"session_id": "s3", "host": "pro", "name": "thread-c", "state": "working",
+                           "cwd": "/tmp/c", "heartbeat_at": now, "updated_at": now,
+                           "done_at": now - 1500}),  # working -> not unattended
+    ]
+    monkeypatch.setattr(sync, "_fetch_all_session_docs", lambda: docs)
+
+    body = sync.render_slack_body()
+    first_section = body.split("*air*")[0]
+
+    assert "finished, not picked up (1)" in first_section
+    assert "thread-a" in first_section and "25m ago" in first_section
+    assert "codex resume s1" in first_section
+    assert "thread-b" not in first_section and "thread-c" not in first_section
+    # Legacy docs without a provider still get a Claude resume command.
+    assert "claude --resume s2 --dangerously-skip-permissions" in body
+
+
+class _FakeDocFirestore:
+    def __init__(self, data):
+        self._data = data
+
+    def to_dict(self):
+        return self._data
+
+
+def test_ack_main_marks_local_and_pushes(tmp_path, monkeypatch, capsys):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("abc-1", host="air", cwd="/tmp/p", state="idle", name="deploy mission control")
+    store.mark_done("abc-1", 600)
+    fake_client = _FakeClient()
+    monkeypatch.setattr(sync, "_firestore_client", lambda: fake_client)
+
+    assert sync.ack_main(["mission"]) == 0
+
+    assert store.is_unattended(store.get("abc-1")) is False
+    assert fake_client.sink["air:abc-1"]["acked_at"] is not None
+    assert "acked deploy mission control" in capsys.readouterr().out
+
+
+def test_ack_main_refuses_ambiguous_match(tmp_path, monkeypatch, capsys):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("a1", host="air", cwd="/tmp/p", state="idle", name="deploy one")
+    store.upsert("a2", host="air", cwd="/tmp/p", state="idle", name="deploy two")
+
+    assert sync.ack_main(["deploy"]) == 1
+    assert "2 sessions match" in capsys.readouterr().err
+    assert store.get("a1")["acked_at"] is None
+
+
+def test_ack_main_unknown_returns_1(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    assert sync.ack_main(["nope"]) == 1

@@ -30,7 +30,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     msg_count          INTEGER,
     named_at_msg_count INTEGER,
     model_label        TEXT,
-    pending_alert      TEXT
+    pending_alert      TEXT,
+    provider           TEXT,
+    done_at            REAL,
+    done_turn_s        REAL,
+    acked_at           REAL
 )
 """
 
@@ -48,6 +52,10 @@ _COLUMNS = (
     "named_at_msg_count",
     "model_label",
     "pending_alert",
+    "provider",
+    "done_at",
+    "done_turn_s",
+    "acked_at",
 )
 
 _COLUMN_TYPES = {
@@ -63,6 +71,21 @@ _COLUMN_TYPES = {
     "named_at_msg_count": "INTEGER",
     "model_label": "TEXT",
     "pending_alert": "TEXT",
+    # Which CLI owns the session ("claude" / "codex"). Drives the resume
+    # command on every surface; NULL on rows written before this column
+    # existed, which every reader treats as "claude" (the only provider the
+    # board tracked back then).
+    "provider": "TEXT",
+    # Unattended-completion tracking. done_at is set when a Stop closes a
+    # turn long enough to count as "a run you may have walked away from"
+    # (hook.py's _UNATTENDED_MIN_TURN_S); it's cleared by the next
+    # UserPromptSubmit (you came back = implicit ack) and superseded by
+    # acked_at (explicit ack: `agent-board ack`, or a Slack reaction read by
+    # the team-operations sweep). The sweep and every board surface derive
+    # "finished, not picked up" from these three fields -- see is_unattended.
+    "done_at": "REAL",
+    "done_turn_s": "REAL",
+    "acked_at": "REAL",
 }
 
 
@@ -192,6 +215,71 @@ def set_pending_alert(session_id: str, kind: str) -> None:
 
 def clear_pending_alert(session_id: str) -> None:
     upsert(session_id, pending_alert=None)
+
+
+DEFAULT_PROVIDER = "claude"
+
+
+def provider_of(row: dict | None) -> str:
+    """Provider id for a row; legacy rows (no column / NULL) are Claude."""
+    return str((row or {}).get("provider") or DEFAULT_PROVIDER)
+
+
+def mark_done(session_id: str, turn_s: float) -> None:
+    """Record that a long turn just finished and nobody has come back yet."""
+    upsert(session_id, done_at=time.time(), done_turn_s=float(turn_s), acked_at=None)
+
+
+def clear_done(session_id: str) -> None:
+    """The user returned to the session (new prompt): nothing is waiting."""
+    upsert(session_id, done_at=None, done_turn_s=None)
+
+
+def ack(session_id: str) -> None:
+    """Explicit acknowledgement: the user saw the completion, stop nagging."""
+    upsert(session_id, acked_at=time.time())
+
+
+def is_unattended(row: dict | None, *, now: float | None = None) -> bool:
+    """True when a long turn finished and the user has neither prompted
+    again nor acknowledged it. Ended sessions still count: a run that
+    finished and whose terminal was closed is exactly the thread the user
+    is most likely to forget. 'working' never counts (a new turn is in
+    flight, so someone is there)."""
+    del now  # reserved for callers that want an age cutoff later
+    if not row:
+        return False
+    done_at = row.get("done_at")
+    if not done_at:
+        return False
+    if row.get("state") == "working":
+        return False
+    acked_at = row.get("acked_at")
+    if acked_at and acked_at >= done_at:
+        return False
+    return True
+
+
+def unattended(max_age_hours: float = 24) -> list[dict]:
+    """Active rows (per active()) that are unattended, oldest completion first."""
+    rows = [r for r in active(max_age_hours=max_age_hours) if is_unattended(r)]
+    rows.sort(key=lambda r: r.get("done_at") or 0)
+    return rows
+
+
+def find(query: str, max_age_hours: float = 24 * 7) -> list[dict]:
+    """Rows whose session_id starts with `query` or whose name contains it
+    (case-insensitive). Used by `agent-board ack <id-or-name>`."""
+    q = query.strip().lower()
+    if not q:
+        return []
+    matches = []
+    for row in active(max_age_hours=max_age_hours):
+        sid = str(row.get("session_id") or "").lower()
+        name = str(row.get("name") or "").lower()
+        if sid.startswith(q) or q in name:
+            matches.append(row)
+    return matches
 
 
 #: Canonical state -> (sort rank, icon), shared by every renderer (cli.py's
