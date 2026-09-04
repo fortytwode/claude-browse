@@ -42,6 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Claude Code's own session title, so one session alternated between two
   names seconds apart. The installer now replaces stale variants and
   collapses exact duplicates, in both `settings.json` and `hooks.json`.
+- **Agent Board lifecycle updates could arrive out of order or disappear.**
+  Local state now commits before detached publication, dirty revisions retry
+  without unbounded worker queues, and versioned alerts cannot erase a newer
+  transition. Unacknowledged completions remain visible until resumed or
+  acknowledged, including after `SessionEnd`.
+- **Codex interruption and hook installation now follow the current contract.**
+  `Interrupt` returns a turn to `idle` without recording a completion, hook
+  definitions are canonical and matcherless, and the installer detects
+  disabled hooks conservatively on every supported Python version.
 
 ### Fixed
 - **Fresh sessions could disappear when one CodeX fork poisoned the shared
