@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     acked_at           REAL,
     sync_revision      INTEGER NOT NULL DEFAULT 0,
     published_revision INTEGER NOT NULL DEFAULT 0,
-    pending_alert_revision INTEGER
+    pending_alert_revision INTEGER,
+    transcript_path    TEXT
 )
 """
 
@@ -63,6 +64,7 @@ _COLUMNS = (
     "sync_revision",
     "published_revision",
     "pending_alert_revision",
+    "transcript_path",
 )
 
 _COLUMN_TYPES = {
@@ -101,6 +103,9 @@ _COLUMN_TYPES = {
     # Couples an alert to the transition that created it, so an old worker
     # cannot post or clear a newer alert of the same kind.
     "pending_alert_revision": "INTEGER",
+    # Local-only path used to guard launches before FTS indexes a session.
+    # session_doc() deliberately excludes it from remote publication.
+    "transcript_path": "TEXT",
 }
 
 

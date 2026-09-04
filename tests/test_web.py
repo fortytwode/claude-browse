@@ -262,8 +262,9 @@ def test_automatic_thread_update_and_board_roundtrip(web_server):
     task = board["tasks"][0]
     assert task["title"] == "Ship the work queue"
     assert task["due_date"] is None
-    assert "codex" in task["full_command"]
-    assert "--dangerously-bypass-approvals-and-sandbox" in task["full_command"]
+    assert "direct-session" in task["full_command"]
+    assert task["full_command"].endswith(" codex true")
+    assert task["safe_command"].endswith(" codex false")
 
     _status, updated = _mutate_json(
         base + "/api/tasks/" + task["task_id"],
@@ -331,8 +332,8 @@ def test_board_normalizes_today_states_actions_and_order(web_server, monkeypatch
     assert tasks["future"]["in_today"] is False
     assert tasks["closed"]["in_today"] is False
     assert set(tasks["quiet"]["actions"]) == {"claude", "codex"}
-    assert tasks["quiet"]["actions"]["claude"]["label"] == "Resume"
-    assert tasks["quiet"]["actions"]["codex"]["label"] == "Continue in Codex"
+    assert tasks["quiet"]["actions"]["claude"]["label"] == "Resume Claude"
+    assert tasks["quiet"]["actions"]["codex"]["label"] == "Continue in CodeX"
     assert tasks["quiet"]["actions"]["codex"]["available"] is False
     assert "transcript" in tasks["quiet"]["actions"]["codex"]["reason"].lower()
 
@@ -399,8 +400,8 @@ def test_launch_is_server_built_and_rejects_missing_project(web_server, monkeypa
     )
     assert launched["command"] == opened[0]
     assert "rm -rf" not in opened[0]
-    assert "claude" in opened[0]
-    assert "--dangerously-skip-permissions" in opened[0]
+    assert "direct-session" in opened[0]
+    assert opened[0].endswith(" claude true")
 
     _board_thread("missing", cwd="/definitely/not/here", name="Missing")
     _status, board = _get_json(base + "/api/board")
@@ -425,3 +426,33 @@ def test_launch_rejects_non_boolean_full_access(web_server, monkeypatch):
             {"full_access": "false"},
         )
     assert exc_info.value.code == 400
+
+
+def test_hook_only_launch_actions_use_captured_transcript_without_fts(
+    web_server, tmp_path, monkeypatch
+):
+    base, _server = web_server
+    monkeypatch.setattr(web, "_provider_available", lambda _provider: True)
+    transcript = tmp_path / "hook-only.jsonl"
+    transcript.write_text('{"message":{"role":"user","content":"continue me"}}\n')
+    _board_thread("hook-only", cwd=str(tmp_path), provider="claude", name="Hook only")
+    store.upsert("hook-only", transcript_path=str(transcript))
+
+    _status, board = _get_json(base + "/api/board")
+    task = next(row for row in board["tasks"] if row["session_id"] == "hook-only")
+
+    assert task["actions"]["claude"]["available"] is True
+    assert task["actions"]["codex"]["available"] is True
+
+
+def test_history_launch_actions_report_scoped_prerequisite_failures(
+    web_server, monkeypatch
+):
+    base, _server = web_server
+    monkeypatch.setattr(web, "_provider_available", lambda provider: provider == "claude")
+
+    _status, detail = _get_json(base + "/api/session/home1")
+
+    assert detail["meta"]["actions"]["claude"]["available"] is False
+    assert "directory" in detail["meta"]["actions"]["claude"]["reason"].lower()
+    assert detail["meta"]["actions"]["codex"]["available"] is False

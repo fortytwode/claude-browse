@@ -18,7 +18,10 @@ if _HERE not in sys.path:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("usage: agent-board <hook|statusline|board|sync|ack>", file=sys.stderr)
+        print(
+            "usage: agent-board <hook|statusline|board|sync|ack|direct-session>",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     subcommand = sys.argv[1]
@@ -43,6 +46,21 @@ def main() -> None:
         from claude_browse.board.sync import main as sync_main
 
         sync_main(["ack", *sys.argv[2:]])
+    elif subcommand == "direct-session":
+        from claude_browse.board.commands import launch_direct_session
+
+        args = sys.argv[2:]
+        if len(args) != 3 or args[2] not in {"true", "false"}:
+            print(
+                "usage: agent-board direct-session SESSION_ID PROVIDER true|false",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        try:
+            launch_direct_session(args[0], args[1], full_access=args[2] == "true")
+        except (OSError, ValueError) as exc:
+            print(f"agent-board: {exc}", file=sys.stderr)
+            sys.exit(1)
     else:
         print(f"unknown subcommand: {subcommand}", file=sys.stderr)
         sys.exit(1)

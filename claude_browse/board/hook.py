@@ -254,6 +254,21 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
     cwd = payload.get("cwd")
     row = store.get(session_id)
     model_label = _model_label(payload, row)
+    transcript_path = payload.get("transcript_path")
+    transcript_fields = (
+        {"transcript_path": transcript_path}
+        if isinstance(transcript_path, str) and transcript_path
+        else {}
+    )
+    if (
+        transcript_fields
+        and event in {"Stop", "Notification", "SessionEnd", *_NEEDS_INPUT_EVENTS}
+    ):
+        # Some provider hook streams begin mid-session. Preserve the source
+        # path from whichever recognized event arrives first so guarded resume
+        # does not depend on the FTS refresh having run already.
+        store.upsert(session_id, **transcript_fields)
+        row = store.get(session_id)
 
     if event == "SessionStart":
         if row is None:
@@ -265,10 +280,12 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 name=_placeholder_name(cwd),
                 name_source="provisional",
                 provider=provider,
+                **transcript_fields,
                 **({"model_label": model_label} if model_label else {}),
             )
         else:
             fields: dict[str, object] = {"provider": provider}
+            fields.update(transcript_fields)
             if cwd is not None:
                 fields["cwd"] = cwd
             if model_label:
@@ -292,6 +309,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             "done_at": None,
             "done_turn_s": None,
             "pending_alert": None,
+            **transcript_fields,
         }
         if model_label:
             fields["model_label"] = model_label
@@ -363,6 +381,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             done_at=None,
             done_turn_s=None,
             pending_alert=None,
+            **transcript_fields,
             **({"model_label": model_label} if model_label else {}),
         )
         store.heartbeat(session_id)

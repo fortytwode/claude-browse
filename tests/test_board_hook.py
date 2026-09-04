@@ -850,3 +850,4 @@ def test_entry_script_accepts_provider_flag_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "_conn_cache", None)
     row = store.get("codex-e2e")
     assert row["provider"] == "codex" and row["model_label"] == "Codex"
+    assert row["transcript_path"] == "/nope"

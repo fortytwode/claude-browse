@@ -72,6 +72,7 @@ def _session_to_json(row: dict, prefixes: tuple[str, ...]) -> dict:
         # Preformatted server-side with the same formatter the TUI columns
         # use, so the two surfaces can't drift on relative-time rules.
         "when": format_date(last_ts),
+        "actions": _launch_actions(row),
     }
 
 
@@ -80,6 +81,15 @@ def _provider_available(provider: str) -> bool:
         return get_provider(provider).is_available()
     except (ValueError, OSError):
         return False
+
+
+def _launch_actions(session: dict) -> dict:
+    actions = {}
+    for target in work_items.PROVIDERS:
+        actions[target] = commands.action_status(
+            session, target, availability_check=_provider_available
+        )
+    return actions
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -303,23 +313,14 @@ class _Handler(BaseHTTPRequestHandler):
             )
         )
         cwd_available = bool(cwd and os.path.isdir(cwd))
-        actions = {}
-        for target in work_items.PROVIDERS:
-            label = "Resume" if target == provider else f"Continue in {target.title()}"
-            reason = None
-            if not cwd_available:
-                reason = "Working directory is unavailable on this Mac."
-            elif not _provider_available(target):
-                reason = f"{target.title()} is not installed on this Mac."
-            elif target != provider and indexed_session is None:
-                reason = "Thread transcript is unavailable for provider handoff."
-            actions[target] = {
-                "label": label,
-                "available": reason is None,
-                "reason": reason,
-            }
-        full = commands.resume_command(session_id, provider, cwd, full_access=True)
-        safe = commands.resume_command(session_id, provider, cwd, full_access=False)
+        launch_session = commands.session_for_launch(session_id, indexed_session) or {
+            "session_id": session_id,
+            "provider": provider,
+            "cwd": cwd,
+        }
+        actions = _launch_actions(launch_session)
+        full = commands.direct_session_command(session_id, provider, full_access=True)
+        safe = commands.direct_session_command(session_id, provider, full_access=False)
         public_task = {
             key: value
             for key, value in task.items()
@@ -375,9 +376,6 @@ class _Handler(BaseHTTPRequestHandler):
         if not task or not task.get("session_id"):
             self._send_json({"error": "task not found"}, status=404)
             return
-        cwd = str(task.get("session_cwd") or "")
-        if not cwd or not os.path.isdir(cwd):
-            raise ValueError("project folder is not available on this Mac")
         provider = str(body.get("provider") or task.get("session_provider") or "claude")
         if provider not in work_items.PROVIDERS:
             raise ValueError("provider must be claude or codex")
@@ -385,23 +383,24 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(full_access, bool):
             raise ValueError("full_access must be true or false")
         session_id = str(task.get("session_id") or "")
-        conn = fts.open_db(read_only=True)
+        indexed = None
         try:
-            session = fts.get_by_sid(conn, session_id)
-        finally:
-            conn.close()
-        if session:
-            command = commands.continue_command(
-                session,
-                provider,
-                full_access=full_access,
-            )
-        elif provider == task.get("session_provider"):
-            command = commands.resume_command(
-                session_id, provider, cwd, full_access=full_access
-            )
-        else:
-            raise ValueError("thread transcript is unavailable for provider handoff")
+            conn = fts.open_db(read_only=True)
+            try:
+                indexed = fts.get_by_sid(conn, session_id)
+            finally:
+                conn.close()
+        except (OSError, sqlite3.Error):
+            pass
+        session = commands.session_for_launch(session_id, indexed)
+        if session is None:
+            raise ValueError("session not found")
+        action = _launch_actions(session)[provider]
+        if not action["available"]:
+            raise ValueError(str(action["reason"]))
+        command = commands.direct_session_command(
+            session_id, provider, full_access=full_access
+        )
         commands.open_in_terminal(command)
         self._send_json({"ok": True, "command": command})
 
@@ -416,16 +415,14 @@ class _Handler(BaseHTTPRequestHandler):
             conn.close()
         if not session:
             raise ValueError("session not found")
-        cwd = str(session.get("cwd") or "")
-        if not cwd or not os.path.isdir(cwd):
-            raise ValueError("project folder is not available on this Mac")
         full_access = body.get("full_access")
         if not isinstance(full_access, bool):
             raise ValueError("full_access must be true or false")
-        command = commands.continue_command(
-            session,
-            provider,
-            full_access=full_access,
+        action = _launch_actions(session)[provider]
+        if not action["available"]:
+            raise ValueError(str(action["reason"]))
+        command = commands.direct_session_command(
+            session_id, provider, full_access=full_access
         )
         commands.open_in_terminal(command)
         self._send_json({"ok": True, "command": command})

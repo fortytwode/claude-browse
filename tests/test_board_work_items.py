@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import subprocess
 import threading
@@ -122,13 +123,75 @@ def test_startup_reconciliation_is_bulk_idempotent_and_retains_exact_cwd(
     assert all(row["session_cwd"] == str(nested) for row in rows)
 
 
-def test_resume_commands_are_cwd_qualified_and_provider_correct(tmp_path):
-    claude = commands.resume_command("abc", "claude", str(tmp_path), full_access=True)
-    codex = commands.resume_command("xyz", "codex", str(tmp_path), full_access=True)
-    safe = commands.resume_command("abc", "claude", str(tmp_path), full_access=False)
-    assert claude == f"cd -- {tmp_path} && claude --resume abc --dangerously-skip-permissions"
-    assert codex == f"cd -- {tmp_path} && codex resume xyz --dangerously-bypass-approvals-and-sandbox"
-    assert "dangerously" not in safe
+def test_direct_session_commands_have_one_fixed_argv_safe_shape(monkeypatch):
+    monkeypatch.setattr(
+        commands,
+        "_agent_board_executable",
+        lambda: "/opt/Agent Board/bin/agent-board",
+    )
+
+    command = commands.direct_session_command(
+        "sid; touch /tmp/nope", "codex", full_access=False
+    )
+
+    assert command == (
+        "'/opt/Agent Board/bin/agent-board' direct-session "
+        "'sid; touch /tmp/nope' codex false"
+    )
+    assert commands.direct_session_command("abc", "claude", full_access=True).endswith(
+        " direct-session abc claude true"
+    )
+
+
+def test_direct_session_launch_reuses_browse_policy_with_hook_transcript(
+    tmp_path, monkeypatch
+):
+    import claude_browse.browse as browse
+
+    transcript = tmp_path / "thread.jsonl"
+    transcript.write_bytes(b"x" * 37)
+    store.upsert(
+        "hook-only",
+        cwd=str(tmp_path),
+        provider="codex",
+        transcript_path=str(transcript),
+    )
+    opened = []
+    monkeypatch.setattr(
+        commands.fts,
+        "open_db",
+        lambda **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("no index")),
+    )
+    monkeypatch.setattr(
+        browse,
+        "_open_in_target_provider",
+        lambda *args, **kwargs: opened.append((args, kwargs)),
+    )
+
+    original_cwd = os.getcwd()
+    commands.launch_direct_session("hook-only", "codex", full_access=False)
+
+    args, kwargs = opened[0]
+    session = args[0]
+    assert session["path"] == str(transcript)
+    assert session["source_size"] == 37
+    assert args[1:5] == ("codex", "codex", "hook-only", str(tmp_path))
+    assert args[6] is False
+    assert kwargs["fork"] is None
+    assert os.getcwd() == str(tmp_path)
+    os.chdir(original_cwd)
+
+
+def test_direct_session_cross_provider_requires_transcript(tmp_path, monkeypatch):
+    store.upsert("hook-only", cwd=str(tmp_path), provider="claude")
+    monkeypatch.setattr(
+        commands.fts,
+        "open_db",
+        lambda **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("no index")),
+    )
+
+    with pytest.raises(ValueError, match="transcript is unavailable"):
+        commands.launch_direct_session("hook-only", "codex", full_access=True)
 
 
 def test_sessionless_creation_is_rejected(tmp_path):
@@ -139,21 +202,34 @@ def test_sessionless_creation_is_rejected(tmp_path):
 def test_cross_provider_continuation_preserves_recent_context(tmp_path, monkeypatch):
     import claude_browse.browse as browse
 
-    import_file = tmp_path / "handoff.md"
-    import_file.write_text("context")
-    monkeypatch.setattr(browse, "write_import_file", lambda *_args: str(import_file))
-    command = commands.continue_command(
-        {
-            "session_id": "old-session",
-            "provider": "claude",
-            "cwd": str(tmp_path),
-            "path": str(tmp_path / "thread.jsonl"),
-        },
-        "codex",
-        full_access=True,
+    transcript = tmp_path / "thread.jsonl"
+    transcript.write_text('{"message":{"role":"user","content":"recent context"}}\n')
+    store.upsert(
+        "old-session",
+        provider="claude",
+        cwd=str(tmp_path),
+        transcript_path=str(transcript),
     )
-    assert str(import_file) in command
-    assert "--dangerously-bypass-approvals-and-sandbox" in command
+    monkeypatch.setattr(
+        commands.fts,
+        "open_db",
+        lambda **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("no index")),
+    )
+    continued = []
+    monkeypatch.setattr(
+        browse,
+        "_continue_in_provider",
+        lambda *args, **kwargs: continued.append((args, kwargs)),
+    )
+
+    original_cwd = os.getcwd()
+    commands.launch_direct_session("old-session", "codex", full_access=True)
+    os.chdir(original_cwd)
+
+    args, _kwargs = continued[0]
+    assert args[0]["path"] == str(transcript)
+    assert args[1:5] == ("claude", "codex", str(tmp_path), ())
+    assert args[5] is True
 
 
 def test_session_start_hook_automatically_creates_one_thread_row(tmp_path):
@@ -423,4 +499,15 @@ def test_terminal_launch_normalizes_timeout_to_os_error(monkeypatch):
 
     monkeypatch.setattr(commands.subprocess, "run", timeout)
     with pytest.raises(OSError, match="could not open Terminal"):
+        commands.open_in_terminal("echo hello")
+
+
+def test_terminal_launch_normalizes_missing_osascript_to_scoped_error(monkeypatch):
+    monkeypatch.setattr(
+        commands.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("osascript")),
+    )
+
+    with pytest.raises(OSError, match="could not open Terminal: osascript"):
         commands.open_in_terminal("echo hello")
