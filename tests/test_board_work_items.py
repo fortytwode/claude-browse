@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -53,6 +54,91 @@ def test_work_item_mutation_validation_and_one_task_per_session(tmp_path):
 
     same = work_items.ensure_for_session(store.get("validation"))
     assert same["task_id"] == task["task_id"]
+
+
+def test_priority_defaults_validates_and_survives_hook_updates(tmp_path):
+    store.upsert("priority", cwd=str(tmp_path), name="Prioritize", provider="claude")
+    task = work_items.ensure_for_session(store.get("priority"))
+    assert task["priority"] == "normal"
+    assert isinstance(task["position"], int)
+
+    updated, publish_session = work_items.mutate(task["task_id"], priority="urgent")
+    assert updated["priority"] == "urgent"
+    assert publish_session is None
+    with pytest.raises(ValueError, match="priority must"):
+        work_items.mutate(task["task_id"], title="must roll back", priority="later")
+    assert work_items.get(task["task_id"])["title"] == "Prioritize"
+
+    hook.dispatch(
+        {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "priority",
+            "cwd": str(tmp_path),
+            "prompt": "continue",
+        }
+    )
+    preserved = work_items.get(task["task_id"])
+    assert preserved["priority"] == "urgent"
+    assert preserved["position"] == task["position"]
+
+
+def test_task_reorder_is_atomic_bounded_and_project_scoped(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        projects,
+        "resolve_project",
+        lambda cwd: {"key": f"path:{cwd}", "name": Path(cwd).name, "path": cwd},
+    )
+    first_dir = str(tmp_path / "first")
+    second_dir = str(tmp_path / "second")
+    for sid in ("one", "two", "three"):
+        store.upsert(sid, cwd=first_dir, name=sid)
+        work_items.reconcile_sessions()
+    store.upsert("elsewhere", cwd=second_dir, name="elsewhere")
+    work_items.reconcile_sessions()
+    rows = {row["session_id"]: row for row in work_items.list_items(include_done=True)}
+    original_slots = sorted(rows[sid]["position"] for sid in ("one", "two", "three"))
+
+    reordered = work_items.reorder_tasks(
+        f"path:{first_dir}",
+        [rows["three"]["task_id"], rows["one"]["task_id"], rows["two"]["task_id"]],
+        priority="high",
+    )
+    assert [row["session_id"] for row in reordered] == ["three", "one", "two"]
+    assert [row["position"] for row in reordered] == original_slots
+    assert {row["priority"] for row in reordered} == {"high"}
+
+    snapshot = {sid: work_items.get(rows[sid]["task_id"]) for sid in rows}
+    invalid_orders = (
+        [rows["one"]["task_id"], rows["one"]["task_id"]],
+        [rows["one"]["task_id"], rows["elsewhere"]["task_id"]],
+        [rows["one"]["task_id"], "missing"],
+    )
+    for task_ids in invalid_orders:
+        with pytest.raises(ValueError):
+            work_items.reorder_tasks(f"path:{first_dir}", task_ids, priority="urgent")
+        assert {sid: work_items.get(rows[sid]["task_id"]) for sid in rows} == snapshot
+
+    work_items.mutate(rows["one"]["task_id"], status="done")
+    with pytest.raises(ValueError, match="closed"):
+        work_items.reorder_tasks(
+            f"path:{first_dir}", [rows["one"]["task_id"]], priority="low"
+        )
+
+
+def test_project_settings_description_and_order_are_local_and_validated(tmp_path):
+    for sid, cwd in (("one", tmp_path / "one"), ("two", tmp_path / "two")):
+        store.upsert(sid, cwd=str(cwd), name=sid)
+        work_items.ensure_for_session(store.get(sid))
+    projects_before = work_items.list_projects()
+    keys = [project["project_key"] for project in projects_before]
+
+    saved = work_items.set_project_description(keys[0], "  Local planning notes  ")
+    assert saved["description"] == "Local planning notes"
+    with pytest.raises(ValueError, match="1000"):
+        work_items.set_project_description(keys[0], "x" * 1001)
+    reordered = work_items.reorder_projects(list(reversed(keys)))
+    assert [project["project_key"] for project in reordered] == list(reversed(keys))
+    assert work_items.list_projects()[0]["project_key"] == keys[1]
 
 
 def test_project_groups_git_subfolders_by_origin(tmp_path):
@@ -358,6 +444,9 @@ def test_live_state_projection_excludes_local_work_and_transcript_fields():
             "work_status": "archived",
             "status": "archived",
             "continuation_brief": "private brief",
+            "priority": "urgent",
+            "position": 123,
+            "project_description": "private notes",
         }
     )
     forbidden = {
@@ -367,6 +456,9 @@ def test_live_state_projection_excludes_local_work_and_transcript_fields():
         "work_status",
         "status",
         "continuation_brief",
+        "priority",
+        "position",
+        "project_description",
     }
     assert forbidden.isdisjoint(projected)
 
@@ -407,15 +499,66 @@ def test_legacy_overlay_migration_is_idempotent_and_preserves_sessionless_rows(
     assert linked["title_source"] == "manual"
     assert linked["session_cwd"] == "/repo/exact/nested"
     assert linked["due_date"] == "2026-09-08"
-    assert work_items.get("legacy-note") is not None
+    assert linked["priority"] == "normal"
+    assert linked["position"] == 1_000_000
+    assert work_items.get("legacy-note")["position"] == 2_000_000
     assert work_items.list_items(include_done=True) == [linked]
     assert work_items.get("0b001368-52a5-4368-8638-bf7b79670851") is None
     assert work_items.migration_backup_path().exists()
+    assert work_items.planning_migration_backup_path().exists()
+
+    indexes = {
+        row[1]
+        for row in store.get_conn().execute("PRAGMA index_list(work_items)").fetchall()
+    }
+    assert "idx_work_items_project_priority_position" in indexes
 
     # Reopening and rerunning the column-driven migration is a no-op.
     store._conn_cache.close()
     store._conn_cache = None
     assert work_items.get("linked-task") == linked
+
+
+def test_planning_migration_failure_rolls_back_and_keeps_new_backup(
+    tmp_path, monkeypatch
+):
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE sessions (session_id TEXT PRIMARY KEY, cwd TEXT, name TEXT);
+        CREATE TABLE work_items (
+          task_id TEXT PRIMARY KEY, title TEXT NOT NULL, project_key TEXT NOT NULL,
+          project_name TEXT NOT NULL, project_path TEXT NOT NULL, status TEXT NOT NULL,
+          due_date TEXT, session_id TEXT UNIQUE, session_provider TEXT, notes TEXT,
+          created_at REAL NOT NULL, updated_at REAL NOT NULL, completed_at REAL,
+          title_override TEXT, title_source TEXT NOT NULL DEFAULT 'automatic',
+          session_cwd TEXT
+        );
+        INSERT INTO work_items VALUES
+          ('task', 'Manual', 'path:/old', 'old', '/old', 'active', NULL,
+           NULL, 'claude', 'note', 1, 2, NULL, NULL, 'automatic', NULL);
+        """
+    )
+    conn.commit()
+    original = conn.execute("SELECT * FROM work_items").fetchall()
+    conn.close()
+    monkeypatch.setattr(store, "_DB_PATH", db)
+    monkeypatch.setattr(store, "_conn_cache", None)
+    monkeypatch.setattr(work_items, "_PROJECT_SETTINGS_SCHEMA", "invalid SQL")
+
+    with pytest.raises(sqlite3.Error):
+        work_items.get("task")
+
+    check = sqlite3.connect(db)
+    columns = {row[1] for row in check.execute("PRAGMA table_info(work_items)")}
+    assert "priority" not in columns
+    assert "position" not in columns
+    assert check.execute("SELECT * FROM work_items").fetchall() == original
+    check.close()
+    backup = sqlite3.connect(work_items.planning_migration_backup_path())
+    assert backup.execute("SELECT * FROM work_items").fetchall() == original
+    backup.close()
 
 
 def test_overlay_migration_failure_rolls_back_and_backup_preserves_legacy_rows(

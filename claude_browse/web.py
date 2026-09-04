@@ -140,7 +140,11 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             body = self._read_json()
-            if parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/launch"):
+            if parsed.path == "/api/tasks/reorder":
+                self._reorder_tasks(body)
+            elif parsed.path == "/api/projects/reorder":
+                self._reorder_projects(body)
+            elif parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/launch"):
                 task_id = unquote(parsed.path[len("/api/tasks/") : -len("/launch")])
                 self._launch_task(task_id, body)
             elif parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/launch"):
@@ -157,24 +161,35 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._mutation_allowed():
             return
         parsed = urlparse(self.path)
-        if not parsed.path.startswith("/api/tasks/"):
-            self._send_json({"error": "not found"}, status=404)
-            return
-        task_id = unquote(parsed.path[len("/api/tasks/") :])
         try:
             body = self._read_json()
-            unknown = set(body) - {"title", "status", "due_date"}
-            if unknown:
-                raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
-            task, publish_session = work_items.mutate(task_id, **body)
-            if not task:
-                self._send_json({"error": "task not found"}, status=404)
-                return
-            if publish_session:
-                from .board.hook import _spawn_sync
+            if parsed.path.startswith("/api/projects/"):
+                project_key = unquote(parsed.path[len("/api/projects/") :])
+                unknown = set(body) - {"description"}
+                if unknown:
+                    raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
+                if "description" not in body:
+                    raise ValueError("description is required")
+                project = work_items.set_project_description(
+                    project_key, body["description"]
+                )
+                self._send_json({"project": self._project_to_json(project, [])})
+            elif parsed.path.startswith("/api/tasks/"):
+                task_id = unquote(parsed.path[len("/api/tasks/") :])
+                unknown = set(body) - {"title", "status", "due_date", "priority"}
+                if unknown:
+                    raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
+                task, publish_session = work_items.mutate(task_id, **body)
+                if not task:
+                    self._send_json({"error": "task not found"}, status=404)
+                    return
+                if publish_session:
+                    from .board.hook import _spawn_sync
 
-                _spawn_sync(publish_session)
-            self._send_json({"task": self._task_to_json(task)})
+                    _spawn_sync(publish_session)
+                self._send_json({"task": self._task_to_json(task)})
+            else:
+                self._send_json({"error": "not found"}, status=404)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=400)
         except sqlite3.Error as exc:
@@ -326,6 +341,16 @@ class _Handler(BaseHTTPRequestHandler):
             for key, value in task.items()
             if key not in {"status", "notes", "title_override", "title_source"}
         }
+        summary_source = ""
+        if indexed_session:
+            summary_source = str(
+                indexed_session.get("last_msg")
+                or indexed_session.get("first_msg")
+                or ""
+            )
+        summary = " ".join(summary_source.split())[:200]
+        if not summary:
+            summary = "(no transcript preview)"
         sort_key = [
             1 if work_status in {"done", "archived"} else 0,
             0 if needs_attention or unattended else 1,
@@ -335,6 +360,8 @@ class _Handler(BaseHTTPRequestHandler):
         ]
         return {
             **public_task,
+            "order": int(task.get("position") or 0),
+            "summary": summary,
             "work_status": work_status,
             "terminal_state": terminal_state,
             "runtime_host": (runtime or {}).get("host") or "",
@@ -369,7 +396,52 @@ class _Handler(BaseHTTPRequestHandler):
             if task.get("session_id")
         ]
         tasks.sort(key=lambda task: tuple(task["sort_key"]))
-        self._send_json({"tasks": tasks})
+        projects_json = [
+            self._project_to_json(project, tasks)
+            for project in work_items.list_projects()
+        ]
+        self._send_json({"tasks": tasks, "projects": projects_json})
+
+    def _project_to_json(self, project: dict, tasks: list[dict]) -> dict:
+        project_tasks = [
+            task for task in tasks if task.get("project_key") == project["project_key"]
+        ]
+        return {
+            "project_key": project["project_key"],
+            "name": project["name"],
+            "path": project["path"],
+            "description": project.get("description") or "",
+            "order": int(project.get("position") or 0),
+            "counts": {
+                "active": sum(task["work_status"] == "active" for task in project_tasks),
+                "today": sum(bool(task["in_today"]) for task in project_tasks),
+                "needs_input": sum(
+                    task["work_status"] == "active"
+                    and task["terminal_state"] == "needs-input"
+                    for task in project_tasks
+                ),
+            },
+        }
+
+    def _reorder_tasks(self, body: dict) -> None:
+        unknown = set(body) - {"project_key", "task_ids", "priority"}
+        if unknown:
+            raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
+        rows = work_items.reorder_tasks(
+            body.get("project_key"),
+            body.get("task_ids"),
+            priority=body.get("priority") if "priority" in body else None,
+        )
+        self._send_json({"tasks": [self._task_to_json(row) for row in rows]})
+
+    def _reorder_projects(self, body: dict) -> None:
+        unknown = set(body) - {"project_keys"}
+        if unknown:
+            raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
+        rows = work_items.reorder_projects(body.get("project_keys"))
+        self._send_json(
+            {"projects": [self._project_to_json(row, []) for row in rows]}
+        )
 
     def _launch_task(self, task_id: str, body: dict) -> None:
         task = work_items.get(task_id)

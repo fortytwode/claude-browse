@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date, timedelta
 from http.server import ThreadingHTTPServer
@@ -23,7 +25,17 @@ from claude_browse import fts, web
 from claude_browse.board import hook, store, work_items
 
 
-def _seed(conn, sid, *, cwd="/w/home", provider="claude", path="", title=None):
+def _seed(
+    conn,
+    sid,
+    *,
+    cwd="/w/home",
+    provider="claude",
+    path="",
+    title=None,
+    first_msg=None,
+    last_msg="",
+):
     now = 1700000000.0
     conn.execute(
         """
@@ -40,8 +52,8 @@ def _seed(conn, sid, *, cwd="/w/home", provider="claude", path="", title=None):
             "2026-05-01T10:00:00Z",
             "2026-05-01T10:00:00Z",
             title or f"Title for {sid}",
-            f"first message for {sid}",
-            "",
+            first_msg if first_msg is not None else f"first message for {sid}",
+            last_msg,
             4,
             now,
             now,
@@ -307,6 +319,9 @@ def test_automatic_thread_update_and_board_roundtrip(web_server):
     task = board["tasks"][0]
     assert task["title"] == "Ship the work queue"
     assert task["due_date"] is None
+    assert task["priority"] == "normal"
+    assert isinstance(task["position"], int)
+    assert task["summary"] == "(no transcript preview)"
     assert "direct-session" in task["full_command"]
     assert task["full_command"].endswith(" codex true")
     assert task["safe_command"].endswith(" codex false")
@@ -314,14 +329,117 @@ def test_automatic_thread_update_and_board_roundtrip(web_server):
     _status, updated = _mutate_json(
         base + "/api/tasks/" + task["task_id"],
         "PATCH",
-        {"title": "Ship it", "status": "active", "due_date": None},
+        {"title": "Ship it", "status": "active", "due_date": None, "priority": "high"},
     )
     assert updated["task"]["title"] == "Ship it"
     assert updated["task"]["work_status"] == "active"
     assert updated["task"]["due_date"] is None
+    assert updated["task"]["priority"] == "high"
 
     _status, board = _get_json(base + "/api/board")
     assert [item["title"] for item in board["tasks"]] == ["Ship it"]
+
+
+def test_board_returns_summary_fallback_and_project_aggregates(web_server):
+    base, _server = web_server
+    conn = fts.open_db(fts.DB_PATH)
+    _seed(
+        conn,
+        "summary-last",
+        cwd="/w/summary",
+        first_msg="opening",
+        last_msg="  newest\nrequest  ",
+    )
+    _seed(conn, "summary-empty", cwd="/w/summary", first_msg="", last_msg="")
+    conn.close()
+    first = _board_thread("summary-last", cwd="/w/summary")
+    second = _board_thread("summary-empty", cwd="/w/summary")
+    work_items.mutate(second["task_id"], status="done")
+    work_items.set_project_description(first["project_key"], "Project context")
+
+    _status, board = _get_json(base + "/api/board")
+    tasks = {task["session_id"]: task for task in board["tasks"]}
+    assert tasks["summary-last"]["summary"] == "newest request"
+    assert tasks["summary-empty"]["summary"] == "(no transcript preview)"
+    project = next(p for p in board["projects"] if p["project_key"] == first["project_key"])
+    assert project["name"] == first["project_name"]
+    assert project["path"] == first["project_path"]
+    assert project["description"] == "Project context"
+    assert project["counts"] == {"active": 1, "today": 0, "needs_input": 0}
+
+    conn = fts.open_db(fts.DB_PATH)
+    conn.execute("UPDATE sessions SET last_msg = ? WHERE sid = ?", ("x" * 300, "summary-last"))
+    conn.commit()
+    conn.close()
+    _status, capped = _get_json(base + "/api/board")
+    capped_task = next(t for t in capped["tasks"] if t["session_id"] == "summary-last")
+    assert capped_task["summary"] == "x" * 200
+
+
+def test_board_summary_degrades_when_index_fails(web_server, monkeypatch):
+    base, _server = web_server
+    _board_thread("no-index", cwd="/w/no-index")
+    monkeypatch.setattr(
+        web.fts,
+        "open_db",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("boom")
+        ),
+    )
+    _status, board = _get_json(base + "/api/board")
+    assert board["tasks"][0]["summary"] == "(no transcript preview)"
+
+
+def test_reorder_and_project_routes_are_protected_and_transactional(web_server):
+    base, _server = web_server
+    one = _board_thread("route-one", cwd="/w/routes")
+    two = _board_thread("route-two", cwd="/w/routes")
+    payload = {
+        "project_key": one["project_key"],
+        "task_ids": [two["task_id"], one["task_id"]],
+        "priority": "urgent",
+    }
+    _status, response = _mutate_json(base + "/api/tasks/reorder", "POST", payload)
+    assert [task["task_id"] for task in response["tasks"]] == payload["task_ids"]
+    assert {task["priority"] for task in response["tasks"]} == {"urgent"}
+
+    project_url = base + "/api/projects/" + urllib.parse.quote(
+        one["project_key"], safe=""
+    )
+    _status, response = _mutate_json(project_url, "PATCH", {"description": "Routes"})
+    assert response["project"]["description"] == "Routes"
+    _status, response = _mutate_json(
+        base + "/api/projects/reorder",
+        "POST",
+        {"project_keys": [one["project_key"]]},
+    )
+    assert response["projects"][0]["project_key"] == one["project_key"]
+
+    for url, method, body in (
+        (base + "/api/tasks/reorder", "POST", payload),
+        (project_url, "PATCH", {"description": "blocked"}),
+        (
+            base + "/api/projects/reorder",
+            "POST",
+            {"project_keys": [one["project_key"]]},
+        ),
+    ):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _mutate_json(url, method, body, token="wrong")
+        assert exc_info.value.code == 403
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode(),
+            method=method,
+            headers={
+                "Content-Type": "text/plain",
+                "X-Agent-Board-Token": "test-token",
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req, timeout=10)
+        assert exc_info.value.code == 415
 
 
 def test_every_observed_terminal_session_is_automatically_listed(web_server):

@@ -122,6 +122,20 @@ def test_push_no_op_when_row_missing(tmp_path, monkeypatch):
     assert calls == []
 
 
+def test_session_projection_excludes_local_planning_fields():
+    projected = sync.session_doc(
+        {
+            "session_id": "local-planning",
+            "cwd": "/repo",
+            "priority": "urgent",
+            "position": 123,
+            "project_description": "private notes",
+        }
+    )
+
+    assert {"priority", "position", "project_description"}.isdisjoint(projected)
+
+
 def test_push_never_raises_when_client_construction_fails(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     store.upsert("s3", host="air", cwd="/tmp/proj", state="idle", name="foo")
