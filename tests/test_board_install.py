@@ -12,6 +12,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "install_agent_board.py"
 README = REPO_ROOT / "README.md"
+INSTALL_SH = REPO_ROOT / "install.sh"
 
 
 @pytest.fixture
@@ -230,3 +231,14 @@ def test_readme_documents_hook_contract_and_trust_workflow():
     assert "`/hooks`" in agent_board
     assert "trust" in agent_board.lower()
     assert "cannot verify" in agent_board.lower()
+
+
+def test_sync_setup_documents_automatic_venv_selection_without_hook_rewiring():
+    installer_text = INSTALL_SH.read_text()
+    readme_text = README.read_text()
+
+    assert "automatically uses it on the next hook event" in installer_text
+    assert "update the async sync hook commands" not in installer_text
+    assert "re-run install.sh after creating the venv" not in installer_text
+    assert "automatically uses `.venv/bin/python`" in readme_text
+    assert "re-run so detached publication" not in readme_text

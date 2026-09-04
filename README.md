@@ -442,8 +442,10 @@ notifications, `aj`) still works fully -- sync just no-ops and logs to
 ```bash
 python3 -m venv .venv
 ./.venv/bin/pip install -e ".[board-sync]"
-./install.sh   # re-run so detached publication can use the board-sync venv
 ```
+
+Agent Board automatically uses `.venv/bin/python` on the next hook event; no
+hook rewiring or installer re-run is needed.
 
 Firestore uses Application Default Credentials (`gcloud auth
 application-default login`). Point it at YOUR project via
