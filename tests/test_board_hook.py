@@ -35,6 +35,32 @@ def test_stop_after_long_run_sets_idle_and_notifies(tmp_path, monkeypatch):
     assert store.get("s1")["pending_alert"] == "done"  # so sync.py posts a fresh Slack alert too
 
 
+def test_stop_records_completion_before_exposing_done_alert(tmp_path, monkeypatch):
+    """A publisher consuming the alert must already see completion metadata."""
+    _fresh_store(tmp_path, monkeypatch)
+    row_when_notified = []
+    monkeypatch.setattr(
+        hook.notify,
+        "notify",
+        lambda title, msg: row_when_notified.append(store.get("s-ordered")),
+    )
+    store.upsert(
+        "s-ordered",
+        host="air",
+        cwd="/tmp/proj",
+        state="working",
+        working_since=time.time() - 90,
+    )
+
+    hook.dispatch(
+        {"hook_event_name": "Stop", "session_id": "s-ordered", "cwd": "/tmp/proj"}
+    )
+
+    assert row_when_notified[0]["done_at"] is not None
+    assert row_when_notified[0]["done_turn_s"] >= 60
+    assert row_when_notified[0]["pending_alert"] == "done"
+
+
 def test_stop_refreshes_heartbeat(tmp_path, monkeypatch):
     """Stop fires reliably on every turn per the verified hook contract,
     making it a more dependable liveness signal than statusline's refresh
@@ -54,7 +80,7 @@ def test_stop_refreshes_heartbeat(tmp_path, monkeypatch):
     assert store.display_state(row) == "idle"  # not 'gone', despite the stale heartbeat_at set above
 
 
-def test_stop_after_short_run_sets_idle_no_notify(tmp_path, monkeypatch):
+def test_stop_after_short_run_sets_idle_and_notifies(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
@@ -64,8 +90,114 @@ def test_stop_after_short_run_sets_idle_no_notify(tmp_path, monkeypatch):
     hook.dispatch({"hook_event_name": "Stop", "session_id": "s2", "cwd": "/tmp/proj"})
 
     assert store.get("s2")["state"] == "idle"
+    assert len(calls) == 1
+    assert "my-thread" in calls[0][1]
+    assert store.get("s2")["pending_alert"] == "done"
+
+
+def test_duplicate_stop_notifies_only_once(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+
+    store.upsert(
+        "s-duplicate-stop",
+        host="air",
+        cwd="/tmp/proj",
+        state="working",
+        working_since=time.time() - 8,
+        name="my-thread",
+    )
+    payload = {
+        "hook_event_name": "Stop",
+        "session_id": "s-duplicate-stop",
+        "cwd": "/tmp/proj",
+    }
+
+    hook.dispatch(payload)
+    first_done_at = store.get("s-duplicate-stop")["done_at"]
+    hook.dispatch(payload)
+
+    row = store.get("s-duplicate-stop")
+    assert len(calls) == 1
+    assert row["working_since"] is None
+    assert row["done_at"] == first_done_at
+
+
+def test_stale_stop_does_not_overwrite_a_newer_prompt(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    original_finish_turn = store.finish_turn
+    old_start = time.time() - 8
+    new_start = time.time()
+    store.upsert(
+        "s-stale-stop",
+        host="air",
+        cwd="/tmp/proj",
+        state="working",
+        working_since=old_start,
+        name="my-thread",
+    )
+
+    def prompt_arrives_before_stop_commits(session_id, working_since, turn_s, **fields):
+        store.upsert(session_id, state="working", working_since=new_start)
+        return original_finish_turn(session_id, working_since, turn_s, **fields)
+
+    monkeypatch.setattr(store, "finish_turn", prompt_arrives_before_stop_commits)
+
+    mutated = hook.dispatch(
+        {
+            "hook_event_name": "Stop",
+            "session_id": "s-stale-stop",
+            "cwd": "/tmp/proj",
+        }
+    )
+
+    row = store.get("s-stale-stop")
+    assert mutated is False
+    assert row["state"] == "working"
+    assert row["working_since"] == new_start
+    assert row["done_at"] is None
     assert calls == []
-    assert store.get("s2")["pending_alert"] is None  # short run -- no alert warranted
+
+
+def test_new_prompt_after_stop_commit_clears_completion_metadata(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert(
+        "s-prompt-after-stop",
+        host="air",
+        cwd="/tmp/proj",
+        state="working",
+        working_since=time.time() - 8,
+        name="my-thread",
+    )
+
+    def prompt_arrives_while_banner_is_delivered(title, message):
+        hook.dispatch(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "s-prompt-after-stop",
+                "cwd": "/tmp/proj",
+                "prompt": "continue immediately",
+            }
+        )
+
+    monkeypatch.setattr(hook.notify, "notify", prompt_arrives_while_banner_is_delivered)
+
+    hook.dispatch(
+        {
+            "hook_event_name": "Stop",
+            "session_id": "s-prompt-after-stop",
+            "cwd": "/tmp/proj",
+        }
+    )
+
+    row = store.get("s-prompt-after-stop")
+    assert row["state"] == "working"
+    assert row["working_since"] is not None
+    assert row["done_at"] is None
+    assert row["pending_alert"] is None
 
 
 @pytest.mark.parametrize(
@@ -130,6 +262,28 @@ def test_notification_ignored_types_do_not_change_state_or_notify(tmp_path, monk
     assert calls == []
 
 
+def test_quota_auto_resume_notification_does_not_claim_user_input_is_needed(
+    tmp_path, monkeypatch
+):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    store.upsert("quota-resumed", host="air", cwd="/tmp/proj", state="working")
+
+    mutated = hook.dispatch(
+        {
+            "hook_event_name": "Notification",
+            "session_id": "quota-resumed",
+            "cwd": "/tmp/proj",
+            "notification_type": "quota_auto_resume_fired",
+        }
+    )
+
+    assert mutated is False
+    assert store.get("quota-resumed")["state"] == "working"
+    assert calls == []
+
+
 def test_notification_unrecognized_future_type_fails_safe_to_needs_input(tmp_path, monkeypatch):
     """The core forward-compatibility fix: _IGNORED_NOTIFICATION_TYPES is a
     denylist, not an allowlist. A notification_type this code has never seen
@@ -177,6 +331,28 @@ def test_user_prompt_submit_sets_working_and_captures_provisional_name(tmp_path,
     assert row["state"] == "working"
     assert row["name_source"] == "provisional"
     assert "fix" in row["name"]
+
+
+def test_user_prompt_submit_clears_superseded_pending_alert(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert(
+        "s-returned",
+        host="air",
+        cwd="/tmp/proj",
+        state="needs-input",
+        pending_alert="needs-input",
+    )
+
+    hook.dispatch({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "s-returned",
+        "cwd": "/tmp/proj",
+        "prompt": "here is the answer",
+    })
+
+    row = store.get("s-returned")
+    assert row["state"] == "working"
+    assert row["pending_alert"] is None
 
 
 def test_user_prompt_submit_does_not_overwrite_haiku_name(tmp_path, monkeypatch):
@@ -230,9 +406,104 @@ def test_main_exits_zero_even_if_dispatch_raises(monkeypatch):
     assert exc_info.value.code == 0
 
 
+def test_main_spawns_sync_after_committing_user_prompt(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("s-publish", host="air", cwd="/tmp/proj", state="idle",
+                 name="thread", done_at=123.0, done_turn_s=45.0)
+    observed = []
+
+    def _observe_spawn(session_id):
+        row = store.get(session_id)
+        observed.append(
+            (
+                session_id,
+                row["state"],
+                row["done_at"],
+                row["done_turn_s"],
+                row["sync_revision"],
+            )
+        )
+
+    monkeypatch.setattr(hook, "_spawn_sync", _observe_spawn)
+    monkeypatch.setattr(sys, "argv", ["agent-board", "hook"])
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(json.dumps({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "s-publish",
+        "cwd": "/tmp/proj",
+        "prompt": "continue the work",
+    })))
+
+    with pytest.raises(SystemExit) as exc_info:
+        hook.main()
+
+    assert exc_info.value.code == 0
+    assert observed == [("s-publish", "working", None, None, 1)]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not valid json {{{",
+        json.dumps({"hook_event_name": "Stop", "cwd": "/tmp/proj"}),
+        json.dumps({
+            "hook_event_name": "Notification",
+            "session_id": "s-ignore",
+            "cwd": "/tmp/proj",
+            "notification_type": "idle_prompt",
+        }),
+        json.dumps({"hook_event_name": "UnknownEvent", "session_id": "s-unknown"}),
+    ],
+)
+def test_main_does_not_spawn_sync_for_non_mutating_input(tmp_path, monkeypatch, raw):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook, "_spawn_sync", calls.append)
+    monkeypatch.setattr(sys, "argv", ["agent-board", "hook"])
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(raw))
+
+    with pytest.raises(SystemExit) as exc_info:
+        hook.main()
+
+    assert exc_info.value.code == 0
+    assert calls == []
+
+
+def test_spawn_sync_uses_detached_repo_command_and_preferred_interpreter(monkeypatch):
+    calls = []
+    monkeypatch.delenv("AGENT_BOARD_DISABLE_SYNC", raising=False)
+    monkeypatch.setattr(hook, "_SYNC_INTERPRETER", Path("/repo/.venv/bin/python"))
+    monkeypatch.setattr(hook, "_ENTRY_SCRIPT", Path("/repo/agent-board"))
+    monkeypatch.setattr(hook.subprocess, "Popen", lambda command, **kwargs: calls.append((command, kwargs)))
+
+    hook._spawn_sync("session-123")
+
+    assert calls == [(
+        [
+            "/repo/.venv/bin/python",
+            "/repo/agent-board",
+            "sync",
+            "push",
+            "--coalesce",
+            "session-123",
+        ],
+        {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "start_new_session": True,
+            "close_fds": True,
+        },
+    )]
+
+
 def test_entry_script_end_to_end_working_then_idle_transition(tmp_path, monkeypatch):
     """Integration: pipe real JSON through the actual `agent-board hook` entry script."""
-    env = {**__import__("os").environ, "AGENT_BOARD_DB_PATH": str(tmp_path / "state.db")}
+    env = {
+        **__import__("os").environ,
+        "AGENT_BOARD_DB_PATH": str(tmp_path / "state.db"),
+        "AGENT_BOARD_DISABLE_SYNC": "1",
+        "AGENT_BOARD_DISABLE_NOTIFICATIONS": "1",
+    }
 
     start_payload = json.dumps({
         "hook_event_name": "UserPromptSubmit",
@@ -387,6 +658,55 @@ def test_codex_permission_request_maps_to_needs_input(tmp_path, monkeypatch):
     assert calls == [("[team-operations] Codex needs input", "deploy sweep")]
 
 
+def test_codex_interrupt_returns_to_idle_without_marking_done(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    store.upsert(
+        "c-interrupt",
+        host="air",
+        cwd="/Users/me/team-operations",
+        state="working",
+        working_since=time.time() - 120,
+        name="deploy sweep",
+        provider="codex",
+        model_label="Codex",
+    )
+
+    assert hook.dispatch(
+        {
+            "hook_event_name": "Interrupt",
+            "session_id": "c-interrupt",
+            "cwd": "/Users/me/team-operations",
+        },
+        provider="codex",
+    ) is True
+
+    row = store.get("c-interrupt")
+    assert row["state"] == "idle"
+    assert row["working_since"] is None
+    assert row["done_at"] is None
+    assert row["pending_alert"] is None
+    assert store.is_unattended(row) is False
+    assert calls == []
+
+    # Codex may still deliver a delayed or duplicate Stop for the interrupted
+    # turn. It must not reinterpret that stale turn start as a completion.
+    hook.dispatch(
+        {
+            "hook_event_name": "Stop",
+            "session_id": "c-interrupt",
+            "cwd": "/Users/me/team-operations",
+        },
+        provider="codex",
+    )
+    row = store.get("c-interrupt")
+    assert row["done_at"] is None
+    assert row["pending_alert"] is None
+    assert store.is_unattended(row) is False
+    assert calls == []
+
+
 def test_every_completed_turn_marks_done_regardless_of_length(tmp_path, monkeypatch):
     """Duration is not the signal; whether you came back is. A 10-second
     turn that ends with a question is still a thread waiting on you."""
@@ -399,13 +719,13 @@ def test_every_completed_turn_marks_done_regardless_of_length(tmp_path, monkeypa
     row = store.get("long")
     assert store.is_unattended(row) is True
     assert 399 < row["done_turn_s"] < 405
-    assert row["pending_alert"] == "done"  # banner path unchanged (>60s)
+    assert row["pending_alert"] == "done"
 
     store.upsert("short", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 10)
     hook.dispatch({"hook_event_name": "Stop", "session_id": "short", "cwd": "/tmp/p"})
     row = store.get("short")
     assert store.is_unattended(row) is True
-    assert row["pending_alert"] is None  # <60s: no banner, but still waiting on you
+    assert row["pending_alert"] == "done"  # every completed turn notifies
 
     # No prompt ever sent (no working_since): nothing completed, nothing waits.
     store.upsert("never", host="air", cwd="/tmp/p", state="idle")
@@ -465,7 +785,11 @@ def test_session_end_always_preserves_done_at(tmp_path, monkeypatch, reason):
 def test_entry_script_accepts_provider_flag_end_to_end(tmp_path, monkeypatch):
     """The real shim, the real argv, a Codex-shaped payload on stdin."""
     db = tmp_path / "state.db"
-    env = {**dict(__import__("os").environ), "AGENT_BOARD_DB_PATH": str(db)}
+    env = {
+        **dict(__import__("os").environ),
+        "AGENT_BOARD_DB_PATH": str(db),
+        "AGENT_BOARD_DISABLE_SYNC": "1",
+    }
     payload = json.dumps({"hook_event_name": "SessionStart", "session_id": "codex-e2e",
                           "cwd": "/tmp/proj", "model": "gpt-5-codex", "transcript_path": "/nope",
                           "permission_mode": "default", "source": "startup"})

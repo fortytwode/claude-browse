@@ -1,12 +1,12 @@
 """Claude Code / Codex hook dispatcher.
 
 Entry point for SessionStart / UserPromptSubmit / Stop / Notification /
-PermissionRequest / SessionEnd. Must never break a session: every path
+PermissionRequest / Interrupt / SessionEnd. Must never break a session: every path
 through main() exits 0, and all local work is synchronous SQLite (fast).
-Network work (Haiku naming, Firestore/Slack sync) is deliberately NOT
-triggered from here -- it runs from a separate `agent-board sync` command
-registered as an async hook, so a slow or failing network call can never
-block a turn (see board/sync.py, U6).
+After a recognized event commits locally, main launches a detached
+`agent-board sync push <session-id>` worker. Network work never blocks the
+hook, and sync.py serializes workers before reading SQLite so an older worker
+cannot overwrite a newer local transition.
 
 Providers: Claude Code and Codex both deliver the same hook envelope on
 stdin (`hook_event_name`, `session_id`, `cwd`, `model`, `transcript_path`,
@@ -16,7 +16,8 @@ NOT say is which CLI sent it, so the hook is registered as
 `agent-board hook` (Claude) in ~/.claude/settings.json; the provider is
 stored on the row and drives every resume command downstream. Codex has no
 `Notification` event; its blocked-on-you signal is `PermissionRequest`,
-which maps to the same needs-input state.
+which maps to the same needs-input state. Its `Interrupt` event returns an
+active turn to idle without treating the interrupted turn as completed.
 """
 
 from __future__ import annotations
@@ -24,13 +25,17 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 from claude_browse.board import notify, store
 
-_NOTIFY_AFTER_S = 60
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ENTRY_SCRIPT = _REPO_ROOT / "agent-board"
+_REPO_VENV_PYTHON = _REPO_ROOT / ".venv" / "bin" / "python"
+_SYNC_INTERPRETER = _REPO_VENV_PYTHON if _REPO_VENV_PYTHON.exists() else Path(sys.executable)
 
 
 def _unattended_min_turn_s() -> float:
@@ -43,8 +48,7 @@ def _unattended_min_turn_s() -> float:
     guard against is already bounded downstream: the sweep only pings once a
     completion has sat unattended for 10 minutes, pings at most twice, and
     a new prompt or an ack clears it. Env-tunable (seconds)
-    for anyone who does want a floor; unrelated to _NOTIFY_AFTER_S, which
-    gates only the local banner."""
+    for anyone who does want a floor."""
     raw = os.environ.get("AGENT_BOARD_UNATTENDED_MIN_TURN_S", "").strip()
     try:
         value = float(raw) if raw else 0.0
@@ -65,10 +69,13 @@ _NEEDS_INPUT_EVENTS = {"PermissionRequest"}
 # exactly the failure this feature exists to prevent.
 _IGNORED_NOTIFICATION_TYPES = {
     "idle_prompt",  # fires on ~60s of user inactivity -- not "needs you", just "hasn't typed"
+    # Claude emits this when a quota pause ends and work resumes by itself.
+    # Treating it as needs-input would announce precisely the opposite state.
+    "quota_auto_resume_fired",
     "auth_success",
     "elicitation_complete",
     "elicitation_response",
-    "agent_completed",  # Stop already covers completion via the duration gate
+    "agent_completed",  # Stop already covers completion
 }
 
 
@@ -225,11 +232,12 @@ def _parse_provider(argv: list[str]) -> str:
     return store.DEFAULT_PROVIDER
 
 
-def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
+def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
+    """Apply one recognized state transition and report whether it mutated."""
     event = payload.get("hook_event_name")
     session_id = payload.get("session_id")
     if not session_id:
-        return
+        return False
     cwd = payload.get("cwd")
     row = store.get(session_id)
     model_label = _model_label(payload, row)
@@ -252,6 +260,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
                 fields["model_label"] = model_label
             store.upsert(session_id, **fields)
         store.heartbeat(session_id)
+        return True
 
     elif event == "UserPromptSubmit":
         fields = {
@@ -266,6 +275,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
             # the user ever having to press anything.
             "done_at": None,
             "done_turn_s": None,
+            "pending_alert": None,
         }
         if model_label:
             fields["model_label"] = model_label
@@ -277,20 +287,30 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
                 fields["name_source"] = "provisional"
         store.upsert(session_id, **fields)
         store.heartbeat(session_id)
+        return True
 
     elif event == "Stop":
         working_since = row.get("working_since") if row else None
-        _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
         turn_s = (time.time() - working_since) if working_since else 0.0
-        if working_since and turn_s > _NOTIFY_AFTER_S:
+        if working_since:
+            if not store.finish_turn(
+                session_id,
+                working_since,
+                turn_s,
+                cwd=cwd,
+                host=_hostname(),
+                model_label=model_label or None,
+                mark_unattended=turn_s >= _unattended_min_turn_s(),
+            ):
+                # A duplicate Stop or a Stop for a superseded turn must not
+                # replay the banner or overwrite a newer prompt's state.
+                return False
+        else:
+            _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
+        if working_since:
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify(_notify_title("done", cwd, model_label), _notify_body(name, cwd))
-            # Same trigger as the local notification, so the async sync hook
-            # knows to post a fresh Slack message too -- chat.update alone
-            # doesn't re-notify Slack channel members (see sync.post_alert).
-            store.set_pending_alert(session_id, "done")
-        if working_since and turn_s >= _unattended_min_turn_s():
-            store.mark_done(session_id, turn_s)
+        return True
 
     elif event == "Notification" or event in _NEEDS_INPUT_EVENTS:
         notification_type = payload.get("notification_type")
@@ -299,6 +319,28 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify(_notify_title("needs input", cwd, model_label), _notify_body(name, cwd))
             store.set_pending_alert(session_id, "needs-input")
+            return True
+        return False
+
+    elif event == "Interrupt" and provider == "codex":
+        # An interrupted turn did not complete, so it must not appear in the
+        # unattended queue or emit the same alerts as Stop. Clear any older
+        # completion metadata defensively in case a partial event sequence
+        # arrives after a resumed session.
+        store.upsert(
+            session_id,
+            host=_hostname(),
+            cwd=cwd,
+            state="idle",
+            provider=provider,
+            working_since=None,
+            done_at=None,
+            done_turn_s=None,
+            pending_alert=None,
+            **({"model_label": model_label} if model_label else {}),
+        )
+        store.heartbeat(session_id)
+        return True
 
     elif event == "SessionEnd":
         # done_at deliberately survives SessionEnd, however the session ended
@@ -306,6 +348,35 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
         # back to is still a thread you can resume, and the board's job is
         # to keep it visible until you do, or ack it.
         _set_state(session_id, "ended", cwd=cwd, model_label=model_label or None)
+        return True
+
+    return False
+
+
+def _spawn_sync(session_id: str) -> None:
+    """Launch best-effort publication without extending hook latency."""
+    if os.environ.get("AGENT_BOARD_DISABLE_SYNC", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        return
+    try:
+        subprocess.Popen(
+            [
+                str(_SYNC_INTERPRETER),
+                str(_ENTRY_SCRIPT),
+                "sync",
+                "push",
+                "--coalesce",
+                session_id,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception:
+        pass
 
 
 def main() -> None:
@@ -313,7 +384,10 @@ def main() -> None:
         provider = _parse_provider(sys.argv[1:])
         raw = sys.stdin.read()
         payload = json.loads(raw)
-        dispatch(payload, provider=provider)
+        if dispatch(payload, provider=provider):
+            session_id = str(payload["session_id"])
+            store.mark_sync_pending(session_id)
+            _spawn_sync(session_id)
     except Exception:
         pass
     finally:

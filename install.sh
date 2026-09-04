@@ -104,6 +104,9 @@ esac
 # Wire agent-board hooks + statusLine into ~/.claude/settings.json (idempotent, backs up first)
 echo ""
 echo "Agent Board setup:"
+if ! python3 "$SCRIPT_DIR/scripts/install_notifier_app.py"; then
+    echo "  NOTE: dedicated notifier unavailable; Script Editor remains the fallback."
+fi
 python3 "$SCRIPT_DIR/scripts/install_agent_board.py"
 
 echo ""
@@ -122,9 +125,8 @@ else
     echo "  To enable sync:"
     echo "    python3 -m venv \"$SCRIPT_DIR/.venv\""
     echo "    \"$SCRIPT_DIR/.venv/bin/pip\" install -e \"$SCRIPT_DIR[board-sync]\""
-    echo "  Then update the async sync hook commands in ~/.claude/settings.json to point at"
-    echo "  \"$SCRIPT_DIR/.venv/bin/python\" (install_agent_board.py already wires this path;"
-    echo "  re-run install.sh after creating the venv if hooks were wired before it existed)."
+    echo "  Agent Board automatically uses it on the next hook event; no hook rewiring"
+    echo "  or installer re-run is needed."
 fi
 
 echo ""

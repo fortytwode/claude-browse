@@ -67,6 +67,41 @@ def test_active_excludes_stale_ended_includes_recent_idle_newest_first(tmp_path,
     assert ids[0] == "sess-recent"
 
 
+def test_stale_ended_unattended_completion_remains_visible_and_findable_until_ack(
+    tmp_path, monkeypatch
+):
+    _fresh_store(tmp_path, monkeypatch)
+
+    store.upsert(
+        "sess-old-unattended",
+        host="air",
+        cwd="/tmp/a",
+        state="idle",
+        name="old unattended completion",
+    )
+    store.mark_done("sess-old-unattended", 900)
+    store.set_state("sess-old-unattended", "ended")
+    old_ts = time.time() - (30 * 24 * 3600)
+    store._raw_set_updated_at("sess-old-unattended", old_ts)
+
+    assert [r["session_id"] for r in store.active(max_age_hours=24)] == [
+        "sess-old-unattended"
+    ]
+    assert [r["session_id"] for r in store.unattended(max_age_hours=24)] == [
+        "sess-old-unattended"
+    ]
+    assert [r["session_id"] for r in store.find("old unattended")] == [
+        "sess-old-unattended"
+    ]
+
+    store.ack("sess-old-unattended")
+    store._raw_set_updated_at("sess-old-unattended", old_ts)
+
+    assert store.active(max_age_hours=24) == []
+    assert store.unattended(max_age_hours=24) == []
+    assert store.find("old unattended") == []
+
+
 def test_concurrent_upserts_different_sessions_do_not_lock(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
 
@@ -137,6 +172,39 @@ def test_pending_alert_set_and_clear(tmp_path, monkeypatch):
     assert store.get("sess-alert")["pending_alert"] is None
 
 
+def test_sync_revisions_track_only_unpublished_transitions(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert("dirty", host="air", state="idle")
+    store.upsert("clean", host="air", state="idle")
+
+    first = store.mark_sync_pending("dirty")
+    second = store.mark_sync_pending("dirty")
+
+    assert (first, second) == (1, 2)
+    assert [row["session_id"] for row in store.pending_sync()] == ["dirty"]
+    assert store.mark_sync_published("dirty", first) is True
+    assert [row["session_id"] for row in store.pending_sync()] == ["dirty"]
+    assert store.mark_sync_published("dirty", second) is True
+    assert store.pending_sync() == []
+
+
+def test_pending_alert_consume_is_revision_guarded(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert(
+        "alert", host="air", state="needs-input", pending_alert="needs-input"
+    )
+    old_revision = store.mark_sync_pending("alert")
+    store.set_pending_alert("alert", "needs-input")
+    new_revision = store.mark_sync_pending("alert")
+
+    assert store.consume_pending_alert("alert", "needs-input", old_revision) is None
+    assert store.get("alert")["pending_alert_revision"] == new_revision
+
+    consumed = store.consume_pending_alert("alert", "needs-input", new_revision)
+    assert consumed is not None and consumed["state"] == "needs-input"
+    assert store.get("alert")["pending_alert"] is None
+
+
 def test_get_conn_is_cached_but_invalidates_on_db_path_change(tmp_path, monkeypatch):
     path_a = tmp_path / "a.db"
     path_b = tmp_path / "b.db"
@@ -190,6 +258,9 @@ def test_migration_adds_new_columns_to_a_pre_existing_older_schema_db(tmp_path, 
     assert row["name"] == "pre-migration-name"  # old data preserved
     assert row["named_at_msg_count"] is None  # new column present, defaults NULL
     assert row["model_label"] is None
+    assert row["sync_revision"] == 0
+    assert row["published_revision"] == 0
+    assert row["pending_alert_revision"] is None
 
     store.upsert("pre-existing-row", named_at_msg_count=7, model_label="Opus")
     row = store.get("pre-existing-row")

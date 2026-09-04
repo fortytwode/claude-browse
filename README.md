@@ -364,16 +364,22 @@ dozen-plus alerts from three threads). The local banner still fires, and
 "done" Slack post: `export AGENT_BOARD_IMMEDIATE_DONE_ALERT=1` in the
 environment the hooks run in.
 
-**Notification persistence:** the banner plays a sound (your System
-Settings > Sound > Alert sound), but still auto-dismisses after a few
-seconds by default -- that auto-dismiss timing is a per-app Notification
-Center setting, not something this code can set programmatically. To make
-it stay on screen until you dismiss it: System Settings > Notifications >
-find the app that's actually registered as the sender (likely "Script
-Editor", or whichever terminal app you run Claude Code in -- Terminal,
-iTerm2, etc.; check both if unsure) > set Alert Style to "Alerts" instead
-of "Banners". The Slack `#agent-status` board is the durable fallback if
-you miss the banner entirely -- it never auto-dismisses.
+**Dedicated notification identity and persistence:** `./install.sh` builds a
+small local `~/Applications/Agent Board Notifier.app` with the stable identity
+`Agent Board`. That lets macOS grant Agent Board an exception under System
+Settings > Focus > your Focus > Allowed Apps > Agent Board Notifier without
+also allowing every Script Editor notification. If the Mac has no Swift
+compiler, delivery falls back safely to Script Editor and the installer
+reports that downgrade.
+
+The banner plays a sound (your System Settings > Sound > Alert sound), but
+still auto-dismisses after a few seconds by default -- that timing is a per-app
+Notification Center setting. To make it stay until you dismiss it: System
+Settings > Notifications > Agent Board > set Alert Style to "Persistent"
+instead of "Temporary". Focus cannot be bypassed programmatically: add Agent
+Board Notifier to Allowed Apps for each Focus that should permit completion
+alerts. The Slack `#agent-status` board is the durable fallback if you miss
+the banner entirely -- it never auto-dismisses.
 
 **Setup (one machine):**
 
@@ -383,15 +389,14 @@ you miss the banner entirely -- it never auto-dismisses.
 
 This idempotently wires hooks + a statusLine command into
 `~/.claude/settings.json` and hooks into `~/.codex/hooks.json` (backing
-each up first; safe to re-run), symlinks `agent-board`, disables Claude
+each up before a change; safe to re-run), symlinks `agent-board`, disables Claude
 Code's built-in folderless push notifications so Agent Board is the only
 local alert source, and reports:
 - whether hooks/statusLine were already wired (skips if so)
-- any **stale or duplicate** registrations it removed. The sync hook
-  command embeds the interpreter path, which changes once the board-sync
-  venv exists; the old installer appended the new variant and left the old
-  one, so both fired and every Slack alert posted twice. The installer now
-  replaces stale variants and collapses exact duplicates.
+- any stale, duplicate, matcher-scoped, or option-drifted Agent Board
+  registrations it removed. Foreign hooks and their matcher groups remain
+  untouched. Each lifecycle event ends with one dedicated, matcherless Agent
+  Board hook.
 - the local notification setting (`agentPushNotifEnabled`, kept false to
   avoid duplicate lower-information banners) and how many of your recent
   sessions already have an `ai-title` -- the
@@ -404,17 +409,29 @@ To audit without changing anything (exit 1 on any drift):
 python3 scripts/install_agent_board.py --check
 ```
 
-**Codex.** Codex's hooks engine is Claude-compatible: same event names,
-same stdin envelope (`hook_event_name`, `session_id`, `cwd`, `model`),
-configured in `~/.codex/hooks.json` as `{"hooks": {Event: [...]}}` with
-`timeout_sec`. The installer registers `agent-board hook --provider codex`
+**Codex.** Codex sends the same core stdin envelope
+(`hook_event_name`, `session_id`, `cwd`, `model`) and stores definitions in
+`~/.codex/hooks.json` as `{"hooks": {Event: [...]}}`. Command handlers use
+the `timeout` field. The installer registers `agent-board hook --provider codex`
 on `SessionStart` / `UserPromptSubmit` / `Stop` / `PermissionRequest` /
-`SessionEnd` (Codex has no `Notification` event; `PermissionRequest` is its
-blocked-on-you signal and maps to `needs-input`). The provider is stored on
+`Interrupt` / `SessionEnd` (Codex has no `Notification` event;
+`PermissionRequest` is its blocked-on-you signal and maps to `needs-input`).
+`Interrupt` returns the thread to `idle` and does not record a completion,
+because interrupted work did not finish. The provider is stored on
 the row, so Codex threads get `codex resume <id>` on every surface, never a
-`claude --resume` that cannot open them. Hooks are on by default in current
-Codex releases; if your `~/.codex/config.toml` sets `[features] hooks =
-false` the installer says so. Codex rows keep their prompt-derived name
+`claude --resume` that cannot open them. `SessionEnd` has Codex's maximum
+timeout of 3 seconds; it only commits local state and starts detached,
+nonblocking publication. Every event uses one hook: after the local commit,
+that hook starts a serialized sync worker, avoiding races between sibling
+hook commands.
+
+After a fresh or changed Codex installation, open Codex, run `/hooks`, and
+review/trust the Agent Board definitions. Codex skips new or changed hooks
+until you do this. The installer and `--check` cannot verify trust; `--check`
+validates only hook definitions and the hooks feature configuration. Hooks
+are on by default in current Codex releases; if your `~/.codex/config.toml`
+sets `[features] hooks = false`, `--check` fails and the installer warns
+without editing that file. Codex rows keep their prompt-derived name
 (the Haiku namer reads Claude transcripts only, for now). Pass `--no-codex`
 to skip.
 
@@ -433,8 +450,10 @@ notifications, `aj`) still works fully -- sync just no-ops and logs to
 ```bash
 python3 -m venv .venv
 ./.venv/bin/pip install -e ".[board-sync]"
-./install.sh   # re-run so the sync hooks point at the venv (old variant is removed)
 ```
+
+Agent Board automatically uses `.venv/bin/python` on the next hook event; no
+hook rewiring or installer re-run is needed.
 
 Firestore uses Application Default Credentials (`gcloud auth
 application-default login`). Point it at YOUR project via
