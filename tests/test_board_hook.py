@@ -179,6 +179,28 @@ def test_user_prompt_submit_sets_working_and_captures_provisional_name(tmp_path,
     assert "fix" in row["name"]
 
 
+def test_user_prompt_submit_clears_superseded_pending_alert(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert(
+        "s-returned",
+        host="air",
+        cwd="/tmp/proj",
+        state="needs-input",
+        pending_alert="needs-input",
+    )
+
+    hook.dispatch({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "s-returned",
+        "cwd": "/tmp/proj",
+        "prompt": "here is the answer",
+    })
+
+    row = store.get("s-returned")
+    assert row["state"] == "working"
+    assert row["pending_alert"] is None
+
+
 def test_user_prompt_submit_does_not_overwrite_haiku_name(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
 
@@ -294,7 +316,14 @@ def test_spawn_sync_uses_detached_repo_command_and_preferred_interpreter(monkeyp
     hook._spawn_sync("session-123")
 
     assert calls == [(
-        ["/repo/.venv/bin/python", "/repo/agent-board", "sync", "push", "session-123"],
+        [
+            "/repo/.venv/bin/python",
+            "/repo/agent-board",
+            "sync",
+            "push",
+            "--coalesce",
+            "session-123",
+        ],
         {
             "stdin": subprocess.DEVNULL,
             "stdout": subprocess.DEVNULL,

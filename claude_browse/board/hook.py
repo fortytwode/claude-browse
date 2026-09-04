@@ -273,6 +273,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             # the user ever having to press anything.
             "done_at": None,
             "done_turn_s": None,
+            "pending_alert": None,
         }
         if model_label:
             fields["model_label"] = model_label
@@ -335,6 +336,7 @@ def _spawn_sync(session_id: str) -> None:
                 str(_ENTRY_SCRIPT),
                 "sync",
                 "push",
+                "--coalesce",
                 session_id,
             ],
             stdin=subprocess.DEVNULL,

@@ -192,71 +192,139 @@ def session_doc(row: dict) -> dict:
 
 
 @contextmanager
-def _publication_lock() -> Iterator[None]:
-    """Serialize this host's workers across the complete publication cycle."""
+def _publication_lock(*, coalesce: bool = False) -> Iterator[str | None]:
+    """Serialize publication, optionally bounding detached worker backlog.
+
+    Direct callers wait for the publisher lock. Detached hook workers first
+    try that lock, then reserve a single waiter slot. If both are occupied,
+    their transition is already covered by the waiter, which will reread the
+    newest SQLite snapshot when it gets its turn.
+    """
     import fcntl
 
     _PUBLICATION_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(_PUBLICATION_LOCK_PATH, "a+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        if not coalesce:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield "publish"
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            return
+
+        publication_mode = "publish"
         try:
-            yield
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            waiter_path = _PUBLICATION_LOCK_PATH.with_name(
+                f"{_PUBLICATION_LOCK_PATH.stem}.waiter{_PUBLICATION_LOCK_PATH.suffix}"
+            )
+            with open(waiter_path, "a+") as waiter_file:
+                try:
+                    fcntl.flock(
+                        waiter_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+                    )
+                except BlockingIOError:
+                    yield None
+                    return
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                finally:
+                    fcntl.flock(waiter_file.fileno(), fcntl.LOCK_UN)
+            publication_mode = "drain"
+
+        try:
+            yield publication_mode
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def push(session_id: str) -> bool:
+def _publish_session(session_id: str) -> bool:
+    """Publish one session while the caller owns the publication lock."""
+    row = store.get(session_id)
+    if row is None:
+        return False
+
+    naming.maybe_name(session_id)
+    row = store.get(session_id) or row  # re-read in case the name just upgraded
+
+    host = row.get("host") or "unknown-host"
+    doc_id = f"{host}:{session_id}"
+
+    client = _firestore_client()
+    # merge=True: the team-operations sweep owns its own fields on this
+    # doc (alert_count, last_alert_at, alert_ts). A plain set() would
+    # wipe them on every turn and the sweep would re-alert forever.
+    client.collection(COLLECTION).document(doc_id).set(session_doc(row), merge=True)
+
+    pending_alert = row.get("pending_alert")
+    if pending_alert:
+        try:
+            is_current = (
+                pending_alert == "needs-input" and row.get("state") == "needs-input"
+            ) or (pending_alert == "done" and store.is_unattended(row))
+            if not is_current:
+                _log(
+                    f"skipped superseded {pending_alert} alert "
+                    f"for session_id={session_id}"
+                )
+            elif pending_alert == "needs-input" or _immediate_done_alert_enabled():
+                post_alert(
+                    session_id,
+                    pending_alert,
+                    row.get("name") or session_id,
+                    folder=os.path.basename(row.get("cwd") or "") or None,
+                    model_label=row.get("model_label") or None,
+                    provider=store.provider_of(row),
+                )
+            else:
+                _log(
+                    f"skipped immediate done alert for session_id={session_id} "
+                    "(AGENT_BOARD_IMMEDIATE_DONE_ALERT off; sweep handles unattended)"
+                )
+        except Exception as exc:
+            _log(f"post_alert failed for session_id={session_id}: {exc}")
+        finally:
+            store.clear_pending_alert(session_id)
+    return True
+
+
+def push(session_id: str, *, coalesce: bool = False) -> bool:
     """Publish the newest local state. Best-effort, never raises.
 
     True means the Firestore document was merged. Slack alerts and the board
     remain independently best-effort, preserving the offline hook contract.
     """
     try:
-        with _publication_lock():
-            # Do not snapshot state until this worker owns publication order.
-            row = store.get(session_id)
-            if row is None:
+        with _publication_lock(coalesce=coalesce) as publication_mode:
+            if publication_mode is None:
                 return False
 
-            naming.maybe_name(session_id)
-            row = store.get(session_id) or row  # re-read in case the name just upgraded
+            # A waiter represents every hook worker that collapsed behind it,
+            # including events from other sessions. Refresh all visible local
+            # rows so none of those session-specific transitions are lost.
+            session_ids = [session_id]
+            if publication_mode == "drain":
+                session_ids.extend(
+                    str(row["session_id"])
+                    for row in store.active()
+                    if str(row["session_id"]) != session_id
+                )
 
-            host = row.get("host") or "unknown-host"
-            doc_id = f"{host}:{session_id}"
+            requested_published = False
+            published_any = False
+            for queued_session_id in session_ids:
+                published = _publish_session(queued_session_id)
+                published_any = published_any or published
+                if queued_session_id == session_id:
+                    requested_published = published
 
-            client = _firestore_client()
-            # merge=True: the team-operations sweep owns its own fields on this
-            # doc (alert_count, last_alert_at, alert_ts). A plain set() would
-            # wipe them on every turn and the sweep would re-alert forever.
-            client.collection(COLLECTION).document(doc_id).set(session_doc(row), merge=True)
-
-            pending_alert = row.get("pending_alert")
-            if pending_alert:
+            if published_any:
                 try:
-                    if pending_alert == "needs-input" or _immediate_done_alert_enabled():
-                        post_alert(
-                            session_id,
-                            pending_alert,
-                            row.get("name") or session_id,
-                            folder=os.path.basename(row.get("cwd") or "") or None,
-                            model_label=row.get("model_label") or None,
-                            provider=store.provider_of(row),
-                        )
-                    else:
-                        _log(
-                            f"skipped immediate done alert for session_id={session_id} "
-                            "(AGENT_BOARD_IMMEDIATE_DONE_ALERT off; sweep handles unattended)"
-                        )
+                    post_or_update_slack(render_slack_body())
                 except Exception as exc:
-                    _log(f"post_alert failed for session_id={session_id}: {exc}")
-                finally:
-                    store.clear_pending_alert(session_id)
-
-            try:
-                post_or_update_slack(render_slack_body())
-            except Exception as exc:
-                _log(f"slack board update failed for session_id={session_id}: {exc}")
-            return True
+                    _log(f"slack board update failed for session_id={session_id}: {exc}")
+            return requested_published
     except Exception as exc:
         _log(f"push failed for session_id={session_id}: {exc}")
         return False
@@ -458,14 +526,20 @@ def main(argv: list[str]) -> None:
 
     if subcommand == "push":
         try:
-            if len(argv) > 1:
-                session_id = argv[1]
+            push_args = argv[1:]
+            coalesce = "--coalesce" in push_args
+            push_args = [arg for arg in push_args if arg != "--coalesce"]
+            if push_args:
+                session_id = push_args[0]
             else:
                 raw = sys.stdin.read()
                 payload = json.loads(raw)
                 session_id = payload.get("session_id")
             if session_id:
-                push(session_id)
+                if coalesce:
+                    push(session_id, coalesce=True)
+                else:
+                    push(session_id)
         except Exception as exc:
             _log(f"sync push main() failed: {exc}")
         sys.exit(0)

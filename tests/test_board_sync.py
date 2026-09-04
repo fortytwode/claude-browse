@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import sys
 import threading
-import time
 
 import pytest
 
@@ -141,17 +140,21 @@ def test_push_serializes_workers_and_latest_local_state_wins(tmp_path, monkeypat
     monkeypatch.setattr(sync, "_PUBLICATION_LOCK_PATH", tmp_path / "publication.lock")
     monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
     monkeypatch.setattr(sync, "post_or_update_slack", lambda body: None)
-    local_row = {
-        "session_id": "s-race", "host": "air", "cwd": "/tmp/proj",
-        "state": "idle", "name": "thread", "provider": "claude",
+    local_rows = {
+        "s-race": {
+            "session_id": "s-race", "host": "air", "cwd": "/tmp/proj",
+            "state": "idle", "name": "thread", "provider": "claude",
+        }
     }
     reads = []
 
     def _read_local(session_id):
-        reads.append((session_id, local_row["state"]))
-        return dict(local_row)
+        row = local_rows.get(session_id)
+        reads.append((session_id, row["state"] if row else None))
+        return dict(row) if row else None
 
     monkeypatch.setattr(store, "get", _read_local)
+    monkeypatch.setattr(store, "active", lambda: [dict(row) for row in local_rows.values()])
 
     first_write_started = threading.Event()
     release_first_write = threading.Event()
@@ -176,15 +179,41 @@ def test_push_serializes_workers_and_latest_local_state_wins(tmp_path, monkeypat
 
     client = BlockingClient()
     monkeypatch.setattr(sync, "_firestore_client", lambda: client)
+    waiter_started_waiting = threading.Event()
+    original_flock = __import__("fcntl").flock
+    nonblocking_locks_acquired = 0
+
+    def _observed_flock(lock_file, operation):
+        nonlocal nonblocking_locks_acquired
+        result = original_flock(lock_file, operation)
+        if (
+            operation & __import__("fcntl").LOCK_EX
+            and operation & __import__("fcntl").LOCK_NB
+        ):
+            nonblocking_locks_acquired += 1
+            if nonblocking_locks_acquired == 2:
+                waiter_started_waiting.set()
+        return result
+
+    monkeypatch.setattr(__import__("fcntl"), "flock", _observed_flock)
+
     results = []
-    first = threading.Thread(target=lambda: results.append(sync.push("s-race")))
+    first = threading.Thread(target=lambda: results.append(sync.push("s-race", coalesce=True)))
     first.start()
     assert first_write_started.wait(timeout=5)
 
-    local_row.update(state="working", done_at=None, done_turn_s=None)
-    second = threading.Thread(target=lambda: results.append(sync.push("s-race")))
+    local_rows["s-race"].update(state="working", done_at=None, done_turn_s=None)
+    second = threading.Thread(target=lambda: results.append(sync.push("s-race", coalesce=True)))
     second.start()
-    time.sleep(0.05)
+    assert waiter_started_waiting.wait(timeout=5)
+
+    # A third hook worker collapses into the existing waiter immediately,
+    # rather than joining an unbounded queue behind a stalled backend.
+    local_rows["s-other"] = {
+        "session_id": "s-other", "host": "air", "cwd": "/tmp/other",
+        "state": "needs-input", "name": "other", "provider": "claude",
+    }
+    assert sync.push("s-other", coalesce=True) is False
     assert len(writes) == 1
     assert reads == [("s-race", "idle"), ("s-race", "idle")]
     release_first_write.set()
@@ -193,9 +222,27 @@ def test_push_serializes_workers_and_latest_local_state_wins(tmp_path, monkeypat
 
     assert not first.is_alive() and not second.is_alive()
     assert results == [True, True]
-    assert [doc["state"] for doc in writes] == ["idle", "working"]
-    assert reads[-2:] == [("s-race", "working"), ("s-race", "working")]
+    assert [doc["state"] for doc in writes] == ["idle", "working", "needs-input"]
     assert client.sink["air:s-race"]["state"] == "working"
+    assert client.sink["air:s-other"]["state"] == "needs-input"
+
+
+def test_uncontended_coalesced_push_publishes_only_requested_session(
+    tmp_path, monkeypatch
+):
+    _fresh_store(tmp_path, monkeypatch)
+    _quiet(monkeypatch)
+    store.upsert(
+        "s-requested", host="air", cwd="/tmp/requested", state="working", name="one"
+    )
+    store.upsert("s-other", host="air", cwd="/tmp/other", state="idle", name="two")
+    client = _FakeClient()
+    monkeypatch.setattr(sync, "_firestore_client", lambda: client)
+
+    assert sync.push("s-requested", coalesce=True) is True
+
+    assert "air:s-requested" in client.sink
+    assert "air:s-other" not in client.sink
 
 
 def test_push_calls_post_alert_when_pending_alert_set_and_clears_it(tmp_path, monkeypatch):
@@ -393,6 +440,7 @@ def test_push_immediate_done_alert_opt_in(tmp_path, monkeypatch):
     _quiet(monkeypatch)
     monkeypatch.setenv("AGENT_BOARD_IMMEDIATE_DONE_ALERT", "1")
     store.upsert("s-d2", host="air", cwd="/tmp/p", state="idle", name="t", pending_alert="done")
+    store.mark_done("s-d2", 90)
     monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
     calls = []
     monkeypatch.setattr(sync, "post_alert", lambda *a, **k: calls.append((a, k)))
@@ -400,6 +448,34 @@ def test_push_immediate_done_alert_opt_in(tmp_path, monkeypatch):
     sync.push("s-d2")
 
     assert len(calls) == 1 and calls[0][0][1] == "done"
+
+
+@pytest.mark.parametrize(
+    ("state", "pending_alert"),
+    [("working", "needs-input"), ("idle", "needs-input"), ("working", "done")],
+)
+def test_push_clears_superseded_alert_without_posting(
+    tmp_path, monkeypatch, state, pending_alert
+):
+    _fresh_store(tmp_path, monkeypatch)
+    _quiet(monkeypatch)
+    monkeypatch.setenv("AGENT_BOARD_IMMEDIATE_DONE_ALERT", "1")
+    store.upsert(
+        "s-stale",
+        host="air",
+        cwd="/tmp/p",
+        state=state,
+        name="t",
+        pending_alert=pending_alert,
+    )
+    monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
+    calls = []
+    monkeypatch.setattr(sync, "post_alert", lambda *a, **k: calls.append((a, k)))
+
+    sync.push("s-stale")
+
+    assert calls == []
+    assert store.get("s-stale")["pending_alert"] is None
 
 
 def test_push_needs_input_alert_is_always_immediate(tmp_path, monkeypatch):
@@ -522,6 +598,21 @@ def test_sync_push_accepts_session_id_argv(monkeypatch):
 
     assert exc_info.value.code == 0
     assert calls == ["from-argv"]
+
+
+def test_sync_push_enables_coalescing_for_detached_worker(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        sync,
+        "push",
+        lambda session_id, *, coalesce=False: calls.append((session_id, coalesce)),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        sync.main(["push", "--coalesce", "from-hook"])
+
+    assert exc_info.value.code == 0
+    assert calls == [("from-hook", True)]
 
 
 def test_sync_push_retains_stdin_json_fallback(monkeypatch):
