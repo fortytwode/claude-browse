@@ -14,10 +14,12 @@ import threading
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
 from claude_browse import fts, web
+from claude_browse.board import hook, store
 
 
 def _seed(conn, sid, *, cwd="/w/home", provider="claude", path="", title=None):
@@ -76,12 +78,16 @@ def web_server(monkeypatch):
 
     monkeypatch.setattr(fts, "open_db", _open_test_db)
     monkeypatch.setattr(fts, "DB_PATH", db_path)
+    board_db_path = db_path + "-board"
+    monkeypatch.setattr(store, "_DB_PATH", Path(board_db_path))
+    monkeypatch.setattr(store, "_conn_cache", None)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), web._Handler)
     server.launch_cwd = "/w/home"
     server.cwd_filter = None
     server.folder_prefixes = ()
     server.session_limit = 100
+    server.csrf_token = "test-token"
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
@@ -92,12 +98,28 @@ def web_server(monkeypatch):
     server.server_close()
     if os.path.exists(db_path):
         os.unlink(db_path)
+    if os.path.exists(board_db_path):
+        os.unlink(board_db_path)
 
 
 def _get_json(url, host=None):
     req = urllib.request.Request(url)
     if host is not None:
         req.add_header("Host", host)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.status, json.loads(resp.read().decode())
+
+
+def _mutate_json(url, method, payload, *, token="test-token"):
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        method=method,
+        headers={
+            "Content-Type": "application/json",
+            "X-Agent-Board-Token": token,
+        },
+    )
     with urllib.request.urlopen(req, timeout=10) as resp:
         return resp.status, json.loads(resp.read().decode())
 
@@ -124,11 +146,13 @@ def test_sessions_here_param_scopes_to_folder(web_server):
 def test_meta_reflects_forced_here(web_server):
     base, server = web_server
     _status, data = _get_json(base + "/api/meta")
-    assert data == {"here_only_forced": False}
+    assert data["here_only_forced"] is False
+    assert data["csrf_token"] == "test-token"
+    assert data["launch_project"]["path"] == "/w/home"
 
     server.cwd_filter = "/w/home"
     _status, data = _get_json(base + "/api/meta")
-    assert data == {"here_only_forced": True}
+    assert data["here_only_forced"] is True
     # forced --here scopes even without the client checkbox
     _status, listing = _get_json(base + "/api/sessions")
     assert {s["session_id"] for s in listing["sessions"]} == {"home1", "home-sub"}
@@ -213,4 +237,129 @@ def test_assets_are_served_with_content_types(web_server):
         with urllib.request.urlopen(base + path, timeout=10) as resp:
             assert resp.status == 200
             assert resp.headers["Content-Type"].startswith(expected_type)
+            assert resp.headers["X-Frame-Options"] == "DENY"
+            assert "frame-ancestors 'none'" in resp.headers["Content-Security-Policy"]
             assert len(resp.read()) > 0
+
+
+def test_task_create_update_and_board_roundtrip(web_server):
+    base, _server = web_server
+    status, created = _mutate_json(
+        base + "/api/tasks",
+        "POST",
+        {
+            "title": "Ship the work queue",
+            "project_path": "/w/home",
+            "due_date": "2026-09-05",
+            "provider": "codex",
+        },
+    )
+    assert status == 201
+    task = created["task"]
+    assert task["title"] == "Ship the work queue"
+    assert task["due_date"] == "2026-09-05"
+    assert task["runtime_state"] == "not-started"
+    assert "codex" in task["full_command"]
+    assert "--dangerously-bypass-approvals-and-sandbox" in task["full_command"]
+
+    _status, updated = _mutate_json(
+        base + "/api/tasks/" + task["task_id"],
+        "PATCH",
+        {"title": "Ship it", "status": "waiting", "due_date": None},
+    )
+    assert updated["task"]["title"] == "Ship it"
+    assert updated["task"]["status"] == "waiting"
+    assert updated["task"]["due_date"] is None
+
+    _status, board = _get_json(base + "/api/board")
+    assert [item["title"] for item in board["tasks"]] == ["Ship it"]
+
+
+def test_add_session_to_queue_uses_index_metadata(web_server):
+    base, _server = web_server
+    _status, created = _mutate_json(
+        base + "/api/tasks", "POST", {"session_id": "home1", "title": "Review it"}
+    )
+    assert created["task"]["session_id"] == "home1"
+    assert created["task"]["session_provider"] == "claude"
+    assert "claude --resume home1" in created["task"]["full_command"]
+
+
+def test_mutations_require_csrf_token_and_valid_json(web_server):
+    base, _server = web_server
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        _mutate_json(base + "/api/tasks", "POST", {"title": "nope"}, token="wrong")
+    assert exc_info.value.code == 403
+
+    req = urllib.request.Request(
+        base + "/api/tasks",
+        data=b"title=nope",
+        method="POST",
+        headers={"Content-Type": "text/plain", "X-Agent-Board-Token": "test-token"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req, timeout=10)
+    assert exc_info.value.code == 415
+
+
+def test_launch_is_server_built_and_rejects_missing_project(web_server, monkeypatch):
+    base, _server = web_server
+    opened = []
+    monkeypatch.setattr(web.commands, "open_in_terminal", opened.append)
+    _status, created = _mutate_json(
+        base + "/api/tasks",
+        "POST",
+        {"title": "Start here", "project_path": tempfile.gettempdir(), "provider": "claude"},
+    )
+    task_id = created["task"]["task_id"]
+    _status, launched = _mutate_json(
+        base + f"/api/tasks/{task_id}/launch",
+        "POST",
+        {"provider": "codex", "full_access": True, "command": "rm -rf /"},
+    )
+    assert launched["command"] == opened[0]
+    assert "rm -rf" not in opened[0]
+    assert "codex" in opened[0]
+    assert "--dangerously-bypass-approvals-and-sandbox" in opened[0]
+
+    _status, missing = _mutate_json(
+        base + "/api/tasks",
+        "POST",
+        {"title": "Missing", "project_path": "/definitely/not/here"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        _mutate_json(
+            base + f"/api/tasks/{missing['task']['task_id']}/launch", "POST", {}
+        )
+    assert exc_info.value.code == 400
+
+
+def test_launch_rejects_non_boolean_full_access(web_server, monkeypatch):
+    base, _server = web_server
+    monkeypatch.setattr(web.commands, "open_in_terminal", lambda _command: None)
+    _status, created = _mutate_json(
+        base + "/api/tasks",
+        "POST",
+        {"title": "Typed launch", "project_path": tempfile.gettempdir()},
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        _mutate_json(
+            base + f"/api/tasks/{created['task']['task_id']}/launch",
+            "POST",
+            {"full_access": "false"},
+        )
+    assert exc_info.value.code == 400
+
+
+def test_ack_marks_sync_pending_and_spawns_publication(web_server, monkeypatch):
+    base, _server = web_server
+    store.upsert("attention", state="idle", done_at=1.0, acked_at=None)
+    spawned = []
+    monkeypatch.setattr(hook, "_spawn_sync", spawned.append)
+    _status, payload = _mutate_json(
+        base + "/api/sessions/attention/ack", "POST", {}
+    )
+    assert payload == {"ok": True}
+    assert store.get("attention")["acked_at"] is not None
+    assert store.get("attention")["sync_revision"] == 1
+    assert spawned == ["attention"]

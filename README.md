@@ -94,28 +94,54 @@ claude-browse --web         # open a local browser tab to read full past transcr
 claude-browse --web
 ```
 
-Opens a local-only browser tab (bound to `127.0.0.1`, no accounts, no outbound
-network calls) alongside the usual fzf picker -- not a replacement for it.
-Use it when you actually want to *read* a past conversation: a sidebar lists
-sessions (current folder first, searchable, "this folder only" toggle) and
-selecting one renders the full thread -- opened at the latest exchange,
-scroll up for history -- with fenced code blocks and an in-thread search
-box. This is prose only (user/assistant text) -- tool calls, file edits,
-and command output aren't captured. `--here` scopes the whole server to the
-current folder; `--all` widens the sidebar past the default 100 sessions.
+Opens the **Agent Board** on a local-only `127.0.0.1` server. Transcripts and
+task edits remain on this Mac; acknowledging a live session may publish its
+small status record through the already-configured optional Agent Board sync.
+Its default Work Queue is a deliberately small task layer over your history:
+
+- **Today** shows overdue and due-today work; **All by project** groups the
+  complete queue by the nearest Git repository (or folder outside Git).
+- **Needs you** automatically surfaces blocked and finished-but-unreviewed
+  sessions without turning every terminal run into a permanent task.
+- Add a standalone task, or open Thread History and save an existing thread.
+  Task names, due dates, and `To do` / `Waiting` / `Done` are editable inline.
+- **Start/Resume Claude · full access** and **Start/Resume Codex · full access**
+  open a new macOS Terminal window with that provider's explicit dangerous
+  permission-bypass flag. Moving between providers creates a new session with
+  a recent-context handoff; native-provider buttons resume the exact session.
+- **Copy safe command** leaves permission checks enabled.
+
+Thread History preserves the original reader: a searchable sidebar lists
+sessions and selecting one renders the full thread, opened at the latest
+exchange, with fenced code blocks and in-thread search. This is prose only
+(user/assistant text); tool calls, file edits, and command output aren't
+captured. `--here` scopes the server to the current folder; `--all` widens the
+sidebar past the default 100 sessions.
+
+Queue metadata is stored in `~/.claude/agent-board/state.db`, separately from
+the rebuildable search index and separately from hook-owned live session
+state. It is local to this Mac in this release; shared Mission Control editing
+requires a later, conflict-safe Firestore metadata layer.
+
 Requests from any Host other than `127.0.0.1`/`localhost` are rejected
-(DNS-rebinding protection). `Ctrl-C` in the terminal shuts the server down.
+(DNS-rebinding protection), and every write/Terminal launch requires a
+per-server request token. `Ctrl-C` in the terminal shuts the server down.
 
 #### Scripting the web viewer (JSON API)
 
-The page is backed by three JSON endpoints you can call directly (the
+The page is backed by these JSON endpoints (the
 server prints its URL to stderr on startup; the port is OS-assigned):
 
 | Endpoint | Returns |
 | -------- | ------- |
-| `GET /api/meta` | `{"here_only_forced": bool}` -- whether `--here` scoping is forced server-side |
+| `GET /api/meta` | Viewer settings, detected launch project, and the per-server request token |
+| `GET /api/board` | Queued tasks plus live sessions that need attention |
 | `GET /api/sessions?q=<query>&here=1` | `{"sessions": [...]}` -- session list; `q` runs the same ranked search as the fzf picker, `here=1` scopes to the launch folder. Each session carries `session_id`, `provider`, `provider_name`, `folder`, `cwd`, `title`, `first_msg`, `last_msg`, `msg_count`, `timestamp`, `last_timestamp`, and a preformatted `when` |
 | `GET /api/session/<sid>` | `{"meta": {...}, "turns": [{"role", "text"}, ...]}` -- the full prose transcript, newlines preserved |
+| `POST /api/tasks` | Add a standalone task or queue an indexed `session_id` |
+| `PATCH /api/tasks/<task-id>` | Rename, date, or change task status |
+| `POST /api/tasks/<task-id>/launch` | Open the server-built Claude/CodeX command in Terminal |
+| `POST /api/sessions/<sid>/ack` | Acknowledge a completion without deleting its history |
 
 Errors come back as JSON too: `404` (unknown session/route), `403` (foreign
 Host header), `500` (unreadable transcript), `503` (search index mid-rebuild

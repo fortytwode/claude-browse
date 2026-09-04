@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Local Agent Board work queue.** `claude-browse --web` now opens a
+  ClickUp-inspired Today / All-by-project task view beside Thread History.
+  Save a thread or add standalone work, edit its name/due date/status inline,
+  and open Claude or CodeX in a new Terminal window with the provider's
+  explicit full-access flag. Git-origin project grouping, safe command copy,
+  cross-provider transcript handoff, request-token protection, and automatic
+  linking of newly started sessions are included without adding a hosted PM
+  service or uploading transcripts.
 - **Dedicated Agent Board notification identity.** `./install.sh` builds a
   small native `Agent Board Notifier.app`, allowing just Agent Board through a
   macOS Focus instead of allowing every Script Editor alert. The existing

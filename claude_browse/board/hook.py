@@ -260,6 +260,15 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 fields["model_label"] = model_label
             store.upsert(session_id, **fields)
         store.heartbeat(session_id)
+        # A task launched from the local Work Queue carries only this opaque
+        # id. The hook already knows the real provider/session id, so it is
+        # the safest place to link the newly-created thread without parsing
+        # terminal commands or trusting browser-supplied session metadata.
+        task_id = os.environ.get("AGENT_BOARD_TASK_ID", "").strip()
+        if task_id:
+            from claude_browse.board import work_items
+
+            work_items.attach_session(task_id, session_id, provider)
         return True
 
     elif event == "UserPromptSubmit":

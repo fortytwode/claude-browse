@@ -3,31 +3,67 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>claude-browse</title>
+<title>Agent Board</title>
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<div id="app">
+<header id="topbar">
+  <div><div class="eyebrow">CLAUDE + CODEX</div><h1>Agent Board</h1></div>
+  <nav aria-label="Primary">
+    <button class="tab active" data-view="board">Work queue</button>
+    <button class="tab" data-view="history">Thread history</button>
+  </nav>
+</header>
+<main id="board-view" class="page">
+  <section class="hero">
+    <div><h2>What needs your attention?</h2><p>Live agent handoffs and the work you chose to keep.</p></div>
+    <button id="show-add-task" class="primary">+ Add task</button>
+  </section>
+  <form id="add-task-form" class="panel form-grid" hidden>
+    <label>Task name<input id="new-title" required maxlength="500" placeholder="What should happen next?"></label>
+    <label>Project folder<input id="new-project" required placeholder="/path/to/repo"></label>
+    <label>Due date<input id="new-due" type="date"></label>
+    <label>Start with<select id="new-provider"><option value="claude">Claude</option><option value="codex">Codex</option></select></label>
+    <label class="wide">Starting note (optional)<textarea id="new-notes" maxlength="4000" placeholder="Context for the agent when this starts"></textarea></label>
+    <div class="form-actions wide"><button type="button" id="cancel-add">Cancel</button><button class="primary" type="submit">Save task</button></div>
+  </form>
+  <div id="board-error" class="error" hidden></div>
+  <section id="attention-section">
+    <div class="section-heading"><h3>Needs you</h3><span id="attention-count" class="count"></span></div>
+    <div id="attention-list" class="card-list"></div>
+  </section>
+  <section>
+    <div class="section-heading queue-heading">
+      <div><h3>Work queue</h3><span id="task-count" class="count"></span></div>
+      <div class="queue-modes"><button class="queue-mode active" data-mode="today">Today</button><button class="queue-mode" data-mode="projects">All by project</button></div>
+    </div>
+    <div id="task-groups"></div>
+  </section>
+</main>
+<main id="history-view" hidden>
   <aside id="sidebar">
     <div id="sidebar-header">
       <input id="search-input" type="text" placeholder="Search sessions..." autocomplete="off">
-      <label id="here-toggle-label">
-        <input id="here-toggle" type="checkbox">
-        This folder only
-      </label>
+      <label id="here-toggle-label"><input id="here-toggle" type="checkbox">This folder only</label>
     </div>
     <div id="session-list" aria-live="polite"></div>
   </aside>
-  <main id="viewer">
+  <section id="viewer">
     <div id="viewer-header">
       <div id="viewer-title">Select a session on the left</div>
       <div id="viewer-meta"></div>
+      <div id="thread-actions" hidden>
+        <button id="queue-thread" class="primary">Add to work queue</button>
+        <button id="thread-claude" class="launch claude">Open in Claude · full access</button>
+        <button id="thread-codex" class="launch codex">Open in Codex · full access</button>
+      </div>
       <input id="thread-search" type="text" placeholder="Search in this thread..." autocomplete="off" hidden>
       <div id="thread-search-count"></div>
     </div>
     <div id="transcript"></div>
-  </main>
-</div>
+  </section>
+</main>
+<div id="toast" role="status" aria-live="polite"></div>
 <script src="/app.js"></script>
 </body>
 </html>
