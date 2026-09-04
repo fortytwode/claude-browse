@@ -67,6 +67,41 @@ def test_active_excludes_stale_ended_includes_recent_idle_newest_first(tmp_path,
     assert ids[0] == "sess-recent"
 
 
+def test_stale_ended_unattended_completion_remains_visible_and_findable_until_ack(
+    tmp_path, monkeypatch
+):
+    _fresh_store(tmp_path, monkeypatch)
+
+    store.upsert(
+        "sess-old-unattended",
+        host="air",
+        cwd="/tmp/a",
+        state="idle",
+        name="old unattended completion",
+    )
+    store.mark_done("sess-old-unattended", 900)
+    store.set_state("sess-old-unattended", "ended")
+    old_ts = time.time() - (30 * 24 * 3600)
+    store._raw_set_updated_at("sess-old-unattended", old_ts)
+
+    assert [r["session_id"] for r in store.active(max_age_hours=24)] == [
+        "sess-old-unattended"
+    ]
+    assert [r["session_id"] for r in store.unattended(max_age_hours=24)] == [
+        "sess-old-unattended"
+    ]
+    assert [r["session_id"] for r in store.find("old unattended")] == [
+        "sess-old-unattended"
+    ]
+
+    store.ack("sess-old-unattended")
+    store._raw_set_updated_at("sess-old-unattended", old_ts)
+
+    assert store.active(max_age_hours=24) == []
+    assert store.unattended(max_age_hours=24) == []
+    assert store.find("old unattended") == []
+
+
 def test_concurrent_upserts_different_sessions_do_not_lock(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
 

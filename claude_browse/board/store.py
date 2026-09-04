@@ -164,12 +164,13 @@ def get(session_id: str) -> dict | None:
 
 
 def active(max_age_hours: float = 24) -> list[dict]:
-    """Rows not ended, or ended but updated within the window. Newest first."""
+    """Rows still active, recent, or awaiting completion acknowledgement."""
     cutoff = time.time() - (max_age_hours * 3600)
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM sessions "
             "WHERE state != 'ended' OR updated_at >= ? "
+            "OR (done_at IS NOT NULL AND (acked_at IS NULL OR acked_at < done_at)) "
             "ORDER BY updated_at DESC",
             (cutoff,),
         ).fetchall()
