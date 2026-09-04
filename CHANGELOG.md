@@ -14,10 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   codex`; `PermissionRequest` maps to `needs-input`. The provider is stored
   per row and every surface (statusline, `aj`, Slack board, alerts) builds
   the resume command from it, so Codex threads get `codex resume <id>`.
-- **Unattended completions.** A turn of at least
-  `AGENT_BOARD_UNATTENDED_MIN_TURN_S` (default 300s) marks the session
-  *finished, not picked up* (`done_at`); a new prompt clears it, or
-  `agent-board ack <id|name>` acknowledges it. `aj` and the Slack board lead
+- **Unattended completions.** Every completed turn marks the session
+  *finished, not picked up* (`done_at`) until you come back: a new prompt
+  clears it, so does ending the session yourself (`/exit`, `/clear`,
+  `/logout`; a killed window does not), or `agent-board ack <id|name>`.
+  `AGENT_BOARD_UNATTENDED_MIN_TURN_S` (default 0) sets an optional length
+  floor. `aj` and the Slack board lead
   with that list. The Firestore doc carries `provider`, `folder`, `done_at`,
   `done_turn_s`, `acked_at`, `resume_command` and is written with
   `merge=True` so a downstream sweep can own its own fields on the same doc.

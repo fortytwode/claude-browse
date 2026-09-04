@@ -387,7 +387,9 @@ def test_codex_permission_request_maps_to_needs_input(tmp_path, monkeypatch):
     assert calls == [("[team-operations] Codex needs input", "deploy sweep")]
 
 
-def test_stop_after_long_turn_marks_done_short_turn_does_not(tmp_path, monkeypatch):
+def test_every_completed_turn_marks_done_regardless_of_length(tmp_path, monkeypatch):
+    """Duration is not the signal; whether you came back is. A 10-second
+    turn that ends with a question is still a thread waiting on you."""
     _fresh_store(tmp_path, monkeypatch)
     monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
     monkeypatch.delenv("AGENT_BOARD_UNATTENDED_MIN_TURN_S", raising=False)
@@ -397,14 +399,18 @@ def test_stop_after_long_turn_marks_done_short_turn_does_not(tmp_path, monkeypat
     row = store.get("long")
     assert store.is_unattended(row) is True
     assert 399 < row["done_turn_s"] < 405
-    assert row["pending_alert"] == "done"  # banner path unchanged
+    assert row["pending_alert"] == "done"  # banner path unchanged (>60s)
 
-    # 90s: banner + pending alert (>60s) but NOT unattended (<300s default)
-    store.upsert("short", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 90)
+    store.upsert("short", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 10)
     hook.dispatch({"hook_event_name": "Stop", "session_id": "short", "cwd": "/tmp/p"})
     row = store.get("short")
-    assert row["pending_alert"] == "done"
-    assert row["done_at"] is None
+    assert store.is_unattended(row) is True
+    assert row["pending_alert"] is None  # <60s: no banner, but still waiting on you
+
+    # No prompt ever sent (no working_since): nothing completed, nothing waits.
+    store.upsert("never", host="air", cwd="/tmp/p", state="idle")
+    hook.dispatch({"hook_event_name": "Stop", "session_id": "never", "cwd": "/tmp/p"})
+    assert store.get("never")["done_at"] is None
 
 
 def test_unattended_threshold_is_env_tunable(tmp_path, monkeypatch):
@@ -416,8 +422,12 @@ def test_unattended_threshold_is_env_tunable(tmp_path, monkeypatch):
     hook.dispatch({"hook_event_name": "Stop", "session_id": "t", "cwd": "/tmp/p"})
     assert store.get("t")["done_at"] is not None
 
+    store.upsert("u", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 10)
+    hook.dispatch({"hook_event_name": "Stop", "session_id": "u", "cwd": "/tmp/p"})
+    assert store.get("u")["done_at"] is None  # a raised floor filters short turns
+
     monkeypatch.setenv("AGENT_BOARD_UNATTENDED_MIN_TURN_S", "not-a-number")
-    assert hook._unattended_min_turn_s() == 300.0
+    assert hook._unattended_min_turn_s() == 0.0
 
 
 def test_new_prompt_is_the_implicit_ack(tmp_path, monkeypatch):
@@ -434,16 +444,38 @@ def test_new_prompt_is_the_implicit_ack(tmp_path, monkeypatch):
     assert store.is_unattended(row) is False
 
 
-def test_session_end_preserves_done_at(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reason", ["other", "", None])
+def test_session_end_without_user_intent_preserves_done_at(tmp_path, monkeypatch, reason):
+    """A killed or otherwise-ended session keeps its finished turn on the
+    list: that is the canonical forgotten thread."""
     _fresh_store(tmp_path, monkeypatch)
     monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
     store.upsert("z", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 900)
     hook.dispatch({"hook_event_name": "Stop", "session_id": "z", "cwd": "/tmp/p"})
-    hook.dispatch({"hook_event_name": "SessionEnd", "session_id": "z", "cwd": "/tmp/p",
-                   "reason": "exit"})
+    payload = {"hook_event_name": "SessionEnd", "session_id": "z", "cwd": "/tmp/p"}
+    if reason is not None:
+        payload["reason"] = reason
+    hook.dispatch(payload)
     row = store.get("z")
     assert row["state"] == "ended" and row["done_at"] is not None
     assert store.is_unattended(row) is True
+
+
+@pytest.mark.parametrize("reason", ["prompt_input_exit", "clear", "logout", "exit", "Exit"])
+def test_user_initiated_session_end_is_an_implicit_ack(tmp_path, monkeypatch, reason):
+    """/exit, /clear, /logout: you were at the keyboard, you saw where it
+    left off. Without this, 'quick question then /exit' would ping 10
+    minutes later every time."""
+    _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    store.upsert("q", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 10)
+    hook.dispatch({"hook_event_name": "Stop", "session_id": "q", "cwd": "/tmp/p"})
+    assert store.is_unattended(store.get("q")) is True
+    hook.dispatch({"hook_event_name": "SessionEnd", "session_id": "q", "cwd": "/tmp/p",
+                   "reason": reason})
+    row = store.get("q")
+    assert row["state"] == "ended" and row["done_at"] is None
+    assert store.is_unattended(row) is False
 
 
 def test_entry_script_accepts_provider_flag_end_to_end(tmp_path, monkeypatch):

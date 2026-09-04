@@ -34,19 +34,32 @@ _NOTIFY_AFTER_S = 60
 
 
 def _unattended_min_turn_s() -> float:
-    """A Stop closing a turn at least this long marks the session as
-    "finished, waiting for you" (store.mark_done). Deliberately much higher
-    than _NOTIFY_AFTER_S: the local banner is cheap and fires for any
-    minute-plus turn, but the unattended machinery (Slack re-surfacing,
-    morning briefing, the web board) is for runs you plausibly walked away
-    from, and nagging about a 70-second turn you sat through is exactly the
-    noise it exists to remove. Env-tunable; seconds."""
+    """Minimum turn length for a Stop to mark the session "finished, waiting
+    for you" (store.mark_done). Default 0: EVERY completed turn counts.
+
+    Duration is not the signal. Whether you came back is. A 10-second turn
+    that ends with "which option do you want?" is more likely to be waiting
+    on you than a 60-minute batch run, and the noise a length filter would
+    guard against is already bounded downstream: the sweep only pings once a
+    completion has sat unattended for 10 minutes, pings at most twice, and
+    any prompt / ack / user-initiated exit clears it. Env-tunable (seconds)
+    for anyone who does want a floor; unrelated to _NOTIFY_AFTER_S, which
+    gates only the local banner."""
     raw = os.environ.get("AGENT_BOARD_UNATTENDED_MIN_TURN_S", "").strip()
     try:
-        value = float(raw) if raw else 300.0
+        value = float(raw) if raw else 0.0
     except ValueError:
-        value = 300.0
+        value = 0.0
     return max(value, 0.0)
+
+
+# SessionEnd reasons that mean the USER ended the session from the keyboard
+# (Claude Code: /clear, /logout, Ctrl-D or /exit at the prompt; Codex: exit).
+# Being there to end it is an implicit ack of whatever had finished. Anything
+# else -- "other", a missing reason, a killed terminal that never fires
+# SessionEnd at all -- keeps done_at: a finished run whose window vanished is
+# the canonical forgotten thread.
+_USER_ENDED_REASONS = {"clear", "logout", "prompt_input_exit", "exit", "user_exit", "quit"}
 
 
 # Codex's equivalent of Claude's needs-input Notification. Codex has no
@@ -297,9 +310,13 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
             store.set_pending_alert(session_id, "needs-input")
 
     elif event == "SessionEnd":
-        # done_at deliberately survives SessionEnd: a run that finished and
-        # whose window was then closed is the canonical forgotten thread.
         _set_state(session_id, "ended", cwd=cwd, model_label=model_label or None)
+        reason = str(payload.get("reason") or "").strip().lower()
+        if reason in _USER_ENDED_REASONS:
+            # You ended it on purpose, so you saw where it left off.
+            store.clear_done(session_id)
+        # Otherwise done_at deliberately survives: a run that finished and
+        # whose window then vanished is the canonical forgotten thread.
 
 
 def main() -> None:

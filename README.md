@@ -335,18 +335,22 @@ example `[claude-browse] Codex needs input` or `[team-operations] Opus
 done`) so the repo and model are visible even when macOS truncates the
 message body.
 
-**Unattended completions (the thing the board is really for).** A turn that
-runs at least `AGENT_BOARD_UNATTENDED_MIN_TURN_S` (default 300s) marks the
-session as *finished, not picked up* when it ends. Sending the session a new
-prompt clears that automatically (you came back), or acknowledge it
-explicitly:
+**Unattended completions (the thing the board is really for).** Every
+completed turn marks the session as *finished, not picked up* until you come
+back. Duration is not the signal; a 10-second turn that ends with a question
+is waiting on you just as much as an hour-long run. Three things clear it:
+sending the session a new prompt, ending the session yourself (`/exit`,
+`/clear`, `/logout`; a killed window does NOT clear it, that is the
+forgotten-thread case), or acknowledging explicitly:
 
 ```bash
 agent-board ack <session-id-prefix | name-substring>
 ```
 
 `aj` and the Slack board lead with a `⏳ finished, not picked up` section
-listing exactly these, oldest first, each with its resume command. The
+listing exactly these, oldest first, each with its resume command. If you do
+want a length floor, `AGENT_BOARD_UNATTENDED_MIN_TURN_S=<seconds>` sets one
+(default 0). The
 cross-machine re-surfacing (a Slack ping only once you have NOT come back
 for a while, escalating once, then folding into the morning briefing) lives
 in the team-operations repo (`team-planning/agent_board/`), reading the
