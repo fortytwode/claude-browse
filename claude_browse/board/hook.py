@@ -232,6 +232,19 @@ def _parse_provider(argv: list[str]) -> str:
     return store.DEFAULT_PROVIDER
 
 
+def _capture_work(session_id: str, *, reactivate_done: bool = False) -> dict | None:
+    """Best-effort local overlay capture; runtime hooks must remain fail-open."""
+    try:
+        from claude_browse.board import work_items
+
+        row = store.get(session_id)
+        return work_items.ensure_for_session(
+            row or {}, reactivate_done=reactivate_done
+        )
+    except Exception:
+        return None
+
+
 def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
     """Apply one recognized state transition and report whether it mutated."""
     event = payload.get("hook_event_name")
@@ -256,19 +269,13 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             )
         else:
             fields: dict[str, object] = {"provider": provider}
+            if cwd is not None:
+                fields["cwd"] = cwd
             if model_label:
                 fields["model_label"] = model_label
             store.upsert(session_id, **fields)
         store.heartbeat(session_id)
-        # A task launched from the local Work Queue carries only this opaque
-        # id. The hook already knows the real provider/session id, so it is
-        # the safest place to link the newly-created thread without parsing
-        # terminal commands or trusting browser-supplied session metadata.
-        task_id = os.environ.get("AGENT_BOARD_TASK_ID", "").strip()
-        if task_id:
-            from claude_browse.board import work_items
-
-            work_items.attach_session(task_id, session_id, provider)
+        _capture_work(session_id)
         return True
 
     elif event == "UserPromptSubmit":
@@ -288,7 +295,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
         }
         if model_label:
             fields["model_label"] = model_label
-        if row is None or row.get("name_source") != "haiku":
+        if row is None or row.get("name_source") not in {"haiku", "manual"}:
             prompt = payload.get("prompt", "")
             name = _name_from_prompt(prompt)
             if name:
@@ -296,11 +303,14 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 fields["name_source"] = "provisional"
         store.upsert(session_id, **fields)
         store.heartbeat(session_id)
+        _capture_work(session_id, reactivate_done=True)
         return True
 
     elif event == "Stop":
         working_since = row.get("working_since") if row else None
         turn_s = (time.time() - working_since) if working_since else 0.0
+        item = _capture_work(session_id)
+        closed = bool(item and item.get("status") in {"done", "archived"})
         if working_since:
             if not store.finish_turn(
                 session_id,
@@ -309,14 +319,19 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 cwd=cwd,
                 host=_hostname(),
                 model_label=model_label or None,
-                mark_unattended=turn_s >= _unattended_min_turn_s(),
+                mark_unattended=(
+                    not closed and turn_s >= _unattended_min_turn_s()
+                ),
             ):
                 # A duplicate Stop or a Stop for a superseded turn must not
                 # replay the banner or overwrite a newer prompt's state.
                 return False
         else:
             _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
-        if working_since:
+        if closed:
+            store.ack(session_id)
+            store.clear_pending_alert(session_id)
+        if working_since and not closed:
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify(_notify_title("done", cwd, model_label), _notify_body(name, cwd))
         return True
@@ -328,7 +343,9 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify(_notify_title("needs input", cwd, model_label), _notify_body(name, cwd))
             store.set_pending_alert(session_id, "needs-input")
+            _capture_work(session_id)
             return True
+        _capture_work(session_id)
         return False
 
     elif event == "Interrupt" and provider == "codex":
@@ -349,6 +366,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             **({"model_label": model_label} if model_label else {}),
         )
         store.heartbeat(session_id)
+        _capture_work(session_id)
         return True
 
     elif event == "SessionEnd":
@@ -357,6 +375,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
         # back to is still a thread you can resume, and the board's job is
         # to keep it visible until you do, or ack it.
         _set_state(session_id, "ended", cwd=cwd, model_label=model_label or None)
+        _capture_work(session_id)
         return True
 
     return False

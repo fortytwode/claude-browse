@@ -177,6 +177,57 @@ def upsert(session_id: str, **fields: object) -> None:
         )
 
 
+def set_automatic_name_if_unchanged(
+    session_id: str,
+    *,
+    expected_name: object,
+    expected_source: object,
+    expected_named_at: object,
+    name: str,
+    named_at_msg_count: int,
+) -> bool:
+    """CAS an automatic title and its overlay projection in one transaction.
+
+    A user rename changes ``name_source`` to ``manual`` on the same database,
+    so a namer that began earlier loses this compare-and-swap at commit time.
+    """
+    now = time.time()
+    with get_conn() as conn:
+        cursor = conn.execute(
+            "UPDATE sessions SET name = ?, name_source = 'haiku', "
+            "named_at_msg_count = ?, updated_at = ? "
+            "WHERE session_id = ? AND name IS ? AND name_source IS ? "
+            "AND named_at_msg_count IS ? AND COALESCE(name_source, '') != 'manual'",
+            (
+                name,
+                int(named_at_msg_count),
+                now,
+                session_id,
+                expected_name,
+                expected_source,
+                expected_named_at,
+            ),
+        )
+        if cursor.rowcount != 1:
+            return False
+        # Older databases may not have initialized the overlay yet.
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'work_items'"
+        ).fetchone()
+        if table is not None:
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(work_items)").fetchall()
+            }
+            if "title_source" in columns:
+                conn.execute(
+                    "UPDATE work_items SET title = ?, updated_at = ? "
+                    "WHERE session_id = ? AND title_source != 'manual'",
+                    (name, now, session_id),
+                )
+    return True
+
+
 def get(session_id: str) -> dict | None:
     with get_conn() as conn:
         row = conn.execute(
@@ -197,6 +248,13 @@ def active(max_age_hours: float = 24) -> list[dict]:
             (cutoff,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def all_sessions() -> list[dict]:
+    """Every foreground session Agent Board has observed, newest first."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM sessions ORDER BY updated_at DESC").fetchall()
+    return [dict(row) for row in rows]
 
 
 def set_state(

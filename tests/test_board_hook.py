@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_browse.board import hook, store
+from claude_browse.board import hook, store, work_items
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENTRY_SCRIPT = REPO_ROOT / "agent-board"
@@ -372,6 +372,24 @@ def test_user_prompt_submit_does_not_overwrite_haiku_name(tmp_path, monkeypatch)
     assert row["name_source"] == "haiku"
 
 
+def test_user_prompt_submit_does_not_overwrite_manual_name(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert(
+        "manual-name", host="air", cwd="/tmp/proj", state="idle",
+        name="user canonical", name_source="manual",
+    )
+    work_items.ensure_for_session(store.get("manual-name"))
+
+    hook.dispatch({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "manual-name",
+        "cwd": "/tmp/proj",
+        "prompt": "a different prompt",
+    })
+
+    assert store.get("manual-name")["name"] == "user canonical"
+
+
 def test_session_end_sets_ended(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     store.upsert("s8", host="air", cwd="/tmp/proj", state="working", name="x")
@@ -404,6 +422,35 @@ def test_main_exits_zero_even_if_dispatch_raises(monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         hook.main()
     assert exc_info.value.code == 0
+
+
+def test_overlay_capture_failure_does_not_lose_or_unschedule_runtime_transition(
+    tmp_path, monkeypatch
+):
+    _fresh_store(tmp_path, monkeypatch)
+    payload = {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "overlay-failure",
+        "cwd": "/tmp/proj",
+        "prompt": "keep runtime truth",
+    }
+    monkeypatch.setattr(
+        work_items,
+        "ensure_for_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("disk full")),
+    )
+    spawned = []
+    monkeypatch.setattr(hook, "_spawn_sync", spawned.append)
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(json.dumps(payload)))
+
+    with pytest.raises(SystemExit) as exc_info:
+        hook.main()
+
+    assert exc_info.value.code == 0
+    row = store.get("overlay-failure")
+    assert row["state"] == "working"
+    assert row["sync_revision"] == 1
+    assert spawned == ["overlay-failure"]
 
 
 def test_main_spawns_sync_after_committing_user_prompt(tmp_path, monkeypatch):
