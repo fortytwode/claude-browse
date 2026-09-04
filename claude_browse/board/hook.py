@@ -42,7 +42,7 @@ def _unattended_min_turn_s() -> float:
     on you than a 60-minute batch run, and the noise a length filter would
     guard against is already bounded downstream: the sweep only pings once a
     completion has sat unattended for 10 minutes, pings at most twice, and
-    any prompt / ack / user-initiated exit clears it. Env-tunable (seconds)
+    a new prompt or an ack clears it. Env-tunable (seconds)
     for anyone who does want a floor; unrelated to _NOTIFY_AFTER_S, which
     gates only the local banner."""
     raw = os.environ.get("AGENT_BOARD_UNATTENDED_MIN_TURN_S", "").strip()
@@ -51,15 +51,6 @@ def _unattended_min_turn_s() -> float:
     except ValueError:
         value = 0.0
     return max(value, 0.0)
-
-
-# SessionEnd reasons that mean the USER ended the session from the keyboard
-# (Claude Code: /clear, /logout, Ctrl-D or /exit at the prompt; Codex: exit).
-# Being there to end it is an implicit ack of whatever had finished. Anything
-# else -- "other", a missing reason, a killed terminal that never fires
-# SessionEnd at all -- keeps done_at: a finished run whose window vanished is
-# the canonical forgotten thread.
-_USER_ENDED_REASONS = {"clear", "logout", "prompt_input_exit", "exit", "user_exit", "quit"}
 
 
 # Codex's equivalent of Claude's needs-input Notification. Codex has no
@@ -310,13 +301,11 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
             store.set_pending_alert(session_id, "needs-input")
 
     elif event == "SessionEnd":
+        # done_at deliberately survives SessionEnd, however the session ended
+        # (/exit, /clear, a killed window): a finished turn you have not come
+        # back to is still a thread you can resume, and the board's job is
+        # to keep it visible until you do, or ack it.
         _set_state(session_id, "ended", cwd=cwd, model_label=model_label or None)
-        reason = str(payload.get("reason") or "").strip().lower()
-        if reason in _USER_ENDED_REASONS:
-            # You ended it on purpose, so you saw where it left off.
-            store.clear_done(session_id)
-        # Otherwise done_at deliberately survives: a run that finished and
-        # whose window then vanished is the canonical forgotten thread.
 
 
 def main() -> None:

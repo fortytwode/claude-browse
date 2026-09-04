@@ -16,8 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the resume command from it, so Codex threads get `codex resume <id>`.
 - **Unattended completions.** Every completed turn marks the session
   *finished, not picked up* (`done_at`) until you come back: a new prompt
-  clears it, so does ending the session yourself (`/exit`, `/clear`,
-  `/logout`; a killed window does not), or `agent-board ack <id|name>`.
+  clears it, or `agent-board ack <id|name>`. Ending the session does not
+  (the thread can always be resumed, so it stays listed).
   `AGENT_BOARD_UNATTENDED_MIN_TURN_S` (default 0) sets an optional length
   floor. `aj` and the Slack board lead
   with that list. The Firestore doc carries `provider`, `folder`, `done_at`,

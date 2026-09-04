@@ -338,10 +338,10 @@ message body.
 **Unattended completions (the thing the board is really for).** Every
 completed turn marks the session as *finished, not picked up* until you come
 back. Duration is not the signal; a 10-second turn that ends with a question
-is waiting on you just as much as an hour-long run. Three things clear it:
-sending the session a new prompt, ending the session yourself (`/exit`,
-`/clear`, `/logout`; a killed window does NOT clear it, that is the
-forgotten-thread case), or acknowledging explicitly:
+is waiting on you just as much as an hour-long run. Ending the session does
+not clear it either (you can always resume the thread, so it stays listed).
+Two things clear it: sending the session a new prompt, or acknowledging
+explicitly:
 
 ```bash
 agent-board ack <session-id-prefix | name-substring>

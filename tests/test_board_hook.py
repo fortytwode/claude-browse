@@ -444,13 +444,14 @@ def test_new_prompt_is_the_implicit_ack(tmp_path, monkeypatch):
     assert store.is_unattended(row) is False
 
 
-@pytest.mark.parametrize("reason", ["other", "", None])
-def test_session_end_without_user_intent_preserves_done_at(tmp_path, monkeypatch, reason):
-    """A killed or otherwise-ended session keeps its finished turn on the
-    list: that is the canonical forgotten thread."""
+@pytest.mark.parametrize("reason", ["prompt_input_exit", "clear", "logout", "exit", "other", "", None])
+def test_session_end_always_preserves_done_at(tmp_path, monkeypatch, reason):
+    """However a session ends (/exit, /clear, a killed window), a finished
+    turn you have not come back to stays on the list: you can always resume
+    the thread, and the board's job is to keep it visible until you do."""
     _fresh_store(tmp_path, monkeypatch)
     monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
-    store.upsert("z", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 900)
+    store.upsert("z", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 10)
     hook.dispatch({"hook_event_name": "Stop", "session_id": "z", "cwd": "/tmp/p"})
     payload = {"hook_event_name": "SessionEnd", "session_id": "z", "cwd": "/tmp/p"}
     if reason is not None:
@@ -459,23 +460,6 @@ def test_session_end_without_user_intent_preserves_done_at(tmp_path, monkeypatch
     row = store.get("z")
     assert row["state"] == "ended" and row["done_at"] is not None
     assert store.is_unattended(row) is True
-
-
-@pytest.mark.parametrize("reason", ["prompt_input_exit", "clear", "logout", "exit", "Exit"])
-def test_user_initiated_session_end_is_an_implicit_ack(tmp_path, monkeypatch, reason):
-    """/exit, /clear, /logout: you were at the keyboard, you saw where it
-    left off. Without this, 'quick question then /exit' would ping 10
-    minutes later every time."""
-    _fresh_store(tmp_path, monkeypatch)
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
-    store.upsert("q", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 10)
-    hook.dispatch({"hook_event_name": "Stop", "session_id": "q", "cwd": "/tmp/p"})
-    assert store.is_unattended(store.get("q")) is True
-    hook.dispatch({"hook_event_name": "SessionEnd", "session_id": "q", "cwd": "/tmp/p",
-                   "reason": reason})
-    row = store.get("q")
-    assert row["state"] == "ended" and row["done_at"] is None
-    assert store.is_unattended(row) is False
 
 
 def test_entry_script_accepts_provider_flag_end_to_end(tmp_path, monkeypatch):
