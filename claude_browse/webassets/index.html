@@ -33,8 +33,9 @@
         <div class="project-title-line"><div><h2 id="project-name"></h2><p id="project-path"></p></div><div id="project-counts" class="project-counts"></div></div>
         <div class="description-editor">
           <label for="project-description">Project description</label>
-          <textarea id="project-description" maxlength="1000" rows="2" placeholder="Add local context for this project…"></textarea>
-          <div class="description-actions"><span id="description-limit">0 / 1000</span><button id="save-description" type="button">Save</button><button id="cancel-description" type="button">Cancel</button></div>
+          <textarea id="project-description" maxlength="10000" rows="2" placeholder="Add local context for this project…"></textarea>
+          <div class="description-actions"><span id="description-limit">0 / 10000</span><button id="save-description" type="button">Save</button><button id="cancel-description" type="button">Cancel</button></div>
+          <div id="project-inherited" class="project-inherited" hidden><strong>Inherited project notes</strong><div id="project-inherited-list"></div></div>
           <p id="description-error" class="field-error" role="alert" hidden></p>
         </div>
       </div>

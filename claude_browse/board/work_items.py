@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sqlite3
 import threading
 import time
@@ -40,7 +39,8 @@ CREATE TABLE IF NOT EXISTS work_items (
     title_source     TEXT NOT NULL DEFAULT 'automatic',
     session_cwd      TEXT,
     priority         TEXT NOT NULL DEFAULT 'normal',
-    position         INTEGER NOT NULL
+    position         INTEGER NOT NULL,
+    project_resolved INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -53,6 +53,16 @@ CREATE TABLE IF NOT EXISTS project_settings (
 )
 """
 
+_PROJECT_DESCRIPTION_FRAGMENTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS project_description_fragments (
+    target_key  TEXT NOT NULL,
+    source_key  TEXT NOT NULL,
+    description TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    PRIMARY KEY (target_key, source_key)
+)
+"""
+
 
 def migration_backup_path() -> Path:
     return Path(f"{store._DB_PATH}.pre-work-overlay.bak")
@@ -60,6 +70,10 @@ def migration_backup_path() -> Path:
 
 def planning_migration_backup_path() -> Path:
     return Path(f"{store._DB_PATH}.pre-priority-ordering.bak")
+
+
+def project_resolution_migration_backup_path() -> Path:
+    return Path(f"{store._DB_PATH}.pre-project-resolution.bak")
 
 
 def _backup_database_to(conn: sqlite3.Connection, backup_path: Path) -> None:
@@ -126,9 +140,14 @@ def _migrate_planning(conn: sqlite3.Connection) -> None:
     has_settings = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_settings'"
     ).fetchone()
-    if {"priority", "position"} <= columns and has_settings:
+    if {"priority", "position", "project_resolved"} <= columns and has_settings:
         return
-    _backup_database_to(conn, planning_migration_backup_path())
+    backup_path = (
+        project_resolution_migration_backup_path()
+        if {"priority", "position"} <= columns and "project_resolved" not in columns
+        else planning_migration_backup_path()
+    )
+    _backup_database_to(conn, backup_path)
     conn.execute("BEGIN IMMEDIATE")
     try:
         if "priority" not in columns:
@@ -148,6 +167,11 @@ def _migrate_planning(conn: sqlite3.Connection) -> None:
                     "UPDATE work_items SET position = ? WHERE task_id = ?",
                     (index * 1_000_000, row[0]),
                 )
+        if "project_resolved" not in columns:
+            conn.execute(
+                "ALTER TABLE work_items ADD COLUMN project_resolved INTEGER "
+                "NOT NULL DEFAULT 0"
+            )
         conn.execute(_PROJECT_SETTINGS_SCHEMA)
         now = time.time()
         project_rows = conn.execute(
@@ -170,6 +194,7 @@ def _migrate_planning(conn: sqlite3.Connection) -> None:
 
 def _ensure_planning_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_PROJECT_SETTINGS_SCHEMA)
+    conn.execute(_PROJECT_DESCRIPTION_FRAGMENTS_SCHEMA)
     conn.execute(
         """CREATE INDEX IF NOT EXISTS idx_work_items_project_priority_position
            ON work_items(project_key, priority, position, task_id)"""
@@ -203,8 +228,6 @@ def _due(value: object) -> str | None:
     result = str(value or "").strip()
     if not result:
         return None
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", result):
-        raise ValueError("due_date must be YYYY-MM-DD")
     try:
         parsed = date.fromisoformat(result)
     except ValueError as exc:
@@ -215,14 +238,18 @@ def _due(value: object) -> str | None:
 
 
 def _status(value: object) -> str:
-    result = str(value or "active").strip().lower()
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"status must be one of: {', '.join(STATUSES)}")
+    result = value.strip().lower()
     if result not in STATUSES:
         raise ValueError(f"status must be one of: {', '.join(STATUSES)}")
     return result
 
 
 def _priority(value: object) -> str:
-    result = str(value or "normal").strip().lower()
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"priority must be one of: {', '.join(PRIORITIES)}")
+    result = value.strip().lower()
     if result not in PRIORITIES:
         raise ValueError(f"priority must be one of: {', '.join(PRIORITIES)}")
     return result
@@ -281,9 +308,9 @@ def ensure_for_session(row: dict, *, reactivate_done: bool = False) -> dict:
                (task_id, title, project_key, project_name, project_path, status,
                 due_date, session_id, session_provider, notes, created_at,
                 updated_at, completed_at, title_override, title_source, session_cwd,
-                priority, position)
+                priority, position, project_resolved)
                VALUES (?, ?, ?, ?, ?, 'active', NULL, ?, ?, '', ?, ?, NULL,
-                       NULL, 'automatic', ?, 'normal', ?)
+                       NULL, 'automatic', ?, 'normal', ?, 0)
                ON CONFLICT(session_id) DO UPDATE SET
                  title = CASE WHEN work_items.title_source != 'manual'
                               THEN excluded.title ELSE work_items.title END,
@@ -306,6 +333,7 @@ def ensure_for_session(row: dict, *, reactivate_done: bool = False) -> dict:
         result = conn.execute(
             "SELECT * FROM work_items WHERE session_id = ?", (session_id,)
         ).fetchone()
+        _ensure_project_setting(conn, result["project_key"])
     return dict(result)
 
 
@@ -324,7 +352,7 @@ def reconcile_sessions(*, limit: int = _RECONCILE_LIMIT) -> int:
            LEFT JOIN work_items ON work_items.session_id = sessions.session_id
            WHERE COALESCE(sessions.provider, 'claude') IN ('claude', 'codex')
              AND (work_items.session_id IS NULL
-                  OR work_items.project_key LIKE 'path:%')
+                  OR work_items.project_resolved = 0)
            ORDER BY sessions.updated_at DESC, sessions.session_id
            LIMIT ?""",
         (limit,),
@@ -341,9 +369,22 @@ def reconcile_sessions(*, limit: int = _RECONCILE_LIMIT) -> int:
     changed = 0
     now = time.time()
     with conn:
+        conn.execute("BEGIN IMMEDIATE")
         for row, project, title, provider in prepared:
             session_id = str(row["session_id"])
             cwd = str(row.get("cwd") or "")
+            current_runtime = conn.execute(
+                "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            # Project discovery deliberately happens outside the writer lock.
+            # If a hook changed this session meanwhile, leave it unresolved so
+            # the next bounded pass resolves the new cwd instead of blessing a
+            # stale project as final.
+            if current_runtime is None or any(
+                current_runtime[field] != row[field]
+                for field in ("updated_at", "cwd", "name", "provider")
+            ):
+                continue
             timestamp = float(row.get("updated_at") or now)
             existing = conn.execute(
                 "SELECT * FROM work_items WHERE session_id = ?", (session_id,)
@@ -354,23 +395,26 @@ def reconcile_sessions(*, limit: int = _RECONCILE_LIMIT) -> int:
                        (task_id, title, project_key, project_name, project_path,
                         status, due_date, session_id, session_provider, notes,
                         created_at, updated_at, completed_at, title_override,
-                        title_source, session_cwd, priority, position)
+                        title_source, session_cwd, priority, position, project_resolved)
                        VALUES (?, ?, ?, ?, ?, 'active', NULL, ?, ?, '', ?, ?,
-                               NULL, NULL, 'automatic', ?, 'normal', ?)""",
+                               NULL, NULL, 'automatic', ?, 'normal', ?, 1)""",
                     (
                         str(uuid.uuid4()), title, project["key"], project["name"],
                         project["path"], session_id, provider, timestamp, timestamp, cwd,
                         time.time_ns(),
                     ),
                 )
+                _ensure_project_setting(conn, project["key"])
                 changed += 1
                 continue
+            previous_project_key = str(existing["project_key"])
             updates = {
                 "project_key": project["key"],
                 "project_name": project["name"],
                 "project_path": project["path"],
                 "session_provider": provider,
                 "session_cwd": cwd or existing["session_cwd"],
+                "project_resolved": 1,
             }
             if existing["title_source"] != "manual":
                 updates["title"] = title
@@ -381,6 +425,13 @@ def reconcile_sessions(*, limit: int = _RECONCILE_LIMIT) -> int:
                     (*updates.values(), session_id),
                 )
                 changed += 1
+            _ensure_project_setting(
+                conn, project["key"], previous_key=previous_project_key
+            )
+        conn.execute(
+            "DELETE FROM project_settings WHERE project_key NOT IN "
+            "(SELECT DISTINCT project_key FROM work_items WHERE session_id IS NOT NULL)"
+        )
     return changed
 
 
@@ -430,11 +481,6 @@ def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
         raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
     if not changes:
         return get(task_id), None
-    existing = get(task_id)
-    if existing is None:
-        return None, None
-    if not existing.get("session_id"):
-        return None, None
     values: dict[str, object] = {}
     if "title" in changes:
         values["title"] = _text(changes["title"], "title", limit=500, required=True)
@@ -453,12 +499,23 @@ def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
 
     assignments = ", ".join(f"{field} = ?" for field in values)
     publish_session: str | None = None
-    with _conn() as conn:
+    conn = _conn()
+    with conn:
+        # Reserve the writer before reading the row. Otherwise a hook or a
+        # second UI request can change its status between this read and the
+        # related work/runtime updates below.
+        conn.execute("BEGIN IMMEDIATE")
+        existing_row = conn.execute(
+            "SELECT * FROM work_items WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        if existing_row is None or not existing_row["session_id"]:
+            return None, None
+        existing = dict(existing_row)
         cursor = conn.execute(
             f"UPDATE work_items SET {assignments} WHERE task_id = ?",
             (*values.values(), task_id),
         )
-        session_id = str(existing.get("session_id") or "")
+        session_id = str(existing["session_id"])
         closes = (
             cursor.rowcount
             and "status" in changes
@@ -492,6 +549,36 @@ def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
     return (dict(result) if result is not None else None), publish_session
 
 
+def finish_turn(
+    session_id: str,
+    working_since: float,
+    turn_s: float,
+    *,
+    cwd: str | None,
+    host: str,
+    model_label: str | None = None,
+    mark_unattended: bool = True,
+) -> tuple[bool, bool]:
+    """Finish one turn and decide alerts against the serialized work status."""
+
+    def alert_allowed(conn: sqlite3.Connection) -> bool:
+        row = conn.execute(
+            "SELECT status FROM work_items WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return row is None or row["status"] not in {"done", "archived"}
+
+    return store.finish_turn_with_decision(
+        session_id,
+        working_since,
+        turn_s,
+        cwd=cwd,
+        host=host,
+        model_label=model_label,
+        mark_unattended=mark_unattended,
+        alert_allowed=alert_allowed,
+    )
+
+
 def reorder_tasks(
     project_key: object, task_ids: object, *, priority: object | None = None
 ) -> list[dict]:
@@ -502,6 +589,7 @@ def reorder_tasks(
     placeholders = ",".join("?" for _ in ids)
     conn = _conn()
     with conn:
+        conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             f"SELECT * FROM work_items WHERE task_id IN ({placeholders})",
             ids,
@@ -543,30 +631,71 @@ def reorder_tasks(
     return [result_by_id[task_id] for task_id in ids]
 
 
-def _ensure_project_settings(conn: sqlite3.Connection) -> None:
-    rows = conn.execute(
-        """SELECT project_key FROM work_items WHERE session_id IS NOT NULL
-           GROUP BY project_key ORDER BY MIN(position), project_key"""
-    ).fetchall()
+def _ensure_project_setting(
+    conn: sqlite3.Connection, project_key: str, *, previous_key: str | None = None
+) -> None:
+    if previous_key and previous_key != project_key:
+        previous = conn.execute(
+            "SELECT description, position FROM project_settings WHERE project_key = ?",
+            (previous_key,),
+        ).fetchone()
+        conn.execute(
+            """INSERT OR IGNORE INTO project_settings
+               (project_key, description, position, updated_at)
+               SELECT ?, description, position, ? FROM project_settings
+               WHERE project_key = ?""",
+            (project_key, time.time(), previous_key),
+        )
+        current = conn.execute(
+            "SELECT description, position FROM project_settings WHERE project_key = ?",
+            (project_key,),
+        ).fetchone()
+        if previous is not None and current is not None:
+            old_description = str(previous["description"] or "").strip()
+            current_description = str(current["description"] or "").strip()
+            if old_description and old_description not in current_description:
+                merged = (
+                    f"{current_description}\n\n{old_description}"
+                    if current_description
+                    else old_description
+                )
+                if len(merged) <= 10_000:
+                    conn.execute(
+                        "UPDATE project_settings SET description = ?, position = ?, "
+                        "updated_at = ? WHERE project_key = ?",
+                        (
+                            merged,
+                            min(int(previous["position"]), int(current["position"])),
+                            time.time(),
+                            project_key,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO project_description_fragments
+                           (target_key, source_key, description, created_at)
+                           VALUES (?, ?, ?, ?)
+                           ON CONFLICT(target_key, source_key) DO UPDATE SET
+                             description = excluded.description""",
+                        (project_key, previous_key, old_description, time.time()),
+                    )
+    if conn.execute(
+        "SELECT 1 FROM project_settings WHERE project_key = ?", (project_key,)
+    ).fetchone():
+        return
     existing_max = conn.execute(
         "SELECT COALESCE(MAX(position), 0) FROM project_settings"
     ).fetchone()[0]
-    next_position = max(int(existing_max) + 1, time.time_ns())
-    now = time.time()
-    for row in rows:
-        cursor = conn.execute(
-            """INSERT OR IGNORE INTO project_settings
-               (project_key, description, position, updated_at)
-               VALUES (?, '', ?, ?)""",
-            (row[0], next_position, now),
-        )
-        if cursor.rowcount:
-            next_position += 1
+    conn.execute(
+        """INSERT OR IGNORE INTO project_settings
+           (project_key, description, position, updated_at)
+           VALUES (?, '', ?, ?)""",
+        (project_key, max(int(existing_max) + 1, time.time_ns()), time.time()),
+    )
 
 
 def list_projects() -> list[dict]:
     with _conn() as conn:
-        _ensure_project_settings(conn)
         rows = conn.execute(
             """SELECT work_items.project_key,
                       MIN(work_items.project_name) AS name,
@@ -579,12 +708,27 @@ def list_projects() -> list[dict]:
                GROUP BY work_items.project_key
                ORDER BY project_settings.position, work_items.project_key"""
         ).fetchall()
-    return [dict(row) for row in rows]
+        projects = [dict(row) for row in rows]
+        fragments = conn.execute(
+            "SELECT target_key, source_key, description "
+            "FROM project_description_fragments ORDER BY created_at, source_key"
+        ).fetchall()
+    by_project: dict[str, list[dict]] = {}
+    for fragment in fragments:
+        by_project.setdefault(str(fragment["target_key"]), []).append(
+            {
+                "source_key": fragment["source_key"],
+                "description": fragment["description"],
+            }
+        )
+    for project in projects:
+        project["inherited_descriptions"] = by_project.get(project["project_key"], [])
+    return projects
 
 
 def set_project_description(project_key: object, description: object) -> dict:
     key = _text(project_key, "project_key", limit=1000, required=True)
-    value = _text(description, "description", limit=1000)
+    value = _text(description, "description", limit=10_000)
     conn = _conn()
     with conn:
         exists = conn.execute(
@@ -594,7 +738,7 @@ def set_project_description(project_key: object, description: object) -> dict:
         ).fetchone()
         if not exists:
             raise ValueError("project not found")
-        _ensure_project_settings(conn)
+        _ensure_project_setting(conn, key)
         conn.execute(
             "UPDATE project_settings SET description = ?, updated_at = ? "
             "WHERE project_key = ?",
@@ -607,7 +751,8 @@ def reorder_projects(project_keys: object) -> list[dict]:
     keys = _bounded_unique_strings(project_keys, "project_keys")
     conn = _conn()
     with conn:
-        _ensure_project_settings(conn)
+        for key in keys:
+            _ensure_project_setting(conn, key)
         existing = {
             row[0]
             for row in conn.execute(

@@ -11,6 +11,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 _DB_PATH = Path(os.environ["AGENT_BOARD_DB_PATH"]) if os.environ.get(
@@ -268,13 +269,6 @@ def active(max_age_hours: float = 24) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def all_sessions() -> list[dict]:
-    """Every foreground session Agent Board has observed, newest first."""
-    with get_conn() as conn:
-        rows = conn.execute("SELECT * FROM sessions ORDER BY updated_at DESC").fetchall()
-    return [dict(row) for row in rows]
-
-
 def set_state(
     session_id: str,
     state: str,
@@ -311,8 +305,36 @@ def finish_turn(
     The compare-and-swap makes duplicate or stale Stop events harmless. If a
     newer prompt replaced ``working_since``, its working state is preserved.
     """
+    finished, _alert_allowed = finish_turn_with_decision(
+        session_id,
+        working_since,
+        turn_s,
+        cwd=cwd,
+        host=host,
+        model_label=model_label,
+        mark_unattended=mark_unattended,
+    )
+    return finished
+
+
+def finish_turn_with_decision(
+    session_id: str,
+    working_since: float,
+    turn_s: float,
+    *,
+    cwd: str | None,
+    host: str,
+    model_label: str | None = None,
+    mark_unattended: bool = True,
+    alert_allowed: Callable[[sqlite3.Connection], bool] | None = None,
+) -> tuple[bool, bool]:
+    """Serialize Stop with an optional same-database alert decision."""
     now = time.time()
-    with get_conn() as conn:
+    conn = get_conn()
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        should_alert = alert_allowed(conn) if alert_allowed else True
+        should_mark_unattended = mark_unattended and should_alert
         cursor = conn.execute(
             "UPDATE sessions SET state = 'idle', working_since = NULL, "
             "cwd = COALESCE(?, cwd), host = ?, "
@@ -320,8 +342,9 @@ def finish_turn(
             "done_at = CASE WHEN ? THEN ? ELSE done_at END, "
             "done_turn_s = CASE WHEN ? THEN ? ELSE done_turn_s END, "
             "acked_at = CASE WHEN ? THEN NULL ELSE acked_at END, "
-            "pending_alert = 'done', "
-            "pending_alert_revision = COALESCE(sync_revision, 0) + 1 "
+            "pending_alert = CASE WHEN ? THEN 'done' ELSE NULL END, "
+            "pending_alert_revision = CASE WHEN ? "
+            "THEN COALESCE(sync_revision, 0) + 1 ELSE NULL END "
             "WHERE session_id = ? AND working_since IS ?",
             (
                 cwd,
@@ -329,16 +352,19 @@ def finish_turn(
                 model_label,
                 now,
                 now,
-                mark_unattended,
+                should_mark_unattended,
                 now,
-                mark_unattended,
+                should_mark_unattended,
                 float(turn_s),
-                mark_unattended,
+                should_mark_unattended,
+                should_alert,
+                should_alert,
                 session_id,
                 working_since,
             ),
         )
-    return cursor.rowcount == 1
+    finished = cursor.rowcount == 1
+    return finished, bool(finished and should_alert)
 
 
 def heartbeat(session_id: str) -> None:

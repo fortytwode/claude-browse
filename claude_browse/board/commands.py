@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import os
 import shlex
 import shutil
@@ -15,6 +17,25 @@ from claude_browse.providers import get_provider
 from . import store
 
 _UNSET = object()
+
+
+def _reserve_native_launch(session_id: str, provider: str) -> tuple[int | None, bool]:
+    """Reserve a native session until the provider process exits.
+
+    The descriptor is inheritable across ``exec``. A simultaneous launcher
+    that cannot take the lock must fork instead of racing a second attach.
+    """
+    digest = hashlib.sha256(f"{provider}\0{session_id}".encode()).hexdigest()[:24]
+    lock_dir = store._DB_PATH.parent / "launch-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_dir / f"{digest}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None, False
+    os.set_inheritable(fd, True)
+    return fd, True
 
 
 def _agent_board_executable() -> str:
@@ -133,8 +154,8 @@ def launch_direct_session(
         cwd,
         (),
         full_access,
-        # Dormant sessions attach natively; _native_resume still forks on an
-        # active writer and takes the oversized-CodeX compact guard.
+        # Dormant sessions attach; _native_resume owns the reservation at the
+        # exact point where it knows an attach (rather than a fork) will occur.
         fork=None,
     )
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -128,7 +129,7 @@ def test_stale_stop_does_not_overwrite_a_newer_prompt(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
-    original_finish_turn = store.finish_turn
+    original_finish_turn = work_items.finish_turn
     old_start = time.time() - 8
     new_start = time.time()
     store.upsert(
@@ -144,7 +145,7 @@ def test_stale_stop_does_not_overwrite_a_newer_prompt(tmp_path, monkeypatch):
         store.upsert(session_id, state="working", working_since=new_start)
         return original_finish_turn(session_id, working_since, turn_s, **fields)
 
-    monkeypatch.setattr(store, "finish_turn", prompt_arrives_before_stop_commits)
+    monkeypatch.setattr(work_items, "finish_turn", prompt_arrives_before_stop_commits)
 
     mutated = hook.dispatch(
         {
@@ -160,6 +161,46 @@ def test_stale_stop_does_not_overwrite_a_newer_prompt(tmp_path, monkeypatch):
     assert row["working_since"] == new_start
     assert row["done_at"] is None
     assert calls == []
+
+
+def test_stop_serializes_alert_decision_with_concurrent_close(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert(
+        "close-race",
+        cwd=str(tmp_path),
+        state="working",
+        working_since=time.time() - 90,
+        name="Race",
+    )
+    task = work_items.ensure_for_session(store.get("close-race"))
+    entered = threading.Event()
+    release = threading.Event()
+    notifications = []
+    original = work_items.finish_turn
+
+    def paused_finish(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(work_items, "finish_turn", paused_finish)
+    monkeypatch.setattr(hook.notify, "notify", lambda *args: notifications.append(args))
+    worker = threading.Thread(
+        target=hook.dispatch,
+        args=({"hook_event_name": "Stop", "session_id": "close-race", "cwd": str(tmp_path)},),
+    )
+    worker.start()
+    assert entered.wait(timeout=2)
+    work_items.mutate(task["task_id"], status="done")
+    release.set()
+    worker.join(timeout=2)
+
+    runtime = store.get("close-race")
+    assert not worker.is_alive()
+    assert work_items.get(task["task_id"])["status"] == "done"
+    assert runtime["pending_alert"] is None
+    assert not store.is_unattended(runtime)
+    assert notifications == []
 
 
 def test_new_prompt_after_stop_commit_clears_completion_metadata(tmp_path, monkeypatch):
@@ -588,9 +629,9 @@ def test_notify_title_includes_folder_tag():
     # Body carries the name ONLY -- the folder tag lives exclusively in the
     # title. Both surfaces carrying it shipped a double-folder banner,
     # caught by the user from a real screenshot.
-    assert hook._notify_body("Continue CodeX session context", "/Users/me/team-operations") == \
+    assert hook._notify_body("Continue CodeX session context") == \
         "Continue CodeX session context"
-    assert hook._notify_body("team-operations", "/Users/me/team-operations") == "team-operations"
+    assert hook._notify_body("team-operations") == "team-operations"
 
 
 def test_model_label_compacts_common_model_ids():

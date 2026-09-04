@@ -20,6 +20,7 @@ import os
 import secrets
 import sqlite3
 import sys
+import threading
 import webbrowser
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +39,7 @@ _ASSET_CONTENT_TYPES = {
 }
 
 _SESSIONS_LIMIT = 200
+_RECONCILE_INTERVAL_S = 30
 
 # Hosts a browser may legitimately use to reach this server. Anything else in
 # the Host header means the request came through a foreign origin -- the DNS
@@ -176,10 +178,38 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"project": self._project_to_json(project, [])})
             elif parsed.path.startswith("/api/tasks/"):
                 task_id = unquote(parsed.path[len("/api/tasks/") :])
+                edit_client = body.pop("_edit_client", None)
+                edit_revision = body.pop("_edit_revision", None)
                 unknown = set(body) - {"title", "status", "due_date", "priority"}
                 if unknown:
                     raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
-                task, publish_session = work_items.mutate(task_id, **body)
+                if (edit_client is None) != (edit_revision is None):
+                    raise ValueError("edit client and revision must be provided together")
+                if edit_client is not None:
+                    if (
+                        not isinstance(edit_client, str)
+                        or not edit_client
+                        or len(edit_client) > 100
+                        or isinstance(edit_revision, bool)
+                        or not isinstance(edit_revision, int)
+                        or edit_revision < 0
+                        or len(body) != 1
+                    ):
+                        raise ValueError("invalid edit revision")
+                    field = next(iter(body))
+                    revision_key = (edit_client, task_id, field)
+                    with self.server.edit_revision_lock:  # type: ignore[attr-defined]
+                        last_revision = self.server.edit_revisions.get(  # type: ignore[attr-defined]
+                            revision_key, -1
+                        )
+                        if edit_revision < last_revision:
+                            task, publish_session = work_items.get(task_id), None
+                        else:
+                            task, publish_session = work_items.mutate(task_id, **body)
+                            if task:
+                                self.server.edit_revisions[revision_key] = edit_revision  # type: ignore[attr-defined]
+                else:
+                    task, publish_session = work_items.mutate(task_id, **body)
                 if not task:
                     self._send_json({"error": "task not found"}, status=404)
                     return
@@ -411,6 +441,7 @@ class _Handler(BaseHTTPRequestHandler):
             "name": project["name"],
             "path": project["path"],
             "description": project.get("description") or "",
+            "inherited_descriptions": project.get("inherited_descriptions") or [],
             "order": int(project.get("position") or 0),
             "counts": {
                 "active": sum(task["work_status"] == "active" for task in project_tasks),
@@ -448,23 +479,17 @@ class _Handler(BaseHTTPRequestHandler):
         if not task or not task.get("session_id"):
             self._send_json({"error": "task not found"}, status=404)
             return
-        provider = str(body.get("provider") or task.get("session_provider") or "claude")
+        raw_provider = body.get("provider")
+        if not isinstance(raw_provider, str):
+            raise ValueError("provider must be claude or codex")
+        provider = raw_provider.strip().lower()
         if provider not in work_items.PROVIDERS:
             raise ValueError("provider must be claude or codex")
         full_access = body.get("full_access")
         if not isinstance(full_access, bool):
             raise ValueError("full_access must be true or false")
         session_id = str(task.get("session_id") or "")
-        indexed = None
-        try:
-            conn = fts.open_db(read_only=True)
-            try:
-                indexed = fts.get_by_sid(conn, session_id)
-            finally:
-                conn.close()
-        except (OSError, sqlite3.Error):
-            pass
-        session = commands.session_for_launch(session_id, indexed)
+        session = commands.session_for_launch(session_id)
         if session is None:
             raise ValueError("session not found")
         action = _launch_actions(session)[provider]
@@ -480,11 +505,7 @@ class _Handler(BaseHTTPRequestHandler):
         provider = str(body.get("provider") or "").strip().lower()
         if provider not in work_items.PROVIDERS:
             raise ValueError("provider must be claude or codex")
-        conn = fts.open_db(read_only=True)
-        try:
-            session = fts.get_by_sid(conn, session_id)
-        finally:
-            conn.close()
+        session = commands.session_for_launch(session_id)
         if not session:
             raise ValueError("session not found")
         full_access = body.get("full_access")
@@ -523,6 +544,14 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
 
+def _reconcile_periodically(stop: threading.Event, interval_s: float) -> None:
+    while not stop.wait(interval_s):
+        try:
+            work_items.reconcile_sessions()
+        except (OSError, sqlite3.Error):
+            pass
+
+
 def run_server(
     cwd: str,
     prefixes: tuple[str, ...] = (),
@@ -546,7 +575,17 @@ def run_server(
     server.folder_prefixes = prefixes  # type: ignore[attr-defined]
     server.session_limit = limit  # type: ignore[attr-defined]
     server.csrf_token = secrets.token_urlsafe(32)  # type: ignore[attr-defined]
+    server.edit_revision_lock = threading.Lock()  # type: ignore[attr-defined]
+    server.edit_revisions = {}  # type: ignore[attr-defined]
     work_items.reconcile_sessions()
+    reconcile_stop = threading.Event()
+    reconcile_thread = threading.Thread(
+        target=_reconcile_periodically,
+        args=(reconcile_stop, _RECONCILE_INTERVAL_S),
+        name="agent-board-project-reconciler",
+        daemon=True,
+    )
+    reconcile_thread.start()
     port = server.server_address[1]
     url = f"http://127.0.0.1:{port}/"
     print(f"claude-browse web viewer: {url}", file=sys.stderr)
@@ -560,5 +599,7 @@ def run_server(
     except KeyboardInterrupt:
         pass
     finally:
+        reconcile_stop.set()
+        reconcile_thread.join(timeout=2)
         server.shutdown()
         server.server_close()

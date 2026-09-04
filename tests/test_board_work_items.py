@@ -49,11 +49,34 @@ def test_work_item_mutation_validation_and_one_task_per_session(tmp_path):
         work_items.mutate(task["task_id"], due_date="2026-W36-6")
     with pytest.raises(ValueError, match="status must"):
         work_items.mutate(task["task_id"], status="urgent")
+    for invalid in (None, "", 0, False):
+        with pytest.raises(ValueError, match="status must"):
+            work_items.mutate(task["task_id"], status=invalid)
+        with pytest.raises(ValueError, match="priority must"):
+            work_items.mutate(task["task_id"], priority=invalid)
     with pytest.raises(ValueError, match="unknown field"):
         work_items.mutate(task["task_id"], provider="codex")
 
     same = work_items.ensure_for_session(store.get("validation"))
     assert same["task_id"] == task["task_id"]
+
+
+def test_mutation_uses_transactional_row_for_close_side_effects(tmp_path, monkeypatch):
+    store.upsert("transactional", cwd=str(tmp_path), name="Atomic", provider="claude")
+    task = work_items.ensure_for_session(store.get("transactional"))
+    work_items.mutate(task["task_id"], status="done")
+    with store.get_conn() as conn:
+        conn.execute("UPDATE sessions SET acked_at = NULL WHERE session_id = ?", ("transactional",))
+
+    stale = dict(task)
+    stale["status"] = "active"
+    monkeypatch.setattr(work_items, "get", lambda _task_id: stale)
+
+    unchanged, publish_session = work_items.mutate(task["task_id"], status="done")
+
+    assert unchanged["status"] == "done"
+    assert publish_session is None
+    assert store.get("transactional")["acked_at"] is None
 
 
 def test_priority_defaults_validates_and_survives_hook_updates(tmp_path):
@@ -147,11 +170,23 @@ def test_project_settings_description_and_order_are_local_and_validated(tmp_path
 
     saved = work_items.set_project_description(keys[0], "  Local planning notes  ")
     assert saved["description"] == "Local planning notes"
-    with pytest.raises(ValueError, match="1000"):
-        work_items.set_project_description(keys[0], "x" * 1001)
+    with pytest.raises(ValueError, match="10000"):
+        work_items.set_project_description(keys[0], "x" * 10_001)
     reordered = work_items.reorder_projects(list(reversed(keys)))
     assert [project["project_key"] for project in reordered] == list(reversed(keys))
     assert work_items.list_projects()[0]["project_key"] == keys[1]
+
+
+def test_project_listing_does_not_mutate_settings(tmp_path):
+    store.upsert("read-only", cwd=str(tmp_path), name="Read only")
+    work_items.ensure_for_session(store.get("read-only"))
+    with store.get_conn() as conn:
+        before = conn.total_changes
+
+    assert work_items.list_projects()
+
+    with store.get_conn() as conn:
+        assert conn.total_changes == before
 
 
 def test_project_groups_git_subfolders_by_origin(tmp_path):
@@ -217,6 +252,105 @@ def test_startup_reconciliation_is_bulk_idempotent_and_retains_exact_cwd(
     assert [row["session_id"] for row in rows] == ["newer", "older"]
     assert all(row["project_path"] == str(repo) for row in rows)
     assert all(row["session_cwd"] == str(nested) for row in rows)
+
+
+def test_reconciliation_marks_projects_resolved_and_preserves_project_settings(
+    tmp_path, monkeypatch
+):
+    nested = tmp_path / "repo" / "nested"
+    nested.mkdir(parents=True)
+    store.upsert("resolve-once", cwd=str(nested), name="Resolve once")
+    item = work_items.ensure_for_session(store.get("resolve-once"))
+    original_key = item["project_key"]
+    work_items.set_project_description(original_key, "Keep this description")
+    work_items.reorder_projects([original_key])
+    original_position = work_items.list_projects()[0]["position"]
+    calls = []
+
+    def resolve(cwd):
+        calls.append(cwd)
+        return {"key": "repo:example/project", "name": "project", "path": str(nested.parent)}
+
+    monkeypatch.setattr(projects, "resolve_project", resolve)
+
+    assert work_items.reconcile_sessions() == 1
+    assert work_items.reconcile_sessions() == 0
+    assert calls == [str(nested)]
+    updated = work_items.get_for_session("resolve-once")
+    assert updated["project_resolved"] == 1
+    assert updated["project_key"] == "repo:example/project"
+    project = work_items.list_projects()[0]
+    assert project["description"] == "Keep this description"
+    assert project["position"] == original_position
+
+
+def test_reconciliation_merges_distinct_transient_and_repository_descriptions(
+    tmp_path, monkeypatch
+):
+    transient = tmp_path / "repo" / "nested"
+    existing = tmp_path / "repo"
+    transient.mkdir(parents=True)
+    store.upsert("transient", cwd=str(transient), name="Transient")
+    transient_item = work_items.ensure_for_session(store.get("transient"))
+    nested_notes = "Nested " + "n" * 6_000
+    repository_notes = "Repository " + "r" * 6_000
+    work_items.set_project_description(transient_item["project_key"], nested_notes)
+    store.upsert("existing", cwd=str(existing), name="Existing")
+    existing_item = work_items.ensure_for_session(store.get("existing"))
+    repo_key = "repo:example/project"
+    with store.get_conn() as conn:
+        conn.execute(
+            "UPDATE work_items SET project_key = ?, project_resolved = 1 "
+            "WHERE task_id = ?",
+            (repo_key, existing_item["task_id"]),
+        )
+        conn.execute(
+            "INSERT INTO project_settings VALUES (?, ?, ?, ?)",
+            (repo_key, repository_notes, 1, time.time()),
+        )
+    monkeypatch.setattr(
+        projects,
+        "resolve_project",
+        lambda _cwd: {"key": repo_key, "name": "project", "path": str(existing)},
+    )
+
+    assert work_items.reconcile_sessions() == 1
+
+    project = next(
+        project for project in work_items.list_projects() if project["project_key"] == repo_key
+    )
+    assert project["description"] == repository_notes
+    assert project["inherited_descriptions"] == [
+        {"source_key": transient_item["project_key"], "description": nested_notes}
+    ]
+
+
+def test_reconciliation_defers_a_session_changed_during_project_discovery(
+    tmp_path, monkeypatch
+):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    store.upsert("moving", cwd=str(first), name="Before")
+    work_items.ensure_for_session(store.get("moving"))
+    calls = []
+
+    def resolve(cwd):
+        calls.append(cwd)
+        if len(calls) == 1:
+            store.upsert("moving", cwd=str(second), name="After")
+        return {"key": f"path:{cwd}", "name": Path(cwd).name, "path": cwd}
+
+    monkeypatch.setattr(projects, "resolve_project", resolve)
+
+    assert work_items.reconcile_sessions() == 0
+    assert work_items.get_for_session("moving")["project_resolved"] == 0
+    assert work_items.reconcile_sessions() == 1
+    updated = work_items.get_for_session("moving")
+    assert updated["project_resolved"] == 1
+    assert updated["project_path"] == str(second)
+    assert calls == [str(first), str(second)]
 
 
 def test_direct_session_commands_have_one_fixed_argv_safe_shape(monkeypatch):

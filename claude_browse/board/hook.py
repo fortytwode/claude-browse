@@ -90,18 +90,7 @@ def _set_state(
     cwd: str | None,
     model_label: str | None = None,
 ) -> None:
-    """store.set_state, always including host, and refreshing the heartbeat.
-
-    Centralizes the host backfill here so a future new hook event handler
-    can't reintroduce the host=None bug found in this session's own live
-    data. Also bumps heartbeat_at: statusline.py's refreshInterval is the
-    primary heartbeat source, but its actual invocation cadence during a
-    long tool-heavy sequence turned out to be uncertain -- observed live in
-    this session's own build (it showed 'gone' on the real Slack board
-    while actively being worked on). Stop fires reliably on every turn per
-    the verified hook contract, so it's a second, more dependable heartbeat
-    source that doesn't depend on the statusline actually re-rendering.
-    """
+    """Refresh host and heartbeat whenever a hook updates runtime state."""
     store.set_state(session_id, state, cwd=cwd, host=_hostname(), model_label=model_label)
     store.heartbeat(session_id)
 
@@ -200,14 +189,8 @@ def _notify_title(action: str, cwd: str | None, model_label: str = "") -> str:
     return f"{prefix}{model}{action}"
 
 
-def _notify_body(name: str, cwd: str | None) -> str:
-    """Just the session name. The [folder] tag lives in the TITLE only
-    (_notify_title) -- two authors added it to both surfaces independently,
-    which shipped banners like 'title: [claude-browse] Opus done / body:
-    final qa smoke test [claude-browse]' with the folder twice (user-caught
-    bug). The title always carries the folder, so the body never needs it.
-    """
-    del cwd
+def _notify_body(name: str) -> str:
+    """Keep the folder tag in the notification title only."""
     return name
 
 
@@ -325,33 +308,34 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
         return True
 
     elif event == "Stop":
+        if row is None:
+            _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
+            row = store.get(session_id)
         working_since = row.get("working_since") if row else None
         turn_s = (time.time() - working_since) if working_since else 0.0
-        item = _capture_work(session_id)
-        closed = bool(item and item.get("status") in {"done", "archived"})
+        _capture_work(session_id)
+        should_notify = False
         if working_since:
-            if not store.finish_turn(
+            from claude_browse.board import work_items
+
+            finished, should_notify = work_items.finish_turn(
                 session_id,
                 working_since,
                 turn_s,
                 cwd=cwd,
                 host=_hostname(),
                 model_label=model_label or None,
-                mark_unattended=(
-                    not closed and turn_s >= _unattended_min_turn_s()
-                ),
-            ):
+                mark_unattended=turn_s >= _unattended_min_turn_s(),
+            )
+            if not finished:
                 # A duplicate Stop or a Stop for a superseded turn must not
                 # replay the banner or overwrite a newer prompt's state.
                 return False
         else:
             _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
-        if closed:
-            store.ack(session_id)
-            store.clear_pending_alert(session_id)
-        if working_since and not closed:
+        if working_since and should_notify:
             name = (row or {}).get("name") or _placeholder_name(cwd)
-            notify.notify(_notify_title("done", cwd, model_label), _notify_body(name, cwd))
+            notify.notify(_notify_title("done", cwd, model_label), _notify_body(name))
         return True
 
     elif event == "Notification" or event in _NEEDS_INPUT_EVENTS:
@@ -359,7 +343,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
         if event in _NEEDS_INPUT_EVENTS or notification_type not in _IGNORED_NOTIFICATION_TYPES:
             _set_state(session_id, "needs-input", cwd=cwd, model_label=model_label or None)
             name = (row or {}).get("name") or _placeholder_name(cwd)
-            notify.notify(_notify_title("needs input", cwd, model_label), _notify_body(name, cwd))
+            notify.notify(_notify_title("needs input", cwd, model_label), _notify_body(name))
             store.set_pending_alert(session_id, "needs-input")
             _capture_work(session_id)
             return True

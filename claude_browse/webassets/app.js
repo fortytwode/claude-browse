@@ -4,8 +4,13 @@
   var csrfToken = "", activeSid = null, activeSessionMeta = null;
   var queueMode = "all", groupBy = "priority", selectedProject = null;
   var latestBoard = null, currentTurns = null, draggedTask = null, draggedProject = null;
-  var sessionsSeq = 0, boardTimer = null, editSequence = 0;
+  var sessionsSeq = 0, boardSeq = 0, boardTimer = null, editSequence = 0;
   var rowMutationTails = Object.create(null), editStates = [];
+  var boardRenderPending = false;
+  var editRevisionCounters = Object.create(null);
+  var launchesInFlight = Object.create(null);
+  var reorderMutationTails = Object.create(null);
+  var editClientId = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : String(Date.now()) + "-" + Math.random();
   var PRIORITY_GROUPS = ["urgent", "high", "normal", "low"];
   var TERMINAL_GROUPS = ["needs-input", "working", "idle", "ended", "gone"];
   var PRIORITY_LABELS = { urgent: "Urgent", high: "High", normal: "Normal", low: "Low" };
@@ -82,7 +87,12 @@
   function hasProtectedWorkControls() {
     var active = document.activeElement;
     var focused = Boolean(active && $("board-view").contains(active) && active.matches(".work-edit, #project-description"));
-    return focused || editStates.some(function (state) { return Boolean(state.timer || state.inFlight || state.failed); });
+    return focused || projectDescriptionDirty() || hasUnsettledWorkEdits();
+  }
+  function hasUnsettledWorkEdits() { return editStates.some(function (state) { return Boolean(state.timer || state.inFlight || state.failed); }); }
+  function projectDescriptionDirty() {
+    var project = selectedProjectData(), description = $("project-description");
+    return Boolean(project && description && description.value !== (project.description || ""));
   }
   function mergeSavedTask(saved) {
     if (!latestBoard || !saved) return;
@@ -101,24 +111,34 @@
   }
   function commitEdit(state, keepalive) {
     if (state.timer) { clearTimeout(state.timer); state.timer = null; }
-    var revision = state.revision, payload = {}; payload[state.field] = state.readValue();
+    var revision = state.revision, payload = { _edit_client: editClientId, _edit_revision: revision }; payload[state.field] = state.readValue();
     state.inFlight = true; state.control.setAttribute("aria-busy", "true");
     var prior = rowMutationTails[state.taskId] || Promise.resolve();
     var operation = prior.catch(function () {}).then(function () {
       return mutate("/api/tasks/" + encodeURIComponent(state.taskId), "PATCH", payload, keepalive);
     });
-    rowMutationTails[state.taskId] = operation;
-    operation.then(function (response) {
-      mergeSavedTask(response.task); if (state.revision === revision) clearEditError(state);
+    var settled = operation.then(function (response) {
+      mergeSavedTask(response.task);
+      if (state.revision === revision) {
+        state.dirty = false; clearEditError(state);
+        if (state.field === "status") boardRenderPending = true;
+      }
     }).catch(function (error) {
       if (state.revision === revision) setEditError(state, error);
     }).finally(function () {
       if (state.revision === revision) { state.inFlight = false; state.control.removeAttribute("aria-busy"); }
+      if (rowMutationTails[state.taskId] === settled) delete rowMutationTails[state.taskId];
+      if (boardRenderPending && !hasUnsettledWorkEdits() && !projectDescriptionDirty()) {
+        boardRenderPending = false; renderBoard(latestBoard);
+      }
     });
-    return operation.catch(function () {});
+    rowMutationTails[state.taskId] = settled;
+    return settled;
   }
   function scheduleEdit(state, delay) {
-    state.revision += 1; if (state.timer) clearTimeout(state.timer);
+    state.revision = (editRevisionCounters[state.revisionKey] || 0) + 1;
+    editRevisionCounters[state.revisionKey] = state.revision;
+    state.dirty = true; if (state.timer) clearTimeout(state.timer);
     state.control.setAttribute("aria-busy", "true");
     state.timer = setTimeout(function () { commitEdit(state, false); }, delay);
   }
@@ -126,28 +146,66 @@
     var error = element("span", "field-error"), errorId = "edit-error-" + (++editSequence);
     error.id = errorId; error.hidden = true; error.setAttribute("role", "alert"); error.setAttribute("aria-live", "assertive");
     control.setAttribute("aria-describedby", errorId);
-    var state = { taskId: task.task_id, field: field, control: control, error: error, readValue: readValue, timer: null, inFlight: false, failed: false, revision: 0 };
+    var revisionKey = task.task_id + ":" + field;
+    var state = { taskId: task.task_id, field: field, control: control, error: error, readValue: readValue, timer: null, inFlight: false, failed: false, dirty: false, revisionKey: revisionKey, revision: editRevisionCounters[revisionKey] || 0 };
     editStates.push(state);
     control.addEventListener(field === "title" ? "input" : "change", function () { scheduleEdit(state, delay); });
     control.addEventListener("blur", function () { if (!hasProtectedWorkControls()) fetchBoard(); });
     return error;
   }
   function flushPendingEdits(keepalive) {
-    return Promise.all(editStates.filter(function (state) { return Boolean(state.timer); }).map(function (state) { return commitEdit(state, keepalive); }));
+    var pending = editStates.filter(function (state) { return Boolean(state.timer); }).map(function (state) { return commitEdit(state, keepalive); });
+    Object.keys(rowMutationTails).forEach(function (taskId) { pending.push(rowMutationTails[taskId]); });
+    return Promise.all(pending);
+  }
+  function flushDirtyEditsOnPageHide() {
+    editStates.forEach(function (state) {
+      if (!state.dirty) return;
+      var payload = { _edit_client: editClientId, _edit_revision: state.revision }; payload[state.field] = state.readValue();
+      mutate("/api/tasks/" + encodeURIComponent(state.taskId), "PATCH", payload, true).catch(function () {});
+    });
+  }
+  function afterPendingEdits(action) {
+    return flushPendingEdits(false).then(function () {
+      if (editStates.some(function (state) { return state.failed; })) {
+        announce("Fix the highlighted edit before changing views."); return false;
+      }
+      if (projectDescriptionDirty()) {
+        announce("Save or cancel the project description before changing views."); return false;
+      }
+      action(); return true;
+    });
+  }
+  function queueReorder(key, operation) {
+    var prior = reorderMutationTails[key] || Promise.resolve();
+    var queued = prior.catch(function () {}).then(operation);
+    var settled = queued.finally(function () { if (reorderMutationTails[key] === settled) delete reorderMutationTails[key]; });
+    reorderMutationTails[key] = settled;
+    return settled;
   }
 
   function launchChoice(task, provider) {
     var choice = element("div", "launch-choice"), button = element("button", "launch " + provider);
     var reason = element("span", "disabled-reason"), action = task.actions[provider], reasonId = "launch-reason-" + (++editSequence);
-    reason.id = reasonId; button.type = "button"; button.textContent = action.label; button.disabled = !action.available;
+    var launchKey = task.session_id + ":" + provider, busy = Boolean(launchesInFlight[launchKey]);
+    reason.id = reasonId; button.type = "button"; button.textContent = action.label; button.disabled = !action.available || busy; button.dataset.launchKey = launchKey; button.dataset.launchAvailable = String(action.available);
+    if (busy) button.setAttribute("aria-busy", "true");
     if (!action.available) { reason.textContent = action.reason || "Unavailable"; button.setAttribute("aria-describedby", reasonId); }
     button.addEventListener("click", function () {
-      button.disabled = true;
+      if (launchesInFlight[launchKey]) return;
+      launchesInFlight[launchKey] = true; setLaunchBusy(launchKey, true);
       mutate("/api/tasks/" + encodeURIComponent(task.task_id) + "/launch", "POST", { provider: provider, full_access: fullAccessEnabled() }).then(function () {
         toast("Opened " + providerName(provider) + " in Terminal");
-      }).catch(function (error) { toast(error.message, true); }).finally(function () { button.disabled = !action.available; });
+      }).catch(function (error) { toast(error.message, true); }).finally(function () { delete launchesInFlight[launchKey]; setLaunchBusy(launchKey, false); });
     });
     choice.append(button, reason); return choice;
+  }
+  function setLaunchBusy(launchKey, busy) {
+    Array.prototype.forEach.call(document.querySelectorAll("[data-launch-key]"), function (candidate) {
+      if (candidate.dataset.launchKey !== launchKey) return;
+      candidate.disabled = busy || candidate.dataset.launchAvailable !== "true";
+      if (busy) candidate.setAttribute("aria-busy", "true"); else candidate.removeAttribute("aria-busy");
+    });
   }
   function restoreFocus(token) {
     if (!token) return;
@@ -187,9 +245,13 @@
     return payload;
   }
   function performTaskReorder(taskId, destinationKey, beforeTaskId, focus) {
+    if (hasUnsettledWorkEdits() || projectDescriptionDirty()) {
+      afterPendingEdits(function () { performTaskReorder(taskId, destinationKey, beforeTaskId, focus); }); return;
+    }
     if (reorderLocked()) { announce("Reordering is disabled while searching."); restoreFocus(focus); return; }
     var task = latestBoard.tasks.find(function (item) { return item.task_id === taskId; });
     if (!task) return;
+    if (taskId === beforeTaskId) { announce("Thread order is unchanged."); restoreFocus(focus); return; }
     var beforeTask = beforeTaskId && latestBoard.tasks.find(function (item) { return item.task_id === beforeTaskId; });
     if (beforeTask && beforeTask.project_key !== task.project_key) { announce("Tasks cannot move between projects."); restoreFocus(focus); return; }
     if (beforeTask && beforeTask.work_status !== task.work_status) { announce("Done and archived rows keep their planning status while reordering."); restoreFocus(focus); return; }
@@ -199,14 +261,16 @@
     if (groupBy === "terminal" && destinationKey !== task.terminal_state) {
       announce("Terminal state is runtime truth; tasks cannot move between terminal groups."); restoreFocus(focus); return;
     }
-    var snapshot = latestBoard;
-    var payload = taskReorderPayload(task, destinationKey, beforeTaskId);
-    mutate("/api/tasks/reorder", "POST", payload).then(function (response) {
-      mergeReorderedTasks(response.tasks || []);
-      return refreshAfterMutation(focus, "Moved " + (task.title || "thread") + ".");
-    }).catch(function (error) {
-      latestBoard = snapshot; renderBoard(snapshot); restoreFocus(focus);
-      announce("Move failed. " + error.message); toast(error.message, true);
+    queueReorder("tasks:" + task.project_key, function () {
+      var currentTask = latestBoard.tasks.find(function (item) { return item.task_id === taskId; }) || task;
+      var snapshot = latestBoard, payload = taskReorderPayload(currentTask, destinationKey, beforeTaskId);
+      return mutate("/api/tasks/reorder", "POST", payload).then(function (response) {
+        mergeReorderedTasks(response.tasks || []);
+        return refreshAfterMutation(focus, "Moved " + (currentTask.title || "thread") + ".");
+      }).catch(function (error) {
+        latestBoard = snapshot; renderBoard(snapshot); restoreFocus(focus);
+        announce("Move failed. " + error.message); toast(error.message, true);
+      });
     });
   }
   function moveTask(task, direction, focus) {
@@ -219,12 +283,24 @@
     performTaskReorder(task.task_id, taskGroupKey(task), before, focus);
   }
   function performPriorityChange(task, next, focus) {
+    if (hasUnsettledWorkEdits() || projectDescriptionDirty()) {
+      afterPendingEdits(function () { performPriorityChange(task, next, focus); }).then(function (changed) {
+        if (!changed) {
+          var control = Array.prototype.find.call(document.querySelectorAll("[data-focus-key]"), function (item) { return item.dataset.focusKey === focus; });
+          if (control) control.value = task.priority;
+          restoreFocus(focus);
+        }
+      }); return;
+    }
     if (reorderLocked()) { announce("Reordering is disabled while searching."); renderBoard(latestBoard); restoreFocus(focus); return; }
-    var snapshot = latestBoard, destination = sortByOrder(visibleTasks().filter(function (item) { return item.task_id !== task.task_id && item.project_key === task.project_key && item.work_status === "active" && item.priority === next; }));
-    destination.push(task);
-    mutate("/api/tasks/reorder", "POST", { project_key: task.project_key, task_ids: destination.map(function (item) { return item.task_id; }), priority: next }).then(function (response) {
-      mergeReorderedTasks(response.tasks || []); return refreshAfterMutation(focus, "Set priority " + PRIORITY_LABELS[next] + ".");
-    }).catch(function (error) { latestBoard = snapshot; renderBoard(snapshot); restoreFocus(focus); announce("Priority change failed. " + error.message); toast(error.message, true); });
+    queueReorder("tasks:" + task.project_key, function () {
+      var currentTask = latestBoard.tasks.find(function (item) { return item.task_id === task.task_id; }) || task;
+      var snapshot = latestBoard, destination = sortByOrder(visibleTasks().filter(function (item) { return item.task_id !== currentTask.task_id && item.project_key === currentTask.project_key && item.work_status === "active" && item.priority === next; }));
+      destination.push(currentTask);
+      return mutate("/api/tasks/reorder", "POST", { project_key: currentTask.project_key, task_ids: destination.map(function (item) { return item.task_id; }), priority: next }).then(function (response) {
+        mergeReorderedTasks(response.tasks || []); return refreshAfterMutation(focus, "Set priority " + PRIORITY_LABELS[next] + ".");
+      }).catch(function (error) { latestBoard = snapshot; renderBoard(snapshot); restoreFocus(focus); announce("Priority change failed. " + error.message); toast(error.message, true); });
+    });
   }
   function prioritySelect(task) {
     var select = element("select", "priority-select work-edit");
@@ -295,7 +371,7 @@
     data.projects.forEach(function (project) {
       var row = element("div", "project-nav-row" + (selectedProject === project.project_key ? " active" : "")); row.dataset.projectKey = project.project_key;
       var drag = element("button", "project-drag", "⋮⋮"); drag.type = "button"; drag.draggable = !reorderLocked(); drag.disabled = reorderLocked(); drag.setAttribute("aria-label", "Drag project " + project.name); drag.dataset.focusKey = "project-drag-" + project.project_key; drag.addEventListener("dragstart", function (event) { draggedProject = project.project_key; event.dataTransfer.setData("text/plain", project.project_key); }); drag.addEventListener("dragend", function () { draggedProject = null; });
-      var select = element("button", "project-select"); select.type = "button"; select.setAttribute("aria-pressed", String(selectedProject === project.project_key)); select.append(element("span", "project-nav-name", project.name), element("span", "nav-count", String(project.counts.active))); select.addEventListener("click", function () { selectedProject = project.project_key; queueMode = "all"; renderBoard(latestBoard); });
+      var select = element("button", "project-select"); select.type = "button"; select.setAttribute("aria-pressed", String(selectedProject === project.project_key)); select.append(element("span", "project-nav-name", project.name), element("span", "nav-count", String(project.counts.active))); select.addEventListener("click", function () { afterPendingEdits(function () { selectedProject = project.project_key; queueMode = "all"; renderBoard(latestBoard); }); });
       var projectMoves = element("span", "project-moves"), up = element("button", "project-move", "↑"), down = element("button", "project-move", "↓"); up.type = down.type = "button"; up.title = "Move project up"; down.title = "Move project down"; up.setAttribute("aria-label", "Move project up " + project.name); down.setAttribute("aria-label", "Move project down " + project.name); up.dataset.focusKey = "project-up-" + project.project_key; down.dataset.focusKey = "project-down-" + project.project_key; up.disabled = down.disabled = reorderLocked(); up.addEventListener("click", function () { moveProject(project.project_key, -1, up.dataset.focusKey); }); down.addEventListener("click", function () { moveProject(project.project_key, 1, down.dataset.focusKey); }); projectMoves.append(up, down);
       row.addEventListener("dragover", function (event) { if (draggedProject && !reorderLocked()) event.preventDefault(); }); row.addEventListener("drop", function (event) { event.preventDefault(); reorderProject(draggedProject, project.project_key, "project-drag-" + draggedProject); });
       row.append(drag, select, projectMoves); list.appendChild(row);
@@ -307,10 +383,16 @@
     var before = direction < 0 ? keys[swap] : keys[swap + 1]; reorderProject(projectKey, before, focus);
   }
   function reorderProject(projectKey, beforeKey, focus) {
+    if (hasUnsettledWorkEdits() || projectDescriptionDirty()) {
+      afterPendingEdits(function () { reorderProject(projectKey, beforeKey, focus); }); return;
+    }
     if (!projectKey || reorderLocked()) { announce("Reordering is disabled while searching."); return; }
-    var snapshot = latestBoard.projects.slice(), keys = snapshot.map(function (project) { return project.project_key; }).filter(function (key) { return key !== projectKey; });
-    var index = keys.indexOf(beforeKey); keys.splice(index < 0 ? keys.length : index, 0, projectKey);
-    mutate("/api/projects/reorder", "POST", { project_keys: keys }).then(function () { return fetchBoard(true); }).then(function () { restoreFocus(focus); announce("Project order saved."); }).catch(function (error) { latestBoard.projects = snapshot; renderProjectSidebar(latestBoard); restoreFocus(focus); announce("Project move failed. " + error.message); toast(error.message, true); });
+    if (projectKey === beforeKey) { announce("Project order is unchanged."); restoreFocus(focus); return; }
+    queueReorder("projects", function () {
+      var snapshot = latestBoard.projects.slice(), keys = snapshot.map(function (project) { return project.project_key; }).filter(function (key) { return key !== projectKey; });
+      var index = keys.indexOf(beforeKey); keys.splice(index < 0 ? keys.length : index, 0, projectKey);
+      return mutate("/api/projects/reorder", "POST", { project_keys: keys }).then(function () { return fetchBoard(true); }).then(function () { restoreFocus(focus); announce("Project order saved."); }).catch(function (error) { latestBoard.projects = snapshot; renderProjectSidebar(latestBoard); restoreFocus(focus); announce("Project move failed. " + error.message); toast(error.message, true); });
+    });
   }
   function selectedProjectData() { return latestBoard && latestBoard.projects.find(function (project) { return project.project_key === selectedProject; }); }
   function renderProjectDetail() {
@@ -318,7 +400,10 @@
     $("project-name").textContent = project.name; $("project-path").textContent = project.path;
     $("project-counts").textContent = project.counts.active + " active · " + project.counts.today + " today · " + project.counts.needs_input + " needs input";
     var description = $("project-description"); if (document.activeElement !== description && !description.getAttribute("aria-invalid")) description.value = project.description || "";
-    $("description-limit").textContent = description.value.length + " / 1000";
+    $("description-limit").textContent = description.value.length + " / 10000";
+    var inherited = project.inherited_descriptions || [], inheritedRoot = $("project-inherited"), inheritedList = $("project-inherited-list");
+    inheritedRoot.hidden = inherited.length === 0; inheritedList.replaceChildren();
+    inherited.forEach(function (note) { var block = element("div", "inherited-note"); block.append(element("span", "inherited-source", note.source_key), element("p", "", note.description)); inheritedList.appendChild(block); });
   }
   function renderBoard(data) {
     latestBoard = data; editStates = [];
@@ -336,7 +421,17 @@
   }
   function fetchBoard(force) {
     if (!force && hasProtectedWorkControls()) return Promise.resolve();
-    return request("/api/board").then(function (data) { $("board-error").hidden = true; renderBoard(data); }).catch(function (error) { $("board-error").hidden = false; $("board-error").textContent = error.message; });
+    var seq = ++boardSeq;
+    return request("/api/board").then(function (data) {
+      if (seq !== boardSeq || hasProtectedWorkControls()) return;
+      $("board-error").hidden = true; renderBoard(data);
+    }).catch(function (error) {
+      if (seq !== boardSeq) return;
+      $("board-error").hidden = false; $("board-error").textContent = error.message;
+    });
+  }
+  function scheduleBoardPoll() {
+    boardTimer = setTimeout(function () { fetchBoard().finally(scheduleBoardPoll); }, 10000);
   }
 
   function fetchSessions() {
@@ -362,7 +457,10 @@
   function updateHistoryActions(meta) {
     ["claude", "codex"].forEach(function (provider) {
       var action = meta.actions[provider], button = $("thread-" + provider), reason = $("thread-" + provider + "-reason");
-      button.textContent = action.label; button.disabled = !action.available;
+      var busy = Boolean(launchesInFlight[meta.session_id + ":" + provider]);
+      button.textContent = action.label; button.disabled = !action.available || busy;
+      button.dataset.launchKey = meta.session_id + ":" + provider; button.dataset.launchAvailable = String(action.available);
+      if (busy) button.setAttribute("aria-busy", "true"); else button.removeAttribute("aria-busy");
       reason.textContent = action.available ? "" : (action.reason || "Unavailable");
       if (action.available) button.removeAttribute("aria-describedby"); else button.setAttribute("aria-describedby", reason.id);
     });
@@ -406,35 +504,43 @@
     if (board) fetchBoard(); else fetchSessions();
   }
   Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (tab) {
-    tab.addEventListener("click", function () { flushPendingEdits(false).then(function () { activateTab(tab); }); });
+    tab.addEventListener("click", function () { afterPendingEdits(function () { activateTab(tab); }); });
   });
   Array.prototype.forEach.call(document.querySelectorAll(".work-scope"), function (button) {
     button.addEventListener("click", function () {
-      flushPendingEdits(false).then(function () {
+      afterPendingEdits(function () {
         queueMode = button.dataset.scope; selectedProject = null;
         if (latestBoard) renderBoard(latestBoard);
       });
     });
   });
-  $("group-by").addEventListener("change", function () { groupBy = $("group-by").value; if (latestBoard) renderBoard(latestBoard); });
+  $("group-by").addEventListener("change", function () {
+    var next = $("group-by").value, previous = groupBy;
+    afterPendingEdits(function () { groupBy = next; if (latestBoard) renderBoard(latestBoard); }).then(function (changed) {
+      if (!changed) $("group-by").value = previous;
+    });
+  });
   $("work-search").addEventListener("input", debounce(function () { if (latestBoard && !hasProtectedWorkControls()) renderBoard(latestBoard); }, 120));
-  $("project-description").addEventListener("input", function () { $("description-limit").textContent = $("project-description").value.length + " / 1000"; });
-  $("cancel-description").addEventListener("click", function () { var project = selectedProjectData(); if (!project) return; $("project-description").value = project.description || ""; $("project-description").removeAttribute("aria-invalid"); $("description-error").hidden = true; renderProjectDetail(); });
+  $("project-description").addEventListener("input", function () { $("description-limit").textContent = $("project-description").value.length + " / 10000"; });
+  $("cancel-description").addEventListener("click", function () { var project = selectedProjectData(); if (!project || $("cancel-description").disabled) return; $("project-description").value = project.description || ""; $("project-description").removeAttribute("aria-invalid"); $("description-error").hidden = true; renderProjectDetail(); });
   $("save-description").addEventListener("click", function () {
     var project = selectedProjectData(), description = $("project-description"), value = description.value; if (!project) return;
-    var button = $("save-description"); button.disabled = true; description.setAttribute("aria-busy", "true");
+    var button = $("save-description"), cancel = $("cancel-description"); button.disabled = true; cancel.disabled = true; description.disabled = true; description.setAttribute("aria-busy", "true");
     mutate("/api/projects/" + encodeURIComponent(project.project_key), "PATCH", { description: value }).then(function (response) {
       project.description = response.project.description; description.removeAttribute("aria-invalid"); $("description-error").hidden = true; announce("Project description saved."); toast("Project description saved");
-    }).catch(function (error) { description.setAttribute("aria-invalid", "true"); $("description-error").textContent = "Could not save: " + error.message; $("description-error").hidden = false; description.focus(); announce("Description save failed. Your text is retained."); toast(error.message, true); }).finally(function () { button.disabled = false; description.removeAttribute("aria-busy"); });
+    }).catch(function (error) { description.setAttribute("aria-invalid", "true"); $("description-error").textContent = "Could not save: " + error.message; $("description-error").hidden = false; announce("Description save failed. Your text is retained."); toast(error.message, true); }).finally(function () { button.disabled = false; cancel.disabled = false; description.disabled = false; description.removeAttribute("aria-busy"); if (description.getAttribute("aria-invalid")) description.focus(); });
   });
   $("search-input").addEventListener("input", debounce(fetchSessions, 250));
   $("here-toggle").addEventListener("change", fetchSessions);
   $("thread-search").addEventListener("input", debounce(function () { renderTranscript($("thread-search").value); }, 150));
   function launchActiveThread(provider) {
     if (!activeSessionMeta) return;
+    var launchKey = activeSessionMeta.session_id + ":" + provider, button = $("thread-" + provider);
+    if (launchesInFlight[launchKey]) return;
+    launchesInFlight[launchKey] = true; setLaunchBusy(launchKey, true);
     mutate("/api/sessions/" + encodeURIComponent(activeSessionMeta.session_id) + "/launch", "POST", { provider: provider, full_access: fullAccessEnabled() }).then(function () {
       toast("Opened " + providerName(provider) + " in Terminal");
-    }).catch(function (error) { toast(error.message, true); });
+    }).catch(function (error) { toast(error.message, true); }).finally(function () { delete launchesInFlight[launchKey]; setLaunchBusy(launchKey, false); if (activeSessionMeta) updateHistoryActions(activeSessionMeta); });
   }
   $("thread-claude").addEventListener("click", function () { launchActiveThread("claude"); });
   $("thread-codex").addEventListener("click", function () { launchActiveThread("codex"); });
@@ -442,6 +548,6 @@
     csrfToken = meta.csrf_token;
     if (meta.here_only_forced) { $("here-toggle").checked = true; $("here-toggle").disabled = true; }
     return fetchBoard();
-  }).then(function () { boardTimer = setInterval(fetchBoard, 10000); }).catch(function (error) { toast(error.message, true); });
-  window.addEventListener("beforeunload", function () { if (boardTimer) clearInterval(boardTimer); flushPendingEdits(true); });
+  }).then(scheduleBoardPoll).catch(function (error) { toast(error.message, true); });
+  window.addEventListener("pagehide", function () { if (boardTimer) clearTimeout(boardTimer); flushDirtyEditsOnPageHide(); });
 })();

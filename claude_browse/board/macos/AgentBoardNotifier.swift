@@ -61,7 +61,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         requestPermission { [weak self] granted in
             guard let self else { return }
             guard granted else {
-                self.finish()
+                self.fallbackAndFinish(parsed)
                 return
             }
             let content = UNMutableNotificationContent()
@@ -76,9 +76,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 content: content,
                 trigger: nil
             )
-            self.center.add(request) { _ in
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    self.finish()
+            self.center.add(request) { error in
+                DispatchQueue.main.async {
+                    if error != nil {
+                        self.fallbackAndFinish(parsed)
+                    } else {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            self.finish()
+                        }
+                    }
                 }
             }
         }
@@ -94,6 +100,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func finish() {
         NSApplication.shared.terminate(nil)
+    }
+
+    private func fallbackAndFinish(_ arguments: NotificationArguments) {
+        let quote: (String) -> String = { value in
+            "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        let script = "display notification \(quote(arguments.message)) "
+            + "with title \(quote(arguments.title)) sound name \"default\""
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        try? process.run()
+        finish()
     }
 }
 

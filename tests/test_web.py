@@ -101,6 +101,8 @@ def web_server(monkeypatch):
     server.folder_prefixes = ()
     server.session_limit = 100
     server.csrf_token = "test-token"
+    server.edit_revision_lock = threading.Lock()
+    server.edit_revisions = {}
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
@@ -305,7 +307,16 @@ def test_web_assets_define_dense_work_and_history_contract():
     assert 'setAttribute("aria-invalid", "true")' in javascript
     assert 'setAttribute("role", "alert")' in javascript
     assert "flushPendingEdits" in javascript
+    assert "afterPendingEdits" in javascript
+    assert "flushDirtyEditsOnPageHide" in javascript
+    assert "_edit_revision" in javascript
+    assert "editRevisionCounters" in javascript
+    assert 'window.addEventListener("pagehide"' in javascript
+    assert "boardRenderPending" in javascript
+    assert "setLaunchBusy" in javascript
     assert "rowMutationTails" in javascript
+    assert "delete rowMutationTails[state.taskId]" in javascript
+    assert "Save or cancel the project description before changing views." in javascript
     assert "hasProtectedWorkControls" in javascript
     assert "History is read-only" in html
     assert "disabled-reason" in stylesheet
@@ -328,7 +339,7 @@ def test_web_assets_define_project_priority_and_reorder_contract():
         "work-announcer",
     ):
         assert f'id="{element_id}"' in html
-    assert 'maxlength="1000"' in html
+    assert 'maxlength="10000"' in html
     assert 'data-scope="all"' in html
     assert 'data-scope="today"' in html
     assert 'data-scope="closed"' in html
@@ -633,6 +644,45 @@ def test_launch_is_server_built_and_rejects_missing_project(web_server, monkeypa
             base + f"/api/tasks/{missing['task_id']}/launch", "POST", {}
         )
     assert exc_info.value.code == 400
+
+
+@pytest.mark.parametrize("provider", (None, 7, False, "", "cursor"))
+def test_task_launch_requires_explicit_valid_provider(web_server, monkeypatch, provider):
+    base, _server = web_server
+    opened = []
+    monkeypatch.setattr(web.commands, "open_in_terminal", opened.append)
+    _board_thread("explicit-provider", cwd=tempfile.gettempdir(), name="Explicit")
+    _status, board = _get_json(base + "/api/board")
+    task = board["tasks"][0]
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        _mutate_json(
+            base + f"/api/tasks/{task['task_id']}/launch",
+            "POST",
+            {"provider": provider, "full_access": False},
+        )
+    assert exc_info.value.code == 400
+    assert opened == []
+
+
+def test_stale_client_edit_revision_cannot_overwrite_newer_value(web_server):
+    base, _server = web_server
+    _board_thread("revisioned", cwd=tempfile.gettempdir(), name="Original")
+    _status, board = _get_json(base + "/api/board")
+    task = next(task for task in board["tasks"] if task["session_id"] == "revisioned")
+    path = base + f"/api/tasks/{task['task_id']}"
+
+    _mutate_json(
+        path,
+        "PATCH",
+        {"title": "Newest", "_edit_client": "browser-tab", "_edit_revision": 2},
+    )
+    _status, stale = _mutate_json(
+        path,
+        "PATCH",
+        {"title": "Stale", "_edit_client": "browser-tab", "_edit_revision": 1},
+    )
+
+    assert stale["task"]["title"] == "Newest"
 
 
 @pytest.mark.parametrize(
