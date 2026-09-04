@@ -340,3 +340,126 @@ def test_needs_input_notification_title_carries_folder(tmp_path, monkeypatch):
     })
 
     assert calls == [("[claude-browse] Sonnet needs input", "agent board build")]
+
+
+# ---------------------------------------------------------------------------
+# Provider flag, Codex PermissionRequest, unattended done_at (2026-09)
+# ---------------------------------------------------------------------------
+
+def test_parse_provider_defaults_to_claude_and_accepts_both_forms():
+    assert hook._parse_provider([]) == "claude"
+    assert hook._parse_provider(["hook"]) == "claude"
+    assert hook._parse_provider(["hook", "--provider", "codex"]) == "codex"
+    assert hook._parse_provider(["hook", "--provider=Codex"]) == "codex"
+    assert hook._parse_provider(["hook", "--provider"]) == "claude"  # dangling flag never breaks
+
+
+def test_session_start_records_provider_and_later_events_keep_it(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+
+    hook.dispatch({"hook_event_name": "SessionStart", "session_id": "c1", "cwd": "/tmp/proj",
+                   "model": "gpt-5-codex"}, provider="codex")
+    assert store.get("c1")["provider"] == "codex"
+    assert store.get("c1")["model_label"] == "Codex"
+
+    hook.dispatch({"hook_event_name": "UserPromptSubmit", "session_id": "c1", "cwd": "/tmp/proj",
+                   "prompt": "backfill toggl hours for august"}, provider="codex")
+    row = store.get("c1")
+    assert row["provider"] == "codex" and row["state"] == "working"
+    assert row["name"] == "backfill toggl hours for august"
+
+
+def test_codex_permission_request_maps_to_needs_input(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    store.upsert("c2", host="air", cwd="/Users/me/team-operations", state="working",
+                 name="deploy sweep", provider="codex", model_label="Codex")
+
+    hook.dispatch({"hook_event_name": "PermissionRequest", "session_id": "c2",
+                   "cwd": "/Users/me/team-operations", "tool_name": "shell",
+                   "tool_input": {"command": "gcloud run jobs deploy"}}, provider="codex")
+
+    row = store.get("c2")
+    assert row["state"] == "needs-input"
+    assert row["pending_alert"] == "needs-input"
+    assert calls == [("[team-operations] Codex needs input", "deploy sweep")]
+
+
+def test_stop_after_long_turn_marks_done_short_turn_does_not(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    monkeypatch.delenv("AGENT_BOARD_UNATTENDED_MIN_TURN_S", raising=False)
+
+    store.upsert("long", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 400)
+    hook.dispatch({"hook_event_name": "Stop", "session_id": "long", "cwd": "/tmp/p"})
+    row = store.get("long")
+    assert store.is_unattended(row) is True
+    assert 399 < row["done_turn_s"] < 405
+    assert row["pending_alert"] == "done"  # banner path unchanged
+
+    # 90s: banner + pending alert (>60s) but NOT unattended (<300s default)
+    store.upsert("short", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 90)
+    hook.dispatch({"hook_event_name": "Stop", "session_id": "short", "cwd": "/tmp/p"})
+    row = store.get("short")
+    assert row["pending_alert"] == "done"
+    assert row["done_at"] is None
+
+
+def test_unattended_threshold_is_env_tunable(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    monkeypatch.setenv("AGENT_BOARD_UNATTENDED_MIN_TURN_S", "30")
+
+    store.upsert("t", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 45)
+    hook.dispatch({"hook_event_name": "Stop", "session_id": "t", "cwd": "/tmp/p"})
+    assert store.get("t")["done_at"] is not None
+
+    monkeypatch.setenv("AGENT_BOARD_UNATTENDED_MIN_TURN_S", "not-a-number")
+    assert hook._unattended_min_turn_s() == 300.0
+
+
+def test_new_prompt_is_the_implicit_ack(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    store.upsert("p", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 900)
+    hook.dispatch({"hook_event_name": "Stop", "session_id": "p", "cwd": "/tmp/p"})
+    assert store.is_unattended(store.get("p")) is True
+
+    hook.dispatch({"hook_event_name": "UserPromptSubmit", "session_id": "p", "cwd": "/tmp/p",
+                   "prompt": "thanks, now run it for september"})
+    row = store.get("p")
+    assert row["done_at"] is None and row["state"] == "working"
+    assert store.is_unattended(row) is False
+
+
+def test_session_end_preserves_done_at(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    store.upsert("z", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 900)
+    hook.dispatch({"hook_event_name": "Stop", "session_id": "z", "cwd": "/tmp/p"})
+    hook.dispatch({"hook_event_name": "SessionEnd", "session_id": "z", "cwd": "/tmp/p",
+                   "reason": "exit"})
+    row = store.get("z")
+    assert row["state"] == "ended" and row["done_at"] is not None
+    assert store.is_unattended(row) is True
+
+
+def test_entry_script_accepts_provider_flag_end_to_end(tmp_path, monkeypatch):
+    """The real shim, the real argv, a Codex-shaped payload on stdin."""
+    db = tmp_path / "state.db"
+    env = {**dict(__import__("os").environ), "AGENT_BOARD_DB_PATH": str(db)}
+    payload = json.dumps({"hook_event_name": "SessionStart", "session_id": "codex-e2e",
+                          "cwd": "/tmp/proj", "model": "gpt-5-codex", "transcript_path": "/nope",
+                          "permission_mode": "default", "source": "startup"})
+    result = subprocess.run(
+        [sys.executable, str(ENTRY_SCRIPT), "hook", "--provider", "codex"],
+        input=payload, capture_output=True, text=True, env=env, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+
+    monkeypatch.setattr(store, "_DB_PATH", db)
+    monkeypatch.setattr(store, "_conn_cache", None)
+    row = store.get("codex-e2e")
+    assert row["provider"] == "codex" and row["model_label"] == "Codex"

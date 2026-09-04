@@ -1,16 +1,28 @@
-"""Claude Code hook dispatcher.
+"""Claude Code / Codex hook dispatcher.
 
 Entry point for SessionStart / UserPromptSubmit / Stop / Notification /
-SessionEnd. Must never break a session: every path through main() exits 0,
-and all local work is synchronous SQLite (fast). Network work (Haiku naming,
-Firestore/Slack sync) is deliberately NOT triggered from here -- it runs from
-a separate `agent-board sync` command registered as an async hook, so a slow
-or failing network call can never block a turn (see board/sync.py, U6).
+PermissionRequest / SessionEnd. Must never break a session: every path
+through main() exits 0, and all local work is synchronous SQLite (fast).
+Network work (Haiku naming, Firestore/Slack sync) is deliberately NOT
+triggered from here -- it runs from a separate `agent-board sync` command
+registered as an async hook, so a slow or failing network call can never
+block a turn (see board/sync.py, U6).
+
+Providers: Claude Code and Codex both deliver the same hook envelope on
+stdin (`hook_event_name`, `session_id`, `cwd`, `model`, `transcript_path`,
+`prompt`), so one dispatcher serves both. The only thing the payload does
+NOT say is which CLI sent it, so the hook is registered as
+`agent-board hook --provider codex` in ~/.codex/hooks.json and plain
+`agent-board hook` (Claude) in ~/.claude/settings.json; the provider is
+stored on the row and drives every resume command downstream. Codex has no
+`Notification` event; its blocked-on-you signal is `PermissionRequest`,
+which maps to the same needs-input state.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 import time
@@ -19,6 +31,28 @@ from pathlib import Path
 from claude_browse.board import notify, store
 
 _NOTIFY_AFTER_S = 60
+
+
+def _unattended_min_turn_s() -> float:
+    """A Stop closing a turn at least this long marks the session as
+    "finished, waiting for you" (store.mark_done). Deliberately much higher
+    than _NOTIFY_AFTER_S: the local banner is cheap and fires for any
+    minute-plus turn, but the unattended machinery (Slack re-surfacing,
+    morning briefing, the web board) is for runs you plausibly walked away
+    from, and nagging about a 70-second turn you sat through is exactly the
+    noise it exists to remove. Env-tunable; seconds."""
+    raw = os.environ.get("AGENT_BOARD_UNATTENDED_MIN_TURN_S", "").strip()
+    try:
+        value = float(raw) if raw else 300.0
+    except ValueError:
+        value = 300.0
+    return max(value, 0.0)
+
+
+# Codex's equivalent of Claude's needs-input Notification. Codex has no
+# Notification event at all, so this is the only blocked-on-you signal it
+# emits; it carries tool_name/tool_input, none of which change the state.
+_NEEDS_INPUT_EVENTS = {"PermissionRequest"}
 
 # Fail-safe denylist, not an allowlist: any notification_type NOT in this set
 # triggers needs-input by default, including one Claude Code introduces in a
@@ -172,7 +206,22 @@ def _name_from_prompt(prompt: str, *, max_words: int = 6, max_chars: int = 60) -
     return name[:max_chars]
 
 
-def dispatch(payload: dict) -> None:
+def _parse_provider(argv: list[str]) -> str:
+    """`agent-board hook [--provider NAME]` -- default claude. Tolerant of
+    anything else on the line; a hook must never fail on argv parsing."""
+    for i, arg in enumerate(argv):
+        if arg == "--provider" and i + 1 < len(argv):
+            candidate = argv[i + 1].strip().lower()
+            if candidate:
+                return candidate
+        elif arg.startswith("--provider="):
+            candidate = arg.split("=", 1)[1].strip().lower()
+            if candidate:
+                return candidate
+    return store.DEFAULT_PROVIDER
+
+
+def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> None:
     event = payload.get("hook_event_name")
     session_id = payload.get("session_id")
     if not session_id:
@@ -190,18 +239,29 @@ def dispatch(payload: dict) -> None:
                 state="idle",
                 name=_placeholder_name(cwd),
                 name_source="provisional",
+                provider=provider,
                 **({"model_label": model_label} if model_label else {}),
             )
-        elif model_label:
-            store.upsert(session_id, model_label=model_label)
+        else:
+            fields: dict[str, object] = {"provider": provider}
+            if model_label:
+                fields["model_label"] = model_label
+            store.upsert(session_id, **fields)
         store.heartbeat(session_id)
 
     elif event == "UserPromptSubmit":
-        fields: dict[str, object] = {
+        fields = {
             "host": _hostname(),
             "cwd": cwd,
             "state": "working",
             "working_since": time.time(),
+            "provider": provider,
+            # A new prompt means you are back in this thread: whatever
+            # finished before is no longer "waiting for you". This is the
+            # implicit ack that keeps the unattended list honest without
+            # the user ever having to press anything.
+            "done_at": None,
+            "done_turn_s": None,
         }
         if model_label:
             fields["model_label"] = model_label
@@ -217,31 +277,37 @@ def dispatch(payload: dict) -> None:
     elif event == "Stop":
         working_since = row.get("working_since") if row else None
         _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
-        if working_since and (time.time() - working_since) > _NOTIFY_AFTER_S:
+        turn_s = (time.time() - working_since) if working_since else 0.0
+        if working_since and turn_s > _NOTIFY_AFTER_S:
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify(_notify_title("done", cwd, model_label), _notify_body(name, cwd))
             # Same trigger as the local notification, so the async sync hook
             # knows to post a fresh Slack message too -- chat.update alone
             # doesn't re-notify Slack channel members (see sync.post_alert).
             store.set_pending_alert(session_id, "done")
+        if working_since and turn_s >= _unattended_min_turn_s():
+            store.mark_done(session_id, turn_s)
 
-    elif event == "Notification":
+    elif event == "Notification" or event in _NEEDS_INPUT_EVENTS:
         notification_type = payload.get("notification_type")
-        if notification_type not in _IGNORED_NOTIFICATION_TYPES:
+        if event in _NEEDS_INPUT_EVENTS or notification_type not in _IGNORED_NOTIFICATION_TYPES:
             _set_state(session_id, "needs-input", cwd=cwd, model_label=model_label or None)
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify(_notify_title("needs input", cwd, model_label), _notify_body(name, cwd))
             store.set_pending_alert(session_id, "needs-input")
 
     elif event == "SessionEnd":
+        # done_at deliberately survives SessionEnd: a run that finished and
+        # whose window was then closed is the canonical forgotten thread.
         _set_state(session_id, "ended", cwd=cwd, model_label=model_label or None)
 
 
 def main() -> None:
     try:
+        provider = _parse_provider(sys.argv[1:])
         raw = sys.stdin.read()
         payload = json.loads(raw)
-        dispatch(payload)
+        dispatch(payload, provider=provider)
     except Exception:
         pass
     finally:

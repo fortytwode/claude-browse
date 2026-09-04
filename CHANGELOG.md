@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Codex sessions on the Agent Board.** Codex's hooks engine is
+  Claude-compatible (same events, same stdin envelope), so the installer now
+  writes `~/.codex/hooks.json` registering `agent-board hook --provider
+  codex`; `PermissionRequest` maps to `needs-input`. The provider is stored
+  per row and every surface (statusline, `aj`, Slack board, alerts) builds
+  the resume command from it, so Codex threads get `codex resume <id>`.
+- **Unattended completions.** A turn of at least
+  `AGENT_BOARD_UNATTENDED_MIN_TURN_S` (default 300s) marks the session
+  *finished, not picked up* (`done_at`); a new prompt clears it, or
+  `agent-board ack <id|name>` acknowledges it. `aj` and the Slack board lead
+  with that list. The Firestore doc carries `provider`, `folder`, `done_at`,
+  `done_turn_s`, `acked_at`, `resume_command` and is written with
+  `merge=True` so a downstream sweep can own its own fields on the same doc.
+- `python3 scripts/install_agent_board.py --check` audits hook wiring
+  without writing (exit 1 on drift).
+
+### Changed
+- A plain "done" no longer posts an immediate Slack message (it could not
+  distinguish a run you walked away from and a turn you watched; an
+  interactive evening produced ~15 alerts from 3 threads). Local banner and
+  `needs-input` alerts are unchanged. `AGENT_BOARD_IMMEDIATE_DONE_ALERT=1`
+  restores the old behaviour.
+
+### Fixed
+- **Every Slack alert posted twice, and session names flip-flopped.** The
+  sync hook command embeds the interpreter path, which changes from system
+  python to `.venv/bin/python` once the board-sync venv exists; the
+  installer only ever appended, so both variants fired on every Stop. Two
+  concurrent pushes then raced the Haiku namer, and the loser fell back to
+  Claude Code's own session title, so one session alternated between two
+  names seconds apart. The installer now replaces stale variants and
+  collapses exact duplicates, in both `settings.json` and `hooks.json`.
+
 ### Fixed
 - **Fresh sessions could disappear when one CodeX fork poisoned the shared
   refresh.** Forked rollout files repeat ancestor metadata, and the indexer

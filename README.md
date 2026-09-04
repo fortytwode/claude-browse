@@ -323,17 +323,42 @@ availability, experimental status, and auth state when a provider reports one.
 
 ## Agent Board (live session status + notifications)
 
-Turns every Claude Code session into a tracked, auto-named thread with a
-live state (`working` / `idle` / `needs-input` / `gone` / `ended`), shown in
-your statusline, pushed as a native macOS notification (with sound) on
-completion or when blocked, and (optionally) mirrored to Firestore + a
-private Slack channel so you can see every session across multiple
-machines in one place.
+Turns every Claude Code **and Codex** session into a tracked, auto-named
+thread with a live state (`working` / `idle` / `needs-input` / `gone` /
+`ended`), shown in your statusline, pushed as a native macOS notification
+(with sound) on completion or when blocked, and (optionally) mirrored to
+Firestore + a private Slack channel so you can see every session across
+multiple machines in one place.
 
 Native notification titles are formatted as `[folder] Model state` (for
 example `[claude-browse] Codex needs input` or `[team-operations] Opus
 done`) so the repo and model are visible even when macOS truncates the
 message body.
+
+**Unattended completions (the thing the board is really for).** A turn that
+runs at least `AGENT_BOARD_UNATTENDED_MIN_TURN_S` (default 300s) marks the
+session as *finished, not picked up* when it ends. Sending the session a new
+prompt clears that automatically (you came back), or acknowledge it
+explicitly:
+
+```bash
+agent-board ack <session-id-prefix | name-substring>
+```
+
+`aj` and the Slack board lead with a `⏳ finished, not picked up` section
+listing exactly these, oldest first, each with its resume command. The
+cross-machine re-surfacing (a Slack ping only once you have NOT come back
+for a while, escalating once, then folding into the morning briefing) lives
+in the team-operations repo (`team-planning/agent_board/`), reading the
+same Firestore docs this board writes.
+
+Because of that, a plain "done" no longer posts a fresh Slack message the
+instant a turn ends (it could not tell a run you walked away from apart
+from a turn you sat and watched, and on an interactive evening that meant a
+dozen-plus alerts from three threads). The local banner still fires, and
+`needs-input` is still an immediate Slack post. To restore the immediate
+"done" Slack post: `export AGENT_BOARD_IMMEDIATE_DONE_ALERT=1` in the
+environment the hooks run in.
 
 **Notification persistence:** the banner plays a sound (your System
 Settings > Sound > Alert sound), but still auto-dismisses after a few
@@ -353,15 +378,41 @@ you miss the banner entirely -- it never auto-dismisses.
 ```
 
 This idempotently wires hooks + a statusLine command into
-`~/.claude/settings.json` (backing it up first; safe to re-run), symlinks
-`agent-board`, disables Claude Code's built-in folderless push
-notifications so Agent Board is the only local alert source, and reports:
+`~/.claude/settings.json` and hooks into `~/.codex/hooks.json` (backing
+each up first; safe to re-run), symlinks `agent-board`, disables Claude
+Code's built-in folderless push notifications so Agent Board is the only
+local alert source, and reports:
 - whether hooks/statusLine were already wired (skips if so)
+- any **stale or duplicate** registrations it removed. The sync hook
+  command embeds the interpreter path, which changes once the board-sync
+  venv exists; the old installer appended the new variant and left the old
+  one, so both fired and every Slack alert posted twice. The installer now
+  replaces stale variants and collapses exact duplicates.
 - the local notification setting (`agentPushNotifEnabled`, kept false to
   avoid duplicate lower-information banners) and how many of your recent
   sessions already have an `ai-title` -- the
   namer only calls Haiku for the rest)
 - live Firestore + Slack connectivity (`agent-board sync check`)
+
+To audit without changing anything (exit 1 on any drift):
+
+```bash
+python3 scripts/install_agent_board.py --check
+```
+
+**Codex.** Codex's hooks engine is Claude-compatible: same event names,
+same stdin envelope (`hook_event_name`, `session_id`, `cwd`, `model`),
+configured in `~/.codex/hooks.json` as `{"hooks": {Event: [...]}}` with
+`timeout_sec`. The installer registers `agent-board hook --provider codex`
+on `SessionStart` / `UserPromptSubmit` / `Stop` / `PermissionRequest` /
+`SessionEnd` (Codex has no `Notification` event; `PermissionRequest` is its
+blocked-on-you signal and maps to `needs-input`). The provider is stored on
+the row, so Codex threads get `codex resume <id>` on every surface, never a
+`claude --resume` that cannot open them. Hooks are on by default in current
+Codex releases; if your `~/.codex/config.toml` sets `[features] hooks =
+false` the installer says so. Codex rows keep their prompt-derived name
+(the Haiku namer reads Claude transcripts only, for now). Pass `--no-codex`
+to skip.
 
 Add this to your shell rc (not done automatically) for `work <name>`
 (tmux attach-or-create) and `aj` (board glance):
@@ -378,6 +429,7 @@ notifications, `aj`) still works fully -- sync just no-ops and logs to
 ```bash
 python3 -m venv .venv
 ./.venv/bin/pip install -e ".[board-sync]"
+./install.sh   # re-run so the sync hooks point at the venv (old variant is removed)
 ```
 
 Firestore uses Application Default Credentials (`gcloud auth
@@ -387,6 +439,12 @@ application-default login`). Point it at YOUR project via
 needs `SLACK_BOT_TOKEN` -- set in your environment, or in
 `~/team-operations/.env` (auto-detected as a fallback, since hooks run
 with a minimal inherited environment that usually won't have it exported).
+
+Each session's Firestore doc (`agent_board_sessions/<host>:<session_id>`)
+carries `provider`, `folder`, `done_at`, `done_turn_s`, `acked_at` and a
+ready-to-paste `resume_command` alongside the live state, and is written
+with `merge=True` so fields owned by downstream consumers (the unattended
+sweep's `alert_count` / `last_alert_at` / `alert_ts`) survive every push.
 
 **Rolling out to a second laptop:**
 
