@@ -82,7 +82,7 @@ def test_mutation_uses_transactional_row_for_close_side_effects(tmp_path, monkey
 def test_priority_defaults_validates_and_survives_hook_updates(tmp_path):
     store.upsert("priority", cwd=str(tmp_path), name="Prioritize", provider="claude")
     task = work_items.ensure_for_session(store.get("priority"))
-    assert task["priority"] == "normal"
+    assert task["priority"] == "urgent"
     assert isinstance(task["position"], int)
 
     updated, publish_session = work_items.mutate(task["task_id"], priority="urgent")

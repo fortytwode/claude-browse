@@ -1186,6 +1186,22 @@ test("column resize controls are unique per priority group and retain focus afte
   assert.equal(document.activeElement.id, normalNameResize.id);
 });
 
+test("column resize handles expose a drag affordance and filter summary marks active filters", () => {
+  const task = activeTask({ priority: "urgent", terminal_presence: "open" });
+  const { api, elementFor } = loadApp();
+  const board = { tasks: [task], projects: [], folders: [] };
+  api.setState({ latestBoard: board, queueMode: "all", statusFilter: "all" });
+  api.renderBoard(board);
+  const resize = findAllByClass(elementFor("task-groups"), "column-resize")[0];
+  assert.equal(resize.textContent, "");
+  assert.match(resize.title, /Drag to resize/);
+  assert.match(resize.getAttribute("aria-label"), /Resize/);
+  assert.equal(elementFor("filter-summary").getAttribute("data-active"), "false");
+  api.setState({ filters: { provider: "any", priority: "urgent", terminal: "any", due: "any", presence: "any", lastUpdate: "any" } });
+  api.renderBoard(board);
+  assert.equal(elementFor("filter-summary").getAttribute("data-active"), "true");
+});
+
 test("a missing current-task transcript keeps fresh starts available without duplicate errors", async () => {
   const task = activeTask({
     session_id: "current-session",

@@ -1401,11 +1401,11 @@
       th.addEventListener("dragover", function (event) { if (draggedColumn && draggedColumn !== column) { allowMoveDrop(event); setColumnDropTarget(th); } });
       th.addEventListener("dragleave", function () { if (columnDropTarget === th) clearColumnDropTarget(); });
       th.addEventListener("drop", function (event) { event.preventDefault(); clearColumnDropTarget(); moveColumn(draggedColumn, column); });
-      var left = el("button", "column-arrow", "‹"), right = el("button", "column-arrow", "›"), resize = el("button", "column-resize", "↔"), index = columnOrder.indexOf(column);
+      var left = el("button", "column-arrow", "‹"), right = el("button", "column-arrow", "›"), resize = el("button", "column-resize", ""), index = columnOrder.indexOf(column);
       left.type = right.type = resize.type = "button";
       resize.id = "column-resize-" + (groupId || "table") + "-" + column;
       left.disabled = index === 0; right.disabled = index === columnOrder.length - 1;
-      left.setAttribute("aria-label", "Move " + text + " left"); right.setAttribute("aria-label", "Move " + text + " right"); resize.setAttribute("aria-label", "Resize " + text);
+      left.setAttribute("aria-label", "Move " + text + " left"); right.setAttribute("aria-label", "Move " + text + " right"); resize.setAttribute("aria-label", "Resize " + text); resize.title = "Drag to resize " + text;
       left.addEventListener("click", function () { moveColumn(column, columnOrder[Math.max(0, columnOrder.indexOf(column) - 1)]); });
       right.addEventListener("click", function () { moveColumn(column, columnOrder[Math.min(columnOrder.length - 1, columnOrder.indexOf(column) + 1)]); });
       resize.addEventListener("keydown", function (event) { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); setColumnWidth(column, renderedColumnWidth(th, column) + (event.key === "ArrowLeft" ? -12 : 12)); storeViewSettings(); renderBoardWithFocus(resize.id); } });
@@ -1770,6 +1770,7 @@
     $("filter-summary").textContent = filterCount
       ? filterCount + " Filters"
       : "Filters";
+    $("filter-summary").setAttribute("data-active", filterCount ? "true" : "false");
     $("today-note").hidden = queueMode !== "today";
     $("work-heading").textContent = selectedProjectData()
       ? projectName(selectedProjectData())

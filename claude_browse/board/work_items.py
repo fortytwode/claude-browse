@@ -427,7 +427,7 @@ def _ensure_for_session(
             updated_at, completed_at, title_override, title_source, session_cwd,
             priority, position, project_resolved)
            VALUES (?, ?, ?, ?, ?, 'active', NULL, ?, ?, '', ?, ?, NULL,
-                   NULL, 'automatic', ?, 'normal', ?, 0)
+                   NULL, 'automatic', ?, 'urgent', ?, 0)
            ON CONFLICT(session_id) DO UPDATE SET
              title = CASE WHEN work_items.title_source != 'manual'
                           THEN excluded.title ELSE work_items.title END,

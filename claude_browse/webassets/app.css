@@ -483,6 +483,9 @@ select {
   position: relative;
 }
 .popover summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   height: 31px;
   padding: 6px 9px;
   border: 1px solid #dcd4ff;
@@ -490,6 +493,22 @@ select {
   color: var(--purple);
   list-style: none;
   cursor: pointer;
+}
+.popover summary::after {
+  content: "⌄";
+  color: var(--muted);
+  font-size: 13px;
+}
+.popover[open] summary,
+.popover summary[data-active="true"] {
+  border-color: var(--purple);
+  background: var(--purple-soft);
+  color: var(--purple);
+}
+.popover summary[data-active="true"]::before {
+  content: "•";
+  font-size: 17px;
+  line-height: 0;
 }
 .popover summary::-webkit-details-marker {
   display: none;
@@ -501,12 +520,20 @@ select {
   top: 38px;
   display: grid;
   gap: 9px;
-  width: 210px;
-  padding: 12px;
+  width: 248px;
+  padding: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;
   box-shadow: 0 9px 28px rgba(25, 25, 35, 0.14);
+}
+.popover-panel::before {
+  content: "Refine work";
+  display: block;
+  margin-bottom: 2px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
 }
 .popover-panel label {
   display: grid;
@@ -516,6 +543,13 @@ select {
 }
 .popover-panel select {
   width: 100%;
+  height: 34px;
+  border-radius: 7px;
+}
+.popover-panel .text-button {
+  justify-self: start;
+  margin-top: 2px;
+  padding: 3px 0;
 }
 .project-group {
   margin: 12px 0 0;
@@ -564,6 +598,7 @@ select {
   table-layout: fixed;
 }
 .work-table th {
+  position: relative;
   height: 36px;
   padding: 0 8px;
   border-bottom: 1px solid var(--line);
@@ -593,7 +628,37 @@ select {
   color: var(--muted) !important;
   font-size: 14px;
 }
-.column-resize { cursor: col-resize; }
+.column-arrow {
+  width: 17px;
+  height: 22px;
+  border-radius: 4px;
+}
+.column-arrow:hover:not(:disabled) { background: var(--purple-soft); color: var(--purple) !important; }
+.column-resize {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  right: -5px;
+  width: 10px;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border-left: 2px solid transparent;
+  cursor: col-resize;
+}
+.column-resize::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 3px;
+  border-left: 2px dotted #c8c5d8;
+  opacity: 0;
+  transition: opacity 120ms ease, border-color 120ms ease;
+}
+.work-table th:hover .column-resize::after,
+.column-resize:focus-visible::after,
+.column-resize:active::after { opacity: 1; border-color: var(--purple); }
 .work-table td {
   height: 67px;
   padding: 7px 8px;
