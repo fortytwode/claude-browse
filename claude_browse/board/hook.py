@@ -275,6 +275,16 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 fields["model_label"] = model_label
             store.upsert(session_id, **fields)
         store.heartbeat(session_id)
+        # An explicitly launched continuation adopts its canonical task before
+        # automatic capture. Failed/stale tokens never prevent an ordinary
+        # terminal conversation from appearing on the board.
+        if os.environ.get("AGENT_BOARD_LAUNCH_TOKEN"):
+            try:
+                from claude_browse.board import launches
+
+                launches.adopt_session(session_id, provider)
+            except Exception:
+                pass
         _capture_work(session_id)
         return True
 

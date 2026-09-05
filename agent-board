@@ -19,7 +19,7 @@ if _HERE not in sys.path:
 def main() -> None:
     if len(sys.argv) < 2:
         print(
-            "usage: agent-board <hook|statusline|board|sync|ack|direct-session>",
+            "usage: agent-board <hook|statusline|board|sync|ack|direct-session|launch-intent>",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -46,6 +46,17 @@ def main() -> None:
         from claude_browse.board.sync import main as sync_main
 
         sync_main(["ack", *sys.argv[2:]])
+    elif subcommand == "launch-intent":
+        from claude_browse.board.launches import execute
+
+        if len(sys.argv) != 3:
+            print("usage: agent-board launch-intent TOKEN", file=sys.stderr)
+            sys.exit(2)
+        try:
+            execute(sys.argv[2])
+        except (OSError, ValueError) as exc:
+            print(f"agent-board: {exc}", file=sys.stderr)
+            sys.exit(1)
     elif subcommand == "direct-session":
         from claude_browse.board.commands import launch_direct_session
 

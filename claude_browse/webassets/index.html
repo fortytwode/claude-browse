@@ -29,28 +29,13 @@
         <div class="workspace-heading">
           <span class="workspace-icon">A</span><strong>My workspace</strong>
         </div>
-        <nav class="work-scopes" aria-label="Built-in views">
-          <button
-            class="work-scope active"
-            data-scope="all"
-            aria-pressed="true"
-          >
-            <span>All active</span
-            ><span id="all-count" class="nav-count"></span></button
-          ><button class="work-scope" data-scope="today" aria-pressed="false">
-            <span>Today</span
-            ><span id="today-count" class="nav-count"></span></button
-          ><button class="work-scope" data-scope="closed" aria-pressed="false">
-            <span>Done</span><span id="closed-count" class="nav-count"></span>
-          </button>
-        </nav>
         <div class="sidebar-section-title">
-          <span>Folders</span
+          <span>Spaces</span
           ><button
-            id="new-folder"
+            id="new-space"
             class="icon-button"
             type="button"
-            aria-label="New folder"
+            aria-label="New Space"
           >
             ＋
           </button>
@@ -73,7 +58,7 @@
         <div id="board-error" class="error" role="alert" hidden></div>
         <div id="project-detail" class="project-detail" hidden>
           <div>
-            <p class="eyebrow">PROJECT</p>
+            <p class="eyebrow">LIST</p>
             <h2 id="project-name"></h2>
             <p id="project-path"></p>
           </div>
@@ -84,7 +69,7 @@
               type="button"
             >
               Edit description</button
-            ><span id="project-counts"></span>
+            ><span id="project-counts"></span><span id="list-launch-actions" class="launch-actions"><span class="launch-choice"><button id="list-claude" class="launch claude" type="button">Start Claude</button><span id="list-claude-reason" class="disabled-reason"></span></span><span class="launch-choice"><button id="list-codex" class="launch codex" type="button">Start CodeX</button><span id="list-codex-reason" class="disabled-reason"></span></span></span>
           </div>
           <div id="project-description-editor" hidden>
             <label for="project-description">Project description</label
@@ -135,15 +120,7 @@
             role="tab"
             aria-selected="false"
           >
-            Today</button
-          ><button
-            class="scope-tab"
-            data-scope="closed"
-            role="tab"
-            aria-selected="false"
-          >
-            Done
-          </button>
+            Today</button>
         </div>
         <div class="board-toolbar">
           <div>
@@ -198,6 +175,13 @@
               </div>
             </details>
             <label
+              >Status<select id="filter-status">
+                <option value="active">Active</option>
+                <option value="completed">Completed</option>
+                <option value="archived">Archived</option>
+                <option value="all">All</option>
+              </select></label
+            ><label
               >Group<select id="group-by">
                 <option value="priority">Priority</option>
                 <option value="terminal">Terminal state</option>
@@ -206,8 +190,12 @@
             ><label
               >Sort<select id="sort-by">
                 <option value="manual">Manual</option>
+                <option value="name">Name</option>
                 <option value="updated">Last update</option>
                 <option value="due">Due date</option>
+                <option value="priority">Priority</option>
+                <option value="terminal">Terminal state</option>
+                <option value="agent">Agent</option>
               </select></label
             >
           </div>
@@ -284,6 +272,14 @@
         </button>
       </div>
       <div id="dialog-task-fields" class="dialog-fields"></div>
+      <div id="task-destination" class="task-destination"></div>
+      <div id="task-history-picker" class="task-history-picker" hidden>
+        <label for="task-history-select">Conversation</label><select id="task-history-select"></select>
+      </div>
+      <div id="task-launch-actions" class="launch-actions">
+        <span class="launch-choice"><button id="task-claude" class="launch claude" type="button">Continue in Claude</button><span id="task-claude-reason" class="disabled-reason"></span></span>
+        <span class="launch-choice"><button id="task-codex" class="launch codex" type="button">Continue in CodeX</button><span id="task-codex-reason" class="disabled-reason"></span></span>
+      </div>
       <div id="dialog-access" class="dialog-access"></div>
       <button id="discard-task-edits" class="text-button" type="button" hidden>
         Discard unsaved edits

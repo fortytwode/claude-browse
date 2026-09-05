@@ -28,7 +28,7 @@ from importlib import resources
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import fts
-from .board import commands, projects, store, work_items
+from .board import commands, launches, projects, store, work_items, workspace
 from .core import display_cwd, folder_name, format_date, provider_display_name
 from .providers import get_provider
 
@@ -124,6 +124,9 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/board":
                 self._serve_board()
+            elif path.startswith("/api/tasks/") and path.endswith("/history"):
+                task_id = unquote(path[len("/api/tasks/") : -len("/history")])
+                self._serve_task_history(task_id)
             elif path == "/api/sessions":
                 self._serve_sessions(parse_qs(parsed.query))
             elif path.startswith("/api/session/"):
@@ -144,6 +147,35 @@ class _Handler(BaseHTTPRequestHandler):
             body = self._read_json()
             if parsed.path == "/api/tasks/reorder":
                 self._reorder_tasks(body)
+            elif parsed.path == "/api/workspace/spaces":
+                self._workspace_create_space(body)
+            elif parsed.path == "/api/workspace/folders":
+                self._workspace_create_folder(body)
+            elif parsed.path == "/api/workspace/lists":
+                self._workspace_create_list(body)
+            elif parsed.path == "/api/workspace/reorder":
+                self._workspace_reorder_node(body)
+            elif parsed.path.startswith("/api/workspace/lists/") and parsed.path.endswith("/launch"):
+                list_key = unquote(parsed.path[len("/api/workspace/lists/") : -len("/launch")])
+                self._launch_workspace("list", list_key, body)
+            elif (
+                parsed.path.startswith("/api/workspace/lists/")
+                and parsed.path.endswith("/directory")
+            ):
+                list_key = unquote(
+                    parsed.path[len("/api/workspace/lists/") : -len("/directory")]
+                )
+                self._workspace_create_directory(list_key, body)
+            elif (
+                parsed.path.startswith("/api/workspace/tasks/")
+                and parsed.path.endswith("/move")
+            ):
+                task_id = unquote(
+                    parsed.path[len("/api/workspace/tasks/") : -len("/move")]
+                )
+                self._workspace_move_task(task_id, body)
+            elif parsed.path == "/api/workspace/tasks/reorder":
+                self._workspace_reorder_tasks(body)
             elif parsed.path == "/api/projects/reorder":
                 self._reorder_projects(body)
             elif parsed.path == "/api/folders":
@@ -173,7 +205,16 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             body = self._read_json()
-            if parsed.path.startswith("/api/projects/"):
+            if parsed.path.startswith("/api/workspace/spaces/"):
+                space_id = unquote(parsed.path[len("/api/workspace/spaces/") :])
+                self._workspace_update_space(space_id, body)
+            elif parsed.path.startswith("/api/workspace/folders/"):
+                folder_id = unquote(parsed.path[len("/api/workspace/folders/") :])
+                self._workspace_update_folder(folder_id, body)
+            elif parsed.path.startswith("/api/workspace/lists/"):
+                list_key = unquote(parsed.path[len("/api/workspace/lists/") :])
+                self._workspace_update_list(list_key, body)
+            elif parsed.path.startswith("/api/projects/"):
                 project_key = unquote(parsed.path[len("/api/projects/") :])
                 project = work_items.update_project(project_key, **body)
                 self._send_json({"project": self._project_to_json(project, [])})
@@ -267,6 +308,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self._send_security_headers()
+            self.send_header("Cache-Control", "no-store, max-age=0")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -326,6 +368,12 @@ class _Handler(BaseHTTPRequestHandler):
         if overlay:
             row["name"] = overlay["title"]
         meta = _session_to_json(row, self.server.folder_prefixes)  # type: ignore[attr-defined]
+        if overlay:
+            launch = self._task_to_json(overlay)
+            meta["task_launch"] = {
+                key: launch[key]
+                for key in ("task_id", "session_id", "launch_revision", "working_directory", "actions")
+            }
         path = str(row.get("path") or "")
         if not path or not os.path.isfile(path):
             self._send_json({
@@ -354,7 +402,7 @@ class _Handler(BaseHTTPRequestHandler):
             }
         )
 
-    def _task_to_json(self, task: dict, indexed_session: dict | None = None) -> dict:
+    def _task_to_json(self, task: dict, indexed_session: dict | None = None, *, workspace_seeded: bool = False) -> dict:
         session_id = str(task.get("session_id") or "")
         provider = str(task.get("session_provider") or "claude")
         cwd = str(task.get("session_cwd") or "")
@@ -382,9 +430,12 @@ class _Handler(BaseHTTPRequestHandler):
             "provider": provider,
             "cwd": cwd,
         }
-        actions = _launch_actions(launch_session)
-        full = commands.direct_session_command(session_id, provider, full_access=True)
-        safe = commands.direct_session_command(session_id, provider, full_access=False)
+        context = workspace.context_for_task(task, seeded=workspace_seeded)
+        actions = {
+            target: launches.action_status(
+                launch_session, context, target, availability_check=_provider_available
+            ) for target in work_items.PROVIDERS
+        }
         public_task = {
             key: value
             for key, value in task.items()
@@ -420,11 +471,18 @@ class _Handler(BaseHTTPRequestHandler):
             "project_available": cwd_available,
             "actions": actions,
             "sort_key": sort_key,
-            "full_command": full,
-            "safe_command": safe,
+            **context,
         }
 
     def _serve_board(self) -> None:
+        workspace_snapshot = workspace.snapshot()
+        for listing in workspace_snapshot["lists"]:
+            listing.update(workspace.context_for_list(listing["list_key"], seeded=True))
+            listing["actions"] = {
+                target: launches.action_status(
+                    None, listing, target, availability_check=_provider_available
+                ) for target in work_items.PROVIDERS
+            }
         raw_tasks = work_items.list_items(include_done=True)
         indexed: dict[str, dict] = {}
         try:
@@ -440,7 +498,7 @@ class _Handler(BaseHTTPRequestHandler):
         except (OSError, sqlite3.Error):
             pass
         tasks = [
-            self._task_to_json(task, indexed.get(str(task.get("session_id") or "")))
+            self._task_to_json(task, indexed.get(str(task.get("session_id") or "")), workspace_seeded=True)
             for task in raw_tasks
             if task.get("session_id")
         ]
@@ -453,7 +511,86 @@ class _Handler(BaseHTTPRequestHandler):
             self._project_to_json(project, tasks)
             for project in project_rows
         ]
-        self._send_json({"tasks": tasks, "projects": projects_json, "folders": work_items.list_folders()})
+        self._send_json({
+            "tasks": tasks,
+            "projects": projects_json,
+            "folders": work_items.list_folders(),
+            "workspace": workspace_snapshot,
+        })
+
+    def _serve_task_history(self, task_id: str) -> None:
+        if not work_items.get(task_id):
+            self._send_json({"error": "task not found"}, status=404)
+            return
+        self._send_json({"sessions": work_items.get_session_history(task_id)})
+
+    @staticmethod
+    def _workspace_fields(body: dict, allowed: set[str], required: set[str]) -> None:
+        unknown = set(body) - allowed
+        missing = required - set(body)
+        if unknown:
+            raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
+        if missing:
+            raise ValueError(f"missing required field(s): {', '.join(sorted(missing))}")
+        if not body:
+            raise ValueError("at least one field is required")
+
+    def _workspace_create_space(self, body: dict) -> None:
+        self._workspace_fields(body, {"name"}, {"name"})
+        self._send_json({"space": workspace.create_space(body["name"])})
+
+    def _workspace_update_space(self, space_id: str, body: dict) -> None:
+        self._workspace_fields(body, {"name", "position"}, set())
+        self._send_json({"space": workspace.update_space(space_id, **body)})
+
+    def _workspace_create_folder(self, body: dict) -> None:
+        self._workspace_fields(body, {"name", "space_id"}, {"name", "space_id"})
+        self._send_json({"folder": workspace.create_folder(body["name"], body["space_id"])})
+
+    def _workspace_update_folder(self, folder_id: str, body: dict) -> None:
+        self._workspace_fields(body, {"name", "space_id", "position"}, set())
+        self._send_json({"folder": workspace.update_folder(folder_id, **body)})
+
+    def _workspace_create_list(self, body: dict) -> None:
+        self._workspace_fields(
+            body,
+            {"name", "space_id", "folder_id", "working_directory"},
+            {"name", "space_id"},
+        )
+        self._send_json({"list": workspace.create_list(**body)})
+
+    def _workspace_update_list(self, list_key: str, body: dict) -> None:
+        self._workspace_fields(
+            body,
+            {"name", "description", "space_id", "folder_id", "working_directory", "position"},
+            set(),
+        )
+        self._send_json({"list": workspace.update_list(list_key, **body)})
+
+    def _workspace_create_directory(self, list_key: str, body: dict) -> None:
+        self._workspace_fields(body, {"path"}, {"path"})
+        try:
+            result = workspace.create_working_directory(list_key, body["path"])
+        except OSError as exc:
+            raise ValueError(f"could not create working directory: {exc}") from exc
+        self._send_json({"list": result})
+
+    def _workspace_move_task(self, task_id: str, body: dict) -> None:
+        self._workspace_fields(body, {"list_key", "expected_list_key"}, {"list_key", "expected_list_key"})
+        self._send_json({"context": workspace.move_task(task_id, **body)})
+
+    def _workspace_reorder_tasks(self, body: dict) -> None:
+        self._workspace_fields(body, {"list_key", "task_ids", "priority"}, {"list_key", "task_ids"})
+        rows = workspace.reorder_tasks(
+            body["list_key"], body["task_ids"], priority=body.get("priority")
+        )
+        self._send_json({"tasks": [
+            self._task_to_json(row) for row in rows
+        ]})
+
+    def _workspace_reorder_node(self, body: dict) -> None:
+        self._workspace_fields(body, {"kind", "node_id", "direction"}, {"kind", "node_id", "direction"})
+        self._send_json({"node": workspace.move_node(**body)})
 
     def _project_to_json(self, project: dict, tasks: list[dict]) -> dict:
         project_tasks = [
@@ -504,29 +641,27 @@ class _Handler(BaseHTTPRequestHandler):
         if not task or not task.get("session_id"):
             self._send_json({"error": "task not found"}, status=404)
             return
-        raw_provider = body.get("provider")
-        if not isinstance(raw_provider, str):
-            raise ValueError("provider must be claude or codex")
-        provider = raw_provider.strip().lower()
-        if provider not in work_items.PROVIDERS:
-            raise ValueError("provider must be claude or codex")
-        full_access = body.get("full_access")
-        if not isinstance(full_access, bool):
-            raise ValueError("full_access must be true or false")
-        session_id = str(task.get("session_id") or "")
-        session = commands.session_for_launch(session_id)
-        if session is None:
-            raise ValueError("session not found")
-        action = _launch_actions(session)[provider]
-        if not action["available"]:
-            raise ValueError(str(action["reason"]))
-        command = commands.direct_session_command(
-            session_id, provider, full_access=full_access
+        self._launch_workspace("task", task_id, body)
+
+    def _launch_workspace(self, kind: str, target_id: str, body: dict) -> None:
+        fields = {"provider", "full_access", "launch_revision"}
+        self._workspace_fields(body, fields, fields)
+        token = launches.prepare(
+            kind, target_id, body["provider"], full_access=body["full_access"],
+            launch_revision=body["launch_revision"],
         )
-        commands.open_in_terminal(command)
-        self._send_json({"ok": True, "command": command})
+        try:
+            commands.open_in_terminal(launches.command(token))
+        except OSError as exc:
+            launches.fail(token, str(exc), expected_state="prepared")
+            raise
+        self._send_json({"ok": True})
 
     def _launch_session(self, session_id: str, body: dict) -> None:
+        task = work_items.get_for_session(session_id)
+        if task:
+            self._launch_workspace("task", task["task_id"], body)
+            return
         provider = str(body.get("provider") or "").strip().lower()
         if provider not in work_items.PROVIDERS:
             raise ValueError("provider must be claude or codex")

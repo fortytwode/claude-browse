@@ -74,6 +74,16 @@ CREATE TABLE IF NOT EXISTS project_description_fragments (
 )
 """
 
+_TASK_SESSION_LINKS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS task_session_links (
+    session_id TEXT PRIMARY KEY,
+    task_id    TEXT NOT NULL,
+    provider   TEXT,
+    cwd        TEXT,
+    created_at REAL NOT NULL
+)
+"""
+
 
 def migration_backup_path() -> Path:
     return Path(f"{store._DB_PATH}.pre-work-overlay.bak")
@@ -89,6 +99,10 @@ def project_resolution_migration_backup_path() -> Path:
 
 def sidebar_migration_backup_path() -> Path:
     return Path(f"{store._DB_PATH}.pre-sidebar-organization.bak")
+
+
+def linked_workspace_migration_backup_path() -> Path:
+    return Path(f"{store._DB_PATH}.pre-linked-workspace.bak")
 
 
 def _backup_database_to(conn: sqlite3.Connection, backup_path: Path) -> None:
@@ -242,6 +256,24 @@ def _ensure_planning_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_PROJECT_SETTINGS_SCHEMA)
     conn.execute(_FOLDERS_SCHEMA)
     conn.execute(_PROJECT_DESCRIPTION_FRAGMENTS_SCHEMA)
+    has_session_links = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_session_links'"
+    ).fetchone()
+    if has_session_links is None:
+        _backup_database_to(conn, linked_workspace_migration_backup_path())
+        conn.execute(_TASK_SESSION_LINKS_SCHEMA)
+        conn.execute(
+            """INSERT OR IGNORE INTO task_session_links
+               (session_id, task_id, provider, cwd, created_at)
+               SELECT session_id, task_id, session_provider, session_cwd, created_at
+               FROM work_items WHERE session_id IS NOT NULL"""
+        )
+        # The INSERT above opens a SQLite transaction.  _conn() is also used
+        # immediately before callers reserve BEGIN IMMEDIATE, so finish this
+        # additive migration before returning the shared connection.
+        conn.commit()
+    else:
+        conn.execute(_TASK_SESSION_LINKS_SCHEMA)
     conn.execute(
         """CREATE INDEX IF NOT EXISTS idx_work_items_project_priority_position
            ON work_items(project_key, priority, position, task_id)"""
@@ -367,6 +399,19 @@ def ensure_for_session(row: dict, *, reactivate_done: bool = False) -> dict:
     project = _folder_project(cwd)
     now = time.time()
     with _conn() as conn:
+        # A SessionStart or other delayed hook for a conversation that became
+        # historical through an intentional continuation must keep addressing
+        # its canonical card.  Check this before the current-session unique
+        # upsert below, otherwise it would manufacture a second work item.
+        linked = conn.execute(
+            """SELECT work_items.* FROM task_session_links
+               JOIN work_items USING (task_id)
+               WHERE task_session_links.session_id = ?
+                 AND work_items.session_id != ?""",
+            (session_id, session_id),
+        ).fetchone()
+        if linked is not None:
+            return dict(linked)
         conn.execute(
             """INSERT INTO work_items
                (task_id, title, project_key, project_name, project_path, status,
@@ -397,6 +442,11 @@ def ensure_for_session(row: dict, *, reactivate_done: bool = False) -> dict:
         result = conn.execute(
             "SELECT * FROM work_items WHERE session_id = ?", (session_id,)
         ).fetchone()
+        conn.execute(
+            """INSERT OR IGNORE INTO task_session_links
+               (session_id, task_id, provider, cwd, created_at) VALUES (?, ?, ?, ?, ?)""",
+            (session_id, result["task_id"], provider, cwd, now),
+        )
         _ensure_project_setting(conn, result["project_key"])
     return dict(result)
 
@@ -414,9 +464,12 @@ def reconcile_sessions(*, limit: int = _RECONCILE_LIMIT) -> int:
     rows = conn.execute(
         """SELECT sessions.* FROM sessions
            LEFT JOIN work_items ON work_items.session_id = sessions.session_id
+           LEFT JOIN task_session_links
+             ON task_session_links.session_id = sessions.session_id
            WHERE COALESCE(sessions.provider, 'claude') IN ('claude', 'codex')
-             AND (work_items.session_id IS NULL
-                  OR work_items.project_resolved = 0)
+             AND (task_session_links.session_id IS NULL
+                  OR (work_items.session_id = sessions.session_id
+                      AND work_items.project_resolved = 0))
            ORDER BY sessions.updated_at DESC, sessions.session_id
            LIMIT ?""",
         (limit,),
@@ -454,6 +507,7 @@ def reconcile_sessions(*, limit: int = _RECONCILE_LIMIT) -> int:
                 "SELECT * FROM work_items WHERE session_id = ?", (session_id,)
             ).fetchone()
             if existing is None:
+                task_id = str(uuid.uuid4())
                 conn.execute(
                     """INSERT INTO work_items
                        (task_id, title, project_key, project_name, project_path,
@@ -463,12 +517,18 @@ def reconcile_sessions(*, limit: int = _RECONCILE_LIMIT) -> int:
                        VALUES (?, ?, ?, ?, ?, 'active', NULL, ?, ?, '', ?, ?,
                                NULL, NULL, 'automatic', ?, 'normal', ?, 1)""",
                     (
-                        str(uuid.uuid4()), title, project["key"], project["name"],
+                        task_id, title, project["key"], project["name"],
                         project["path"], session_id, provider, timestamp, timestamp, cwd,
                         time.time_ns(),
                     ),
                 )
                 _ensure_project_setting(conn, project["key"])
+                conn.execute(
+                    """INSERT OR IGNORE INTO task_session_links
+                       (session_id, task_id, provider, cwd, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (session_id, task_id, provider, cwd, timestamp),
+                )
                 changed += 1
                 continue
             previous_project_key = str(existing["project_key"])
@@ -510,9 +570,90 @@ def get(task_id: str) -> dict | None:
 def get_for_session(session_id: str) -> dict | None:
     with _conn() as conn:
         row = conn.execute(
-            "SELECT * FROM work_items WHERE session_id = ?", (session_id,)
+            """SELECT work_items.* FROM work_items
+               LEFT JOIN task_session_links USING (task_id)
+               WHERE work_items.session_id = ? OR task_session_links.session_id = ?
+               LIMIT 1""",
+            (session_id, session_id),
         ).fetchone()
     return dict(row) if row is not None else None
+
+
+def attach_continuation(
+    task_id: str, session: dict, expected_session_id: str
+) -> dict:
+    """Atomically attach a new runtime session to an existing visible task."""
+    key = _strict_text(task_id, "task_id", limit=200, required=True)
+    expected = _strict_text(
+        expected_session_id, "expected_session_id", limit=500, required=True
+    )
+    if not isinstance(session, dict):
+        raise ValueError("session must be a dictionary")
+    new_session_id = _strict_text(
+        session.get("session_id"), "session_id", limit=500, required=True
+    )
+    provider = _provider(session.get("provider") or store.DEFAULT_PROVIDER)
+    cwd = str(session.get("cwd") or "")
+    now = time.time()
+    conn = _conn()
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        task = conn.execute(
+            "SELECT * FROM work_items WHERE task_id = ?", (key,)
+        ).fetchone()
+        if task is None or not task["session_id"]:
+            raise ValueError("task not found")
+        if task["session_id"] != expected:
+            raise ValueError("stale expected session id")
+        linked = conn.execute(
+            "SELECT task_id FROM task_session_links WHERE session_id = ?", (new_session_id,)
+        ).fetchone()
+        current_owner = conn.execute(
+            "SELECT task_id FROM work_items WHERE session_id = ?", (new_session_id,)
+        ).fetchone()
+        owner = linked or current_owner
+        if owner is not None and owner["task_id"] != key:
+            raise ValueError("new session belongs to another task")
+        if linked is not None:
+            raise ValueError("new session is already linked to this task")
+        # This supports adoption immediately after SessionStart intent matching,
+        # before ordinary hook capture has had a chance to create the runtime row.
+        conn.execute(
+            """INSERT INTO sessions (session_id, cwd, provider, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(session_id) DO UPDATE SET cwd = excluded.cwd,
+                   provider = excluded.provider, updated_at = excluded.updated_at""",
+            (new_session_id, cwd, provider, now),
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO task_session_links
+               (session_id, task_id, provider, cwd, created_at) VALUES (?, ?, ?, ?, ?)""",
+            (expected, key, task["session_provider"], task["session_cwd"], task["created_at"]),
+        )
+        conn.execute(
+            """INSERT INTO task_session_links (session_id, task_id, provider, cwd, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (new_session_id, key, provider, cwd, now),
+        )
+        conn.execute(
+            """UPDATE work_items SET session_id = ?, session_provider = ?, session_cwd = ?,
+               title_override = title, title_source = 'manual', project_resolved = 1,
+               updated_at = ? WHERE task_id = ?""",
+            (new_session_id, provider, cwd, now, key),
+        )
+        result = conn.execute("SELECT * FROM work_items WHERE task_id = ?", (key,)).fetchone()
+    return dict(result)
+
+
+def get_session_history(task_id: str) -> list[dict]:
+    key = _strict_text(task_id, "task_id", limit=200, required=True)
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT session_id, provider, cwd, created_at FROM task_session_links
+               WHERE task_id = ? ORDER BY created_at, session_id""",
+            (key,),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def list_items(*, include_done: bool = False) -> list[dict]:

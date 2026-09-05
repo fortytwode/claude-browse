@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sqlite3
 import tempfile
 import threading
@@ -22,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from claude_browse import fts, web
-from claude_browse.board import hook, store, work_items
+from claude_browse.board import hook, launches, store, work_items, workspace
 
 
 def _seed(
@@ -266,6 +267,7 @@ def test_assets_are_served_with_content_types(web_server):
             assert resp.headers["Content-Type"].startswith(expected_type)
             assert resp.headers["X-Frame-Options"] == "DENY"
             assert "frame-ancestors 'none'" in resp.headers["Content-Security-Policy"]
+            assert resp.headers["Cache-Control"] == "no-store, max-age=0"
             assert len(resp.read()) > 0
 
 
@@ -282,10 +284,11 @@ def test_web_assets_define_reading_first_work_and_history_contract():
     assert 'data-scope="all"' in html
     assert 'data-scope="today"' in html
     assert 'id="folder-list"' in html
-    assert 'data-scope="closed"' in html
+    assert 'id="filter-status"' in html
+    assert '<option value="completed">Completed</option>' in html
 
     for heading in (
-        "Name / Project",
+        "Name",
         "Due date",
         "Work status",
         "Terminal state",
@@ -341,12 +344,13 @@ def test_web_assets_define_project_priority_and_reorder_contract():
     assert 'maxlength="10000"' in html
     assert 'data-scope="all"' in html
     assert 'data-scope="today"' in html
-    assert 'data-scope="closed"' in html
+    assert 'id="filter-status"' in html
+    assert '<option value="completed">Completed</option>' in html
 
     for contract in (
         'PRIORITY_GROUPS = ["urgent", "high", "normal", "low"]',
         'TERMINAL_GROUPS = ["needs-input", "working", "idle", "ended", "gone"]',
-        'mutate("/api/tasks/reorder"',
+        '"/api/workspace/tasks/reorder"',
         'mutate("/api/projects/reorder"',
         '"/api/projects/" + encodeURIComponent',
         'task.summary',
@@ -380,9 +384,8 @@ def test_automatic_thread_update_and_board_roundtrip(web_server):
     assert task["priority"] == "normal"
     assert isinstance(task["position"], int)
     assert task["summary"] == "(no transcript preview)"
-    assert "direct-session" in task["full_command"]
-    assert task["full_command"].endswith(" codex true")
-    assert task["safe_command"].endswith(" codex false")
+    assert "full_command" not in task
+    assert "safe_command" not in task
 
     _status, updated = _mutate_json(
         base + "/api/tasks/" + task["task_id"],
@@ -622,25 +625,33 @@ def test_launch_is_server_built_and_rejects_missing_project(web_server, monkeypa
     base, _server = web_server
     opened = []
     monkeypatch.setattr(web.commands, "open_in_terminal", opened.append)
+    monkeypatch.setattr(web.launches, "_available", lambda provider: True)
     _board_thread("launchable", cwd=tempfile.gettempdir(), provider="claude", name="Start here")
     _status, board = _get_json(base + "/api/board")
     task_id = board["tasks"][0]["task_id"]
+    body = {"provider": "claude", "full_access": True, "launch_revision": board["tasks"][0]["launch_revision"]}
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        _mutate_json(
+            base + f"/api/tasks/{task_id}/launch", "POST", {**body, "command": "echo unwanted"}
+        )
+    assert exc_info.value.code == 400
+    assert not opened
     _status, launched = _mutate_json(
         base + f"/api/tasks/{task_id}/launch",
         "POST",
-        {"provider": "claude", "full_access": True, "command": "rm -rf /"},
+        body,
     )
-    assert launched["command"] == opened[0]
-    assert "rm -rf" not in opened[0]
-    assert "direct-session" in opened[0]
-    assert opened[0].endswith(" claude true")
+    assert launched == {"ok": True}
+    assert "launch-intent" in opened[0]
+    assert "launchable" not in opened[0]
 
     _board_thread("missing", cwd="/definitely/not/here", name="Missing")
     _status, board = _get_json(base + "/api/board")
     missing = next(task for task in board["tasks"] if task["session_id"] == "missing")
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         _mutate_json(
-            base + f"/api/tasks/{missing['task_id']}/launch", "POST", {}
+            base + f"/api/tasks/{missing['task_id']}/launch", "POST",
+            {"provider": "claude", "full_access": False, "launch_revision": missing["launch_revision"]},
         )
     assert exc_info.value.code == 400
 
@@ -657,7 +668,7 @@ def test_task_launch_requires_explicit_valid_provider(web_server, monkeypatch, p
         _mutate_json(
             base + f"/api/tasks/{task['task_id']}/launch",
             "POST",
-            {"provider": provider, "full_access": False},
+            {"provider": provider, "full_access": False, "launch_revision": task["launch_revision"]},
         )
     assert exc_info.value.code == 400
     assert opened == []
@@ -752,6 +763,49 @@ def test_history_launch_actions_report_scoped_prerequisite_failures(
     assert detail["meta"]["actions"]["claude"]["available"] is False
     assert "directory" in detail["meta"]["actions"]["claude"]["reason"].lower()
     assert detail["meta"]["actions"]["codex"]["available"] is False
+
+
+def test_history_launch_uses_canonical_task_intent_and_preserves_history(
+    web_server, tmp_path, monkeypatch
+):
+    base, _server = web_server
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    transcript = tmp_path / "home1.jsonl"
+    transcript.write_text('{"message":{"role":"user","content":"continue"}}\n')
+    store.upsert("home1", cwd=str(source), provider="claude", transcript_path=str(transcript))
+    task = work_items.ensure_for_session(store.get("home1"))
+    space = workspace.snapshot()["spaces"][0]
+    listing = workspace.create_list("Destination", space["space_id"], working_directory=str(destination))
+    workspace.move_task(task["task_id"], listing["list_key"], task["project_key"])
+    monkeypatch.setattr(web, "_provider_available", lambda _provider: True)
+    opened = []
+    monkeypatch.setattr(web.commands, "open_in_terminal", opened.append)
+
+    _, detail = _get_json(base + "/api/session/home1")
+    launch = detail["meta"]["task_launch"]
+    assert launch["task_id"] == task["task_id"]
+    assert launch["session_id"] == "home1"
+    assert launch["working_directory"] == str(destination)
+    assert launch["actions"]["codex"]["available"] is True
+
+    body = {"provider": "codex", "full_access": False, "launch_revision": launch["launch_revision"]}
+    _, result = _mutate_json(base + "/api/sessions/home1/launch", "POST", body)
+    assert result == {"ok": True}
+    token = shlex.split(opened[0])[-1]
+    launches.claim(token)
+    monkeypatch.setenv(launches.TOKEN_ENV, token)
+    hook.dispatch({"hook_event_name": "SessionStart", "session_id": "continued-home1", "cwd": str(destination)}, "codex")
+
+    assert [item["task_id"] for item in work_items.list_items()] == [task["task_id"]]
+    assert [item["session_id"] for item in work_items.get_session_history(task["task_id"])] == ["home1", "continued-home1"]
+
+    for invalid in ({"provider": "codex", "full_access": False}, {**body, "launch_revision": "stale"}):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _mutate_json(base + "/api/sessions/home1/launch", "POST", invalid)
+        assert exc_info.value.code == 400
 
 
 def test_hook_only_thread_can_be_read_without_search_index(web_server, tmp_path, monkeypatch):

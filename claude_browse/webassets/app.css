@@ -214,14 +214,71 @@ button:disabled {
   background: var(--hover);
   color: var(--ink);
 }
+.space-block {
+  margin-top: 7px;
+}
+.space-row,
+.tree-folder-block {
+  position: relative;
+}
+.space-row,
 .folder-row,
 .project-row {
   display: flex;
   align-items: center;
   gap: 2px;
 }
+.space-select {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #4b4b52;
+  font-weight: 700;
+  text-align: left;
+}
+.space-select:hover { background: var(--hover); }
+.tree-icon {
+  flex: 0 0 16px;
+  text-align: center;
+  color: #85858b;
+  font-size: 15px;
+}
+.space-icon { color: var(--purple); font-size: 12px; }
+.folder-icon { font-size: 19px; line-height: 1; }
+.list-icon { color: #696970; }
+.tree-folder-block,
+.workspace-lists {
+  margin-left: 20px;
+  border-left: 1px solid #dfdfe3;
+}
+.tree-folder-block > .folder-row,
+.workspace-lists .project-row {
+  padding-left: 6px;
+}
+.list-row { border-radius: 6px; }
+.list-row:has(.project-select.active) { background: var(--purple-soft); }
+.space-row > .row-menu,
+.folder-row > .row-menu,
+.project-row > .row-menu {
+  flex: 0 0 28px;
+}
+.space-row .row-menu > summary,
+.folder-row .row-menu > summary,
+.project-row .row-menu > summary {
+  opacity: 1;
+}
 .folder-select {
+  justify-content: flex-start;
   font-weight: 650;
+}
+.project-select .project-name {
+  margin-right: auto;
 }
 .folder-caret {
   display: inline-block;
@@ -264,6 +321,14 @@ button:disabled {
   background: #fff;
   box-shadow: 0 8px 22px rgba(30, 30, 40, 0.12);
 }
+.work-table th .row-menu {
+  display: inline-block;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.work-table th .row-menu > summary { width: 20px; height: 20px; font-size: 14px; }
+.work-table th[draggable="true"] { cursor: grab; }
+.work-table th[draggable="true"]:has(.row-menu[open]) { background: var(--purple-soft); }
 .row-menu-panel button {
   padding: 7px 8px;
   border: 0;
@@ -485,6 +550,10 @@ select {
 .work-table th.sortable:hover {
   color: var(--purple);
 }
+.work-table th.column-drop-target {
+  box-shadow: inset -3px 0 var(--purple);
+  color: var(--purple);
+}
 .work-table th button {
   padding: 0;
   border: 0;
@@ -660,9 +729,19 @@ select {
 #toast.show {
   opacity: 1;
   transform: none;
+  pointer-events: auto;
 }
 #toast.error-toast {
   background: var(--danger);
+}
+.toast-undo {
+  margin-left: 8px;
+  padding: 2px 5px;
+  border: 1px solid rgba(255,255,255,.65);
+  border-radius: 4px;
+  background: transparent;
+  color: #fff;
+  font-weight: 650;
 }
 #history-view {
   height: calc(100vh - 41px);
@@ -752,6 +831,25 @@ select {
   gap: 8px;
   margin-top: 9px;
 }
+.launch-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#list-launch-actions { margin-left: auto; }
+.task-destination,
+.task-history-picker,
+#task-launch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.task-history-picker select { min-width: 220px; }
 .launch-choice {
   display: grid;
   gap: 2px;
@@ -905,6 +1003,19 @@ dialog::backdrop {
   .work-table .work-agent {
     display: none;
   }
+  .project-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .project-detail-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+  #list-launch-actions {
+    width: 100%;
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
   .column-name {
     width: 42%;
   }
@@ -951,6 +1062,11 @@ dialog::backdrop {
   #saved-view-list {
     margin-top: 8px;
   }
+  .tree-folder-block,
+  .workspace-lists { margin-left: 12px; }
+  .task-destination,
+  .task-history-picker,
+  #task-launch-actions { flex-wrap: wrap; }
   .work-table thead {
     display: none;
   }
