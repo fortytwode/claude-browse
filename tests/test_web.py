@@ -381,7 +381,7 @@ def test_automatic_thread_update_and_board_roundtrip(web_server):
     task = board["tasks"][0]
     assert task["title"] == "Ship the work queue"
     assert task["due_date"] is None
-    assert task["priority"] == "normal"
+    assert task["priority"] == "urgent"
     assert isinstance(task["position"], int)
     assert task["summary"] == "(no transcript preview)"
     assert "full_command" not in task
