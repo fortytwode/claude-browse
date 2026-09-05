@@ -40,6 +40,11 @@
             ＋
           </button>
         </div>
+        <div class="sidebar-view-controls">
+          <label class="sr-only" for="sidebar-sort">Sidebar order</label>
+          <select id="sidebar-sort"><option value="open">Open first</option><option value="manual">Manual order</option></select>
+          <span title="Open terminals / all saved threads">Open / total</span>
+        </div>
         <div id="folder-list"></div>
         <div class="sidebar-section-title saved-title">
           <span>Saved views</span
@@ -54,6 +59,7 @@
         </div>
         <div id="saved-view-list"></div>
       </aside>
+      <button id="sidebar-resize" type="button" aria-label="Resize workspace sidebar">↔</button>
       <section class="work-main" aria-labelledby="work-heading">
         <div id="board-error" class="error" role="alert" hidden></div>
         <div id="project-detail" class="project-detail" hidden>
@@ -109,11 +115,18 @@
         <div class="view-tabs" role="tablist" aria-label="Work views">
           <button
             class="scope-tab active"
-            data-scope="all"
+            data-scope="open"
             role="tab"
             aria-selected="true"
           >
-            All active</button
+            Open terminals</button
+          ><button
+            class="scope-tab"
+            data-scope="all"
+            role="tab"
+            aria-selected="false"
+          >
+            All threads <span id="unknown-count" class="nav-count"></span></button
           ><button
             class="scope-tab"
             data-scope="today"
@@ -124,7 +137,8 @@
         </div>
         <div class="board-toolbar">
           <div>
-            <h2 id="work-heading">All active</h2>
+            <h2 id="work-heading">Checking open terminals…</h2>
+            <p id="presence-note" class="toolbar-note" hidden></p>
             <p id="today-note" class="toolbar-note" hidden>
               Today includes due-today, overdue, and work that needs your input.
             </p>
@@ -155,13 +169,21 @@
                     <option value="low">Low</option>
                   </select></label
                 ><label
-                  >Terminal state<select id="filter-terminal">
+                  >Last reported state<select id="filter-terminal">
                     <option value="any">Any state</option>
                     <option value="needs-input">Needs input</option>
                     <option value="working">Working</option>
                     <option value="idle">Idle</option>
                     <option value="ended">Ended</option>
                     <option value="gone">Gone</option>
+                    <option value="unknown">Unknown runtime</option>
+                  </select></label
+                ><label
+                  >Terminal presence<select id="filter-presence">
+                    <option value="any">Any presence</option>
+                    <option value="open">Open</option>
+                    <option value="unknown">Unknown</option>
+                    <option value="closed">Closed</option>
                   </select></label
                 ><label
                   >Due date<select id="filter-due">
@@ -169,17 +191,23 @@
                     <option value="today">Today or overdue</option>
                     <option value="none">No due date</option>
                   </select></label
+                ><label
+                  >Last update<select id="filter-last-update">
+                    <option value="any">Any time</option>
+                    <option value="24h">Past 24 hours</option>
+                    <option value="7d">Past 7 days</option>
+                    <option value="30d">Past 30 days</option>
+                  </select></label
                 ><button id="clear-filters" class="text-button" type="button">
                   Clear filters
                 </button>
               </div>
             </details>
-            <label
-              >Status<select id="filter-status">
-                <option value="active">Active</option>
+            <label>Work<select id="filter-status">
+                <option value="all">All work</option>
+                <option value="active">To do</option>
                 <option value="completed">Completed</option>
                 <option value="archived">Archived</option>
-                <option value="all">All</option>
               </select></label
             ><label
               >Group<select id="group-by">
@@ -197,7 +225,7 @@
                 <option value="terminal">Terminal state</option>
                 <option value="agent">Agent</option>
               </select></label
-            >
+            ><button id="sort-direction" class="toolbar-chip" type="button" aria-label="Toggle sort direction">↓</button>
           </div>
         </div>
         <p id="reorder-reason" class="reorder-reason" aria-live="polite"></p>
@@ -279,6 +307,11 @@
       <div id="task-launch-actions" class="launch-actions">
         <span class="launch-choice"><button id="task-claude" class="launch claude" type="button">Continue in Claude</button><span id="task-claude-reason" class="disabled-reason"></span></span>
         <span class="launch-choice"><button id="task-codex" class="launch codex" type="button">Continue in CodeX</button><span id="task-codex-reason" class="disabled-reason"></span></span>
+      </div>
+      <div id="task-fresh-actions" class="launch-actions fresh-actions">
+        <span class="fresh-note">Start a new conversation; the earlier history remains attached to this task.</span>
+        <span class="launch-choice"><button id="task-fresh-claude" class="launch claude" type="button">Start fresh in Claude</button><span id="task-fresh-claude-reason" class="disabled-reason"></span></span>
+        <span class="launch-choice"><button id="task-fresh-codex" class="launch codex" type="button">Start fresh in CodeX</button><span id="task-fresh-codex-reason" class="disabled-reason"></span></span>
       </div>
       <div id="dialog-access" class="dialog-access"></div>
       <button id="discard-task-edits" class="text-button" type="button" hidden>

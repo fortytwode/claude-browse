@@ -63,6 +63,26 @@ def _same_directory(first: str | None, second: str | None) -> bool:
     return bool(first and second and os.path.realpath(first) == os.path.realpath(second))
 
 
+def awaiting_task_adoption(conn: sqlite3.Connection, provider: str, cwd: str) -> bool:
+    """Defer background enrollment, without inferring a session's task owner.
+
+    The caller must hold the SQLite writer transaction through its enrollment
+    decision. This serializes the check with claim/adoption transitions. A
+    fresh installation may not have created the launch-intent table yet.
+    """
+    if not cwd or conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_launch_intents'"
+    ).fetchone() is None:
+        return False
+    intents = conn.execute(
+        """SELECT working_directory FROM workspace_launch_intents
+           WHERE kind IN ('task', 'task-new') AND provider = ?
+             AND state IN ('claimed', 'adopting') AND expires_at > ?""",
+        (provider, time.time()),
+    ).fetchall()
+    return any(_same_directory(cwd, intent["working_directory"]) for intent in intents)
+
+
 def action_status(session: dict | None, context: dict, provider: str, *, availability_check=None) -> dict:
     """Destination-aware action; changed directory is a fresh handoff, not resume."""
     spec = get_provider(_provider(provider))
@@ -86,17 +106,42 @@ def action_status(session: dict | None, context: dict, provider: str, *, availab
 
 
 def _resolve(kind: str, target_id: str) -> tuple[dict, dict | None]:
-    if kind == "task":
+    if kind in {"task", "task-new"}:
         task = work_items.get(target_id)
         if task is None or not task.get("session_id"):
             raise ValueError("task not found")
         session = commands.session_for_launch(task["session_id"])
-        if session is None:
+        if kind == "task" and session is None:
             raise ValueError("The original session is unavailable; the task has been preserved.")
+        # A task can outlive the runtime/index row that described its old
+        # conversation.  Fresh starts still need that canonical SID solely
+        # for safe adoption and history preservation.
+        if kind == "task-new" and session is None:
+            session = {"session_id": task["session_id"]}
         return workspace.context_for_task(task), session
     if kind == "list":
         return workspace.context_for_list(target_id), None
-    raise ValueError("launch kind must be task or list")
+    raise ValueError("launch kind must be task, task-new, or list")
+
+
+def _action_session(kind: str, session: dict | None) -> dict | None:
+    """Fresh task starts deliberately do not consume old transcript context."""
+    return None if kind == "task-new" else session
+
+
+def _pending_for_target(conn: sqlite3.Connection, kind: str, target_id: str, now: float):
+    if kind in {"task", "task-new"}:
+        return conn.execute(
+            """SELECT 1 FROM workspace_launch_intents
+               WHERE kind IN ('task', 'task-new') AND target_id = ?
+                 AND state IN ('prepared', 'claimed', 'adopting') AND expires_at > ?""",
+            (target_id, now),
+        ).fetchone()
+    return conn.execute(
+        """SELECT 1 FROM workspace_launch_intents WHERE kind = ? AND target_id = ?
+           AND state IN ('prepared', 'claimed', 'adopting') AND expires_at > ?""",
+        (kind, target_id, now),
+    ).fetchone()
 
 
 def prepare(kind: str, target_id: str, provider: str, *, full_access: bool, launch_revision: str) -> str:
@@ -106,7 +151,7 @@ def prepare(kind: str, target_id: str, provider: str, *, full_access: bool, laun
     context, session = _resolve(kind, target_id)
     if launch_revision != context["launch_revision"]:
         raise ValueError("The task or working folder changed. Refresh and start again.")
-    status = action_status(session, context, provider)
+    status = action_status(_action_session(kind, session), context, provider)
     if not status["available"]:
         raise ValueError(status["reason"])
     token = secrets.token_urlsafe(32)
@@ -114,11 +159,7 @@ def prepare(kind: str, target_id: str, provider: str, *, full_access: bool, laun
     conn = _conn()
     with conn:
         conn.execute("BEGIN IMMEDIATE")
-        pending = conn.execute(
-            """SELECT 1 FROM workspace_launch_intents WHERE kind = ? AND target_id = ?
-               AND state IN ('prepared', 'claimed', 'adopting') AND expires_at > ?""",
-            (kind, target_id, now),
-        ).fetchone()
+        pending = _pending_for_target(conn, kind, target_id, now)
         if pending:
             raise ValueError("A launch is already pending. Check its Terminal window before retrying.")
         conn.execute(
@@ -164,7 +205,7 @@ def claim(token: str) -> dict:
     if intent["state"] != "prepared":
         raise ValueError("Launch request has already been used.")
     context, session = _check_current(intent)
-    status = action_status(session, context, intent["provider"])
+    status = action_status(_action_session(intent["kind"], session), context, intent["provider"])
     if not status["available"]:
         raise ValueError(status["reason"])
     with _conn() as conn:
@@ -189,7 +230,7 @@ def execute(token: str) -> None:
         cwd = context["working_directory"]
         os.chdir(cwd)
         os.environ[TOKEN_ENV] = token
-        if session:
+        if intent["kind"] == "task":
             from claude_browse import browse
 
             browse._open_in_target_provider(
@@ -242,7 +283,7 @@ def adopt_session(session_id: str, provider: str) -> bool:
     if changed != 1:
         return False
     try:
-        if intent["kind"] == "task":
+        if intent["kind"] in {"task", "task-new"}:
             if session_id != intent["source_session_id"]:
                 work_items.attach_continuation(intent["target_id"], session, intent["source_session_id"])
         else:

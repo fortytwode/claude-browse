@@ -426,6 +426,64 @@ def update_list(list_key: str, **changes: object) -> dict:
     return _public_list(_list(conn, key))
 
 
+def _node(conn: sqlite3.Connection, kind: str, key: str) -> dict:
+    if kind == "space":
+        return _space(conn, key)
+    if kind == "folder":
+        return _folder(conn, key)
+    return _list(conn, key)
+
+
+def _sibling_nodes(conn: sqlite3.Connection, kind: str, node: dict) -> list[dict]:
+    if kind == "space":
+        query, args = "SELECT space_id AS node_id, position FROM workspace_spaces", ()
+    elif kind == "folder":
+        query, args = (
+            "SELECT folder_id AS node_id, position FROM workspace_folders WHERE space_id = ?",
+            (node["space_id"],),
+        )
+    else:
+        query, args = (
+            """SELECT list_key AS node_id, position FROM workspace_lists
+               WHERE space_id = ? AND folder_id IS ?""",
+            (node["space_id"], node["folder_id"]),
+        )
+    siblings = [dict(row) for row in conn.execute(query, args)]
+    siblings.sort(key=lambda sibling: (int(sibling["position"]), sibling["node_id"]))
+    return siblings
+
+
+def _same_parent(kind: str, node: dict, target: dict) -> bool:
+    if kind == "space":
+        return True
+    if kind == "folder":
+        return node["space_id"] == target["space_id"]
+    return (node["space_id"], node["folder_id"]) == (
+        target["space_id"], target["folder_id"]
+    )
+
+
+def _rewrite_sibling_positions(
+    conn: sqlite3.Connection, kind: str, sibling_ids: list[str]
+) -> None:
+    table, column = {
+        "space": ("workspace_spaces", "space_id"),
+        "folder": ("workspace_folders", "folder_id"),
+        "list": ("workspace_lists", "list_key"),
+    }[kind]
+    now = time.time()
+    for position, sibling_id in enumerate(sibling_ids, start=1):
+        conn.execute(
+            f"UPDATE {table} SET position = ?, updated_at = ? WHERE {column} = ?",
+            (position, now, sibling_id),
+        )
+
+
+def _public_node(conn: sqlite3.Connection, kind: str, key: str) -> dict:
+    node = _node(conn, kind, key)
+    return _public_list(node) if kind == "list" else node
+
+
 def move_node(kind: str, node_id: str, direction: int) -> dict:
     """Move a workspace node one place among its actual siblings.
 
@@ -443,52 +501,50 @@ def move_node(kind: str, node_id: str, direction: int) -> dict:
     with conn:
         conn.execute("BEGIN IMMEDIATE")
         _seed(conn)
-        if kind == "space":
-            node = _space(conn, key)
-            siblings = [dict(row) for row in conn.execute(
-                "SELECT space_id AS node_id, position FROM workspace_spaces"
-            )]
-        elif kind == "folder":
-            node = _folder(conn, key)
-            siblings = [dict(row) for row in conn.execute(
-                "SELECT folder_id AS node_id, position FROM workspace_folders WHERE space_id = ?",
-                (node["space_id"],),
-            )]
-        else:
-            node = _list(conn, key)
-            siblings = [dict(row) for row in conn.execute(
-                """SELECT list_key AS node_id, position FROM workspace_lists
-                   WHERE space_id = ? AND folder_id IS ?""",
-                (node["space_id"], node["folder_id"]),
-            )]
-
-        siblings.sort(key=lambda sibling: (int(sibling["position"]), sibling["node_id"]))
+        node = _node(conn, kind, key)
+        siblings = _sibling_nodes(conn, kind, node)
         index = next(index for index, sibling in enumerate(siblings) if sibling["node_id"] == key)
         neighbor_index = index + direction
         if not 0 <= neighbor_index < len(siblings):
-            return _public_list(node) if kind == "list" else node
+            return _public_node(conn, kind, key)
 
         siblings[index], siblings[neighbor_index] = siblings[neighbor_index], siblings[index]
-        now = time.time()
-        for position, sibling in enumerate(siblings, start=1):
-            if kind == "space":
-                conn.execute(
-                    "UPDATE workspace_spaces SET position = ?, updated_at = ? WHERE space_id = ?",
-                    (position, now, sibling["node_id"]),
-                )
-            elif kind == "folder":
-                conn.execute(
-                    "UPDATE workspace_folders SET position = ?, updated_at = ? WHERE folder_id = ?",
-                    (position, now, sibling["node_id"]),
-                )
-            else:
-                conn.execute(
-                    "UPDATE workspace_lists SET position = ?, updated_at = ? WHERE list_key = ?",
-                    (position, now, sibling["node_id"]),
-                )
-        return _public_list(_list(conn, key)) if kind == "list" else (
-            _space(conn, key) if kind == "space" else _folder(conn, key)
-        )
+        _rewrite_sibling_positions(conn, kind, [sibling["node_id"] for sibling in siblings])
+        return _public_node(conn, kind, key)
+
+
+def place_node(kind: str, node_id: str, target_id: str, placement: str) -> dict:
+    """Place a node before or after a same-parent sibling atomically.
+
+    This is intentionally distinct from changing a folder/list parent: drag
+    ordering must never silently relocate a node across the workspace tree.
+    Rewriting all sibling ranks fixes legacy ties and makes the persisted
+    order deterministic after every successful drop.
+    """
+    if not isinstance(kind, str) or kind not in {"space", "folder", "list"}:
+        raise ValueError("kind must be space, folder, or list")
+    if not isinstance(placement, str) or placement not in {"before", "after"}:
+        raise ValueError("placement must be before or after")
+    limit = 1000 if kind == "list" else 200
+    key = _strict_text(node_id, "node_id", limit=limit, required=True)
+    target = _strict_text(target_id, "target_id", limit=limit, required=True)
+
+    conn = _conn()
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _seed(conn)
+        node = _node(conn, kind, key)
+        target_node = _node(conn, kind, target)
+        if not _same_parent(kind, node, target_node):
+            raise ValueError("target must share the node parent")
+        siblings = _sibling_nodes(conn, kind, node)
+        ordered_ids = [sibling["node_id"] for sibling in siblings]
+        if key != target:
+            ordered_ids.remove(key)
+            target_index = ordered_ids.index(target)
+            ordered_ids.insert(target_index + (placement == "after"), key)
+        _rewrite_sibling_positions(conn, kind, ordered_ids)
+        return _public_node(conn, kind, key)
 
 
 def create_working_directory(list_key: str, path: str) -> dict:

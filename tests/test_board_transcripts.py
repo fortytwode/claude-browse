@@ -55,6 +55,19 @@ def test_valid_index_path_beats_a_stale_hook_path_and_keeps_manual_runtime_field
     }
 
 
+def test_session_for_launch_accepts_an_explicit_missing_runtime_without_reloading(monkeypatch):
+    indexed = {
+        "session_id": "indexed-only",
+        "provider": "claude",
+        "cwd": "/indexed-project",
+    }
+    monkeypatch.setattr(store, "get", lambda _session_id: pytest.fail("must reuse supplied runtime"))
+
+    session = commands.session_for_launch("indexed-only", indexed, runtime=None)
+
+    assert session == indexed
+
+
 @pytest.mark.parametrize("provider", ("claude", "codex"))
 def test_hook_only_session_finds_exact_builtin_transcript_without_fts(
     tmp_path, monkeypatch, provider
@@ -134,9 +147,9 @@ def test_unsafe_session_id_never_scans_provider_files(tmp_path, monkeypatch):
     root.mkdir()
     monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(root))
     monkeypatch.setattr(
-        commands.glob,
-        "iglob",
-        lambda *_args, **_kwargs: pytest.fail("unsafe ID must not enumerate session files"),
+        claude_provider,
+        "list_session_files",
+        lambda: pytest.fail("unsafe ID must not enumerate session files"),
     )
     store.upsert("../not-a-session", provider="claude", cwd=str(tmp_path))
 
@@ -171,9 +184,9 @@ def test_many_missing_ids_share_one_provider_directory_enumeration(tmp_path, mon
     calls = []
     monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(root))
     monkeypatch.setattr(
-        commands.glob,
-        "iglob",
-        lambda *_args, **_kwargs: calls.append("listed") or iter(()),
+        claude_provider,
+        "list_session_files",
+        lambda: calls.append("listed") or [],
     )
     for session_id in ("missing-one", "missing-two", "missing-three"):
         store.upsert(session_id, provider="claude", cwd=str(tmp_path))
@@ -215,7 +228,7 @@ def test_concurrent_exact_lookups_enumerate_once_per_provider_root(tmp_path, mon
         return iter(())
 
     monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(root))
-    monkeypatch.setattr(commands.glob, "iglob", list_files)
+    monkeypatch.setattr(claude_provider, "list_session_files", lambda: list_files())
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(
@@ -225,3 +238,18 @@ def test_concurrent_exact_lookups_enumerate_once_per_provider_root(tmp_path, mon
 
     assert results == [None] * 8
     assert calls == ["listed"]
+
+
+def test_claude_history_backed_discovery_keeps_only_exact_rooted_paths(tmp_path, monkeypatch):
+    root = tmp_path / "claude"
+    transcript = root / "history-project" / "history-session.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("fixture")
+    foreign = tmp_path / "outside" / "history-session.jsonl"
+    foreign.parent.mkdir()
+    foreign.write_text("foreign")
+    monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(root))
+    monkeypatch.setattr(claude_provider, "list_session_files", lambda: [str(foreign), str(transcript)])
+    store.upsert("history-session", provider="claude", cwd=str(tmp_path))
+
+    assert commands.session_for_launch("history-session", indexed=None)["path"] == str(transcript)

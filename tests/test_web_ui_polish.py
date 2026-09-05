@@ -18,6 +18,8 @@ def test_clickup_board_has_contextual_rows_and_dialog_conversation():
         "filter-provider",
         "filter-priority",
         "filter-terminal",
+        "filter-presence",
+        "filter-last-update",
         "filter-due",
         "sort-by",
     ):
@@ -38,9 +40,10 @@ def test_manual_reorder_is_safe_while_priority_edits_stay_patch_based():
     assert 'queueReorder("tasks:" + taskProjectKey(task)' in js
     assert "visibleTasks().filter" in js
     assert "Manual reordering is disabled while filters are applied." in js
-    assert 'saveTask(task, "priority", next)' in js
+    assert 'saveTask(task, "priority", priority)' in js
     assert "Closed rows cannot change priority by dragging." in js
     assert "Terminal state is runtime truth" in js
+    assert 'placement: placement' in js
 
 
 def test_saved_views_are_versioned_browser_local_and_defensively_read():
@@ -106,6 +109,9 @@ def test_work_tabs_close_before_toolbar_and_status_is_a_single_toolbar_filter():
     assert parser.parents["board-toolbar"] == "work-main"
     assert 'class="work-scopes"' not in html
     assert 'id="filter-status"' in html
+    assert 'data-scope="open"' in html
+    assert 'data-scope="all"' in html
+    assert 'data-scope="today"' in html
 
 
 def test_undo_toast_is_interactive_only_while_visible():
@@ -131,3 +137,19 @@ def test_workspace_tree_keeps_folder_labels_compact_and_list_counts_trailing():
 
     assert ".folder-select {\n  justify-content: flex-start;" in css
     assert ".project-select .project-name {\n  margin-right: auto;" in css
+
+
+def test_open_terminal_surface_uses_presence_and_fresh_start_contracts():
+    html = (ASSETS / "index.html").read_text()
+    js = (ASSETS / "app.js").read_text()
+    css = (ASSETS / "app.css").read_text()
+
+    assert "function taskPresence(task)" in js
+    assert 'queueMode = "open"' in js
+    assert 'endpoint: "start"' in js
+    assert '"/api/tasks/" + encodeURIComponent(task.task_id) + "/" + mode.endpoint' in js
+    assert 'actionField: "start_actions"' in js
+    assert 'id="task-fresh-claude"' in html
+    assert 'id="task-fresh-codex"' in html
+    assert ".presence-open" in css
+    assert ".priority-options" in css

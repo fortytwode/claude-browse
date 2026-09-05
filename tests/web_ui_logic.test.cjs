@@ -11,16 +11,29 @@ const INITIALIZATION_MARKER =
   'Array.prototype.forEach.call(\n    document.querySelectorAll(".tab"),';
 
 class FakeElement {
-  constructor(tag = "div") {
+  constructor(tag = "div", documentFor = () => null) {
     this.tagName = tag.toUpperCase();
     this.children = [];
     this.dataset = {};
     this.listeners = {};
+    this.attributes = new Map();
+    this.parentElement = null;
     this.hidden = false;
+    this.disabled = false;
     this.value = "";
     this.textContent = "";
     this.className = "";
     this.style = {};
+    this._documentFor = documentFor;
+    this._id = "";
+    Object.defineProperty(this, "id", {
+      get: () => this._id,
+      set: (value) => {
+        this._id = String(value);
+        const document = this._documentFor();
+        if (document) document.registerId(this._id, this);
+      },
+    });
     this.classList = {
       add: (name) => {
         if (!this.className.split(/\s+/).includes(name))
@@ -29,6 +42,7 @@ class FakeElement {
       contains: (name) => this.className.split(/\s+/).includes(name),
       toggle: (name, enabled) => {
         if (enabled) this.classList.add(name);
+        else this.className = this.className.split(/\s+/).filter((item) => item && item !== name).join(" ");
       },
     };
   }
@@ -38,11 +52,13 @@ class FakeElement {
   }
 
   appendChild(child) {
+    child.parentElement = this;
     this.children.push(child);
     return child;
   }
 
   replaceChildren(...children) {
+    this.children.forEach((child) => { child.parentElement = null; });
     this.children = [];
     this.append(...children);
   }
@@ -52,14 +68,42 @@ class FakeElement {
   }
 
   dispatch(type, event = {}) {
+    if (!event.target) event.target = this;
+    if (!event.preventDefault) event.preventDefault = () => { event.defaultPrevented = true; };
+    if (!event.stopPropagation) event.stopPropagation = () => { event.cancelBubble = true; };
+    event.currentTarget = this;
     for (const listener of this.listeners[type] || []) listener.call(this, event);
+    if (!event.cancelBubble && this.parentElement) this.parentElement.dispatch(type, event);
   }
 
-  setAttribute() {}
-  removeAttribute() {}
-  focus() {}
+  click() { this.dispatch("click"); }
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+    if (name === "id") this.id = value;
+  }
+  getAttribute(name) { return this.attributes.get(name) || null; }
+  removeAttribute(name) { this.attributes.delete(name); }
+  getBoundingClientRect() { return { top: 0, height: 20, width: 0 }; }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (matchesSelector(node, selector)) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  focus() { this._documentFor().activeElement = this; }
+  select() {}
   showModal() {}
   close() {}
+}
+
+function matchesSelector(node, selector) {
+  const open = selector.endsWith("[open]");
+  const className = selector.replace(/^\./, "").replace("[open]", "");
+  if (selector.startsWith("."))
+    return node.classList.contains(className) && (!open || Boolean(node.open));
+  return node.tagName.toLowerCase() === selector.toLowerCase();
 }
 
 function localDate(instant, year, monthIndex, day) {
@@ -83,22 +127,66 @@ function localDate(instant, year, monthIndex, day) {
   };
 }
 
-function loadApp({ DateImpl = Date, fetchImpl, initialize = false, setTimeoutImpl, clearTimeoutImpl } = {}) {
+function fixedDate(instant) {
+  return class FixedDate extends Date {
+    constructor(...args) {
+      super(...(args.length ? args : [instant]));
+    }
+
+    static now() {
+      return instant;
+    }
+  };
+}
+
+function loadApp({ DateImpl = Date, fetchImpl, initialize = false, setTimeoutImpl, clearTimeoutImpl, storage } = {}) {
   const source = fs.readFileSync(APP_PATH, "utf8");
   const markerIndex = source.lastIndexOf(INITIALIZATION_MARKER);
   assert.notEqual(markerIndex, -1, "app.js initialization marker must remain present");
 
   const elements = new Map();
+  const allElements = new Set();
+  let document;
+  const createElement = (tag) => {
+    const element = new FakeElement(tag, () => document);
+    allElements.add(element);
+    return element;
+  };
   const elementFor = (id) => {
-    if (!elements.has(id)) elements.set(id, new FakeElement());
+    if (!elements.has(id)) {
+      const element = createElement();
+      element.id = id;
+      elements.set(id, element);
+    }
     return elements.get(id);
   };
-  const document = {
+  document = {
     activeElement: null,
-    createElement: (tag) => new FakeElement(tag),
+    listeners: {},
+    registerId: (id, element) => elements.set(id, element),
+    createElement,
     getElementById: elementFor,
-    querySelector: (selector) => selector === ".thread-search-label" ? elementFor("thread-search-label") : null,
-    querySelectorAll: () => [],
+    querySelector: (selector) => selector === ".thread-search-label" ? elementFor("thread-search-label") : [...allElements].find((element) => matchesSelector(element, selector)) || null,
+    querySelectorAll: (selector) => [...allElements].filter((element) => matchesSelector(element, selector)),
+    addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); },
+    dispatch(type, event = {}) {
+      if (!event.preventDefault) event.preventDefault = () => { event.defaultPrevented = true; };
+      if (!event.stopPropagation) event.stopPropagation = () => { event.cancelBubble = true; };
+      for (const listener of this.listeners[type] || []) listener.call(this, event);
+    },
+    documentElement: { style: { setProperty() {} } },
+  };
+  const windowListeners = {};
+  const window = {
+    addEventListener(type, listener) { (windowListeners[type] ||= []).push(listener); },
+    removeEventListener(type, listener) {
+      windowListeners[type] = (windowListeners[type] || []).filter((item) => item !== listener);
+    },
+    dispatch(type, event = {}) {
+      for (const listener of [...(windowListeners[type] || [])]) listener.call(window, event);
+    },
+    listeners: windowListeners,
+    crypto: { randomUUID: () => "test-client" },
   };
   const context = {
     Date: DateImpl,
@@ -107,13 +195,10 @@ function loadApp({ DateImpl = Date, fetchImpl, initialize = false, setTimeoutImp
     console,
     document,
     fetch: fetchImpl || (() => new Promise(() => {})),
-    localStorage: { getItem: () => null, setItem() {} },
+    localStorage: storage || { getItem: () => null, setItem() {} },
     setTimeout: setTimeoutImpl || (() => 0),
     clearTimeout: clearTimeoutImpl || (() => {}),
-    window: {
-      addEventListener() {},
-      crypto: { randomUUID: () => "test-client" },
-    },
+    window,
   };
   const testExports = `
 globalThis.testApi = {
@@ -133,6 +218,7 @@ globalThis.testApi = {
   launchTask,
   loadTaskHistory,
   updateTaskActions,
+  updateFreshTaskActions,
   selectSession,
   updateHistoryActions,
   launchActiveThread,
@@ -146,8 +232,17 @@ globalThis.testApi = {
   reorderTask,
   saveTask,
   taskMatches,
+  taskPresence,
+  startFreshTask,
+  beginColumnResize,
+  beginSidebarResize,
+  inlineRename,
+  prioritySelect,
+  renderSidebar,
+  restoreViewSettings,
+  storeViewSettings,
   getState: function () {
-    return { latestBoard: latestBoard, queueMode: queueMode, statusFilter: statusFilter, selectedProject: selectedProject, groupBy: groupBy, sortBy: sortBy, sortDirection: sortDirection, columns: columnOrder.slice(), activeSid: activeSid };
+    return { latestBoard: latestBoard, queueMode: queueMode, statusFilter: statusFilter, selectedProject: selectedProject, groupBy: groupBy, sortBy: sortBy, sortDirection: sortDirection, columns: columnOrder.slice(), widths: Object.assign({}, columnWidths), collapsedGroups: Object.assign({}, collapsedGroups), sidebarWidth: sidebarWidth, sidebarManualOrder: sidebarManualOrder, activePointerGesture: activePointerGesture, filters: filters, activeSid: activeSid };
   },
   setState: function (next) {
     if (Object.prototype.hasOwnProperty.call(next, "latestBoard")) latestBoard = next.latestBoard;
@@ -159,6 +254,9 @@ globalThis.testApi = {
     if (Object.prototype.hasOwnProperty.call(next, "sortDirection")) sortDirection = next.sortDirection;
     if (Object.prototype.hasOwnProperty.call(next, "columns")) columnOrder = next.columns;
     if (Object.prototype.hasOwnProperty.call(next, "filters")) filters = next.filters;
+    if (Object.prototype.hasOwnProperty.call(next, "sidebarWidth")) sidebarWidth = next.sidebarWidth;
+    if (Object.prototype.hasOwnProperty.call(next, "sidebarManualOrder")) sidebarManualOrder = next.sidebarManualOrder;
+    if (Object.prototype.hasOwnProperty.call(next, "activePointerGesture")) activePointerGesture = next.activePointerGesture;
     if (Object.prototype.hasOwnProperty.call(next, "readerMode")) readerMode = next.readerMode;
   }
 };
@@ -167,7 +265,7 @@ globalThis.testApi = {
   vm.runInNewContext(prefix + testExports, context, {
     filename: APP_PATH,
   });
-  return { api: context.testApi, elementFor };
+  return { api: context.testApi, elementFor, document, window };
 }
 
 function activeTask(overrides = {}) {
@@ -191,6 +289,22 @@ function findByClass(node, className) {
     if (found) return found;
   }
   return null;
+}
+
+function findAllByClass(node, className, found = []) {
+  if (node.classList && node.classList.contains(className)) found.push(node);
+  for (const child of node.children || []) findAllByClass(child, className, found);
+  return found;
+}
+
+function findListRow(root, name) {
+  return findAllByClass(root, "list-row").find((row) =>
+    findAllByClass(row, "project-name").some((label) => label.textContent === name),
+  );
+}
+
+function flush() {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 test("renderTurnBody escapes fenced code while retaining prose formatting", () => {
@@ -375,6 +489,18 @@ test("a board response started before a successful edit cannot overwrite the edi
   assert.equal(api.getState().latestBoard.tasks[0].title, "new");
 });
 
+test("a poll response arriving during a pointer gesture does not repaint", async () => {
+  let resolve;
+  const { api } = loadApp({ fetchImpl: () => new Promise(next => { resolve = next; }) });
+  const original = activeTask({ title: "editing" });
+  api.setState({ latestBoard: { tasks: [original], projects: [], folders: [] } });
+  const poll = api.fetchBoard();
+  api.setState({ activePointerGesture: true });
+  resolve({ ok: true, json: async () => ({ tasks: [activeTask({ title: "stale" })], projects: [], folders: [] }) });
+  await poll;
+  assert.equal(api.getState().latestBoard.tasks[0].title, "editing");
+});
+
 test("a stalled task save times out truthfully and releases its save queue", async () => {
   const timers = [], requests = [];
   const { api } = loadApp({
@@ -484,6 +610,47 @@ test("saved view snapshots migrate closed to completed and retain table layout s
   assert.deepEqual(snapshot.columns.slice(0, 2), ["agent", "name"]);
 });
 
+test("saved view widths and collapsed groups round trip with clamps", () => {
+  const { api } = loadApp();
+  api.applySnapshot({
+    scope: "all", columns: ["name", "due", "updated", "priority", "terminal", "agent"],
+    columnWidths: { name: 12, due: 9999 }, collapsedGroups: { "group-all-priority-urgent": true },
+  });
+  const state = api.getState();
+  assert.equal(state.widths.name, 72);
+  assert.equal(state.widths.due, 600);
+  assert.equal(state.collapsedGroups["group-all-priority-urgent"], true);
+  api.applySnapshot({ scope: "all", columns: ["name", "name", "updated", "priority", "terminal", "agent"] });
+  assert.deepEqual(JSON.parse(JSON.stringify(api.getState().columns)), ["name", "due", "updated", "priority", "terminal", "agent"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(api.getState().widths)), {});
+});
+
+test("sidebar size and manual order persist globally across views", () => {
+  const values = new Map();
+  const storage = { getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value) };
+  const { api } = loadApp({ storage });
+  api.setState({ queueMode: "open", sidebarWidth: 420, sidebarManualOrder: true });
+  api.storeViewSettings();
+  api.setState({ queueMode: "today", sidebarWidth: 250, sidebarManualOrder: false });
+  api.restoreViewSettings();
+  assert.equal(api.getState().sidebarWidth, 420);
+  assert.equal(api.getState().sidebarManualOrder, true);
+});
+
+test("last update filters honor 24h, 7d, and 30d boundaries", () => {
+  const now = 1_789_000_000;
+  const { api, elementFor } = loadApp({ DateImpl: fixedDate(now * 1000) });
+  elementFor("work-search").value = "";
+  const base = { provider: "any", priority: "any", terminal: "any", due: "any", presence: "any" };
+  api.setState({ queueMode: "all", filters: { ...base, lastUpdate: "24h" } });
+  assert.equal(api.taskMatches(activeTask({ last_activity_at: now - 86399 })), true);
+  assert.equal(api.taskMatches(activeTask({ last_activity_at: now - 86401 })), false);
+  api.setState({ filters: { ...base, lastUpdate: "7d" } });
+  assert.equal(api.taskMatches(activeTask({ last_activity_at: now - 604799 })), true);
+  api.setState({ filters: { ...base, lastUpdate: "30d" } });
+  assert.equal(api.taskMatches(activeTask({ last_activity_at: now - 2592001 })), false);
+});
+
 test("lifecycle status intersects Today and retains the selected List", () => {
   const { api, elementFor } = loadApp();
   const completedToday = activeTask({ task_id: "done", list_key: "list:yoga", work_status: "done", in_today: true });
@@ -498,6 +665,17 @@ test("lifecycle status intersects Today and retains the selected List", () => {
   assert.equal(api.getState().queueMode, "today");
   assert.equal(api.getState().selectedProject, "list:yoga");
   assert.equal(api.taskMatches(completedToday), true);
+});
+
+test("Today restores its heading and attention note", () => {
+  const { api, elementFor } = loadApp();
+  api.setState({
+    latestBoard: { tasks: [], projects: [], folders: [], workspace: { spaces: [], folders: [], lists: [] } },
+    queueMode: "today",
+  });
+  api.renderBoard(api.getState().latestBoard);
+  assert.equal(elementFor("work-heading").textContent, "Today");
+  assert.equal(elementFor("today-note").hidden, false);
 });
 
 test("task-modal launch remains canonical even after selecting an older conversation", async () => {
@@ -738,4 +916,324 @@ test("rendering restored view state keeps every toolbar control synchronized", (
   assert.equal(elementFor("filter-priority").value, "high");
   assert.equal(elementFor("filter-terminal").value, "idle");
   assert.equal(elementFor("filter-due").value, "today");
+});
+
+test("Open terminals is presence-only while unknown remains available in All threads", () => {
+  const { api, elementFor } = loadApp();
+  const openCompleted = activeTask({ work_status: "done", terminal_presence: "open" });
+  const unknown = activeTask({ task_id: "unknown", terminal_presence: "unknown" });
+  api.setState({ queueMode: "open", statusFilter: "active", filters: { provider: "any", priority: "any", terminal: "any", due: "any", presence: "any", lastUpdate: "any" } });
+  elementFor("work-search").value = "";
+  assert.equal(api.taskMatches(openCompleted), true, "presence, not work completion, defines Open terminals");
+  assert.equal(api.taskMatches(unknown), false);
+  api.setState({ queueMode: "all", statusFilter: "all", filters: { provider: "any", priority: "any", terminal: "any", due: "any", presence: "unknown", lastUpdate: "any" } });
+  assert.equal(api.taskMatches(unknown), true);
+  assert.equal(api.taskPresence(activeTask({ terminal_open: true })), "open");
+  assert.equal(api.taskPresence(activeTask({})), "unknown");
+});
+
+test("latest update descending puts the newest numeric timestamp first", () => {
+  const { api } = loadApp();
+  api.setState({ sortBy: "updated", sortDirection: "desc" });
+  assert.ok(api.taskComparator(activeTask({ task_id: "new", last_activity_at: 200 }), activeTask({ task_id: "old", last_activity_at: 100 })) < 0);
+  api.setState({ sortDirection: "asc" });
+  assert.ok(api.taskComparator(activeTask({ task_id: "new", last_activity_at: 200 }), activeTask({ task_id: "old", last_activity_at: 100 })) > 0);
+});
+
+test("Start fresh uses the isolated start endpoint and never the continuation route", async () => {
+  const requests = [];
+  const { api } = loadApp({ fetchImpl: (path, options = {}) => {
+    requests.push({ path, options });
+    return Promise.resolve({ ok: true, json: async () => ({}) });
+  } });
+  const task = activeTask({ launch_revision: "rev-new", start_actions: { codex: { label: "Start fresh in CodeX", available: true } } });
+  await api.startFreshTask(task, "codex");
+  assert.equal(requests[0].path, "/api/tasks/task-1/start");
+  assert.deepEqual(JSON.parse(requests[0].options.body), { provider: "codex", full_access: false, launch_revision: "rev-new" });
+});
+
+test("pointercancel releases both resize gestures so board polling resumes", async () => {
+  const requests = [];
+  const board = { tasks: [activeTask({ terminal_presence: "open" })], projects: [], folders: [] };
+  const { api, document, window } = loadApp({
+    fetchImpl: (requestPath, options = {}) => {
+      requests.push({ requestPath, options });
+      return Promise.resolve({ ok: true, json: async () => board });
+    },
+  });
+  api.setState({ latestBoard: board, queueMode: "all" });
+
+  const header = document.createElement("th");
+  const resize = document.createElement("button");
+  resize.id = "column-resize-all-priority-normal-name";
+  header.appendChild(resize);
+  api.beginColumnResize({ currentTarget: resize, clientX: 10 }, "name");
+  assert.equal(api.getState().activePointerGesture, true);
+  assert.equal(window.listeners.pointercancel.length, 1);
+  window.dispatch("pointercancel");
+  assert.equal(api.getState().activePointerGesture, false);
+  assert.equal(window.listeners.pointermove.length, 0);
+  assert.equal(window.listeners.pointerup.length, 0);
+  assert.equal(window.listeners.pointercancel.length, 0);
+
+  api.beginSidebarResize({ clientX: 10 });
+  assert.equal(api.getState().activePointerGesture, true);
+  window.dispatch("pointercancel");
+  assert.equal(api.getState().activePointerGesture, false);
+  assert.equal(window.listeners.pointermove.length, 0);
+  assert.equal(window.listeners.pointerup.length, 0);
+  assert.equal(window.listeners.pointercancel.length, 0);
+
+  await api.fetchBoard();
+  assert.equal(requests.filter(({ requestPath }) => requestPath === "/api/board").length, 1);
+});
+
+test("a deferred board response preserves an inline rename draft opened in flight", async () => {
+  let resolve;
+  const original = activeTask({ title: "Original", terminal_presence: "open" });
+  const { api, document } = loadApp({
+    fetchImpl: () => new Promise((next) => { resolve = next; }),
+  });
+  api.setState({ latestBoard: { tasks: [original], projects: [], folders: [] }, queueMode: "all" });
+
+  const poll = api.fetchBoard();
+  const row = api.renderTaskRow(original);
+  findByClass(row, "rename-pencil").dispatch("click");
+  const input = document.querySelector(".inline-rename");
+  input.value = "Unsaved draft";
+  resolve({ ok: true, json: async () => ({ tasks: [activeTask({ title: "Stale" })], projects: [], folders: [] }) });
+  await poll;
+
+  assert.equal(document.querySelector(".inline-rename"), input);
+  assert.equal(input.value, "Unsaved draft");
+  assert.equal(api.getState().latestBoard.tasks[0].title, "Original", "the response must not replace board data during the edit");
+});
+
+test("List-row drops stop bubbling and keep sibling ordering separate from parent moves", async () => {
+  const requests = [];
+  const board = {
+    tasks: [], projects: [], folders: [],
+    workspace: {
+      spaces: [{ space_id: "space-a", name: "Space A", position: 0 }],
+      folders: [
+        { folder_id: "folder-a", space_id: "space-a", name: "Folder A", position: 0 },
+        { folder_id: "folder-b", space_id: "space-a", name: "Folder B", position: 1 },
+      ],
+      lists: [
+        { list_key: "source", space_id: "space-a", folder_id: "folder-a", name: "Source", position: 0 },
+        { list_key: "sibling", space_id: "space-a", folder_id: "folder-a", name: "Sibling", position: 1 },
+        { list_key: "cross-parent", space_id: "space-a", folder_id: "folder-b", name: "Cross parent", position: 0 },
+      ],
+    },
+  };
+  const { api, elementFor } = loadApp({
+    fetchImpl: (requestPath, options = {}) => {
+      requests.push({ requestPath, options });
+      return Promise.resolve({ ok: true, json: async () => requestPath === "/api/board" ? board : { tasks: [] } });
+    },
+  });
+  api.setState({ latestBoard: board, queueMode: "all" });
+  api.renderBoard(board);
+
+  async function dropOn(name, clientY) {
+    const root = elementFor("folder-list");
+    const source = findListRow(root, "Source");
+    const target = findListRow(root, name);
+    target.getBoundingClientRect = () => ({ top: 10, height: 20, width: 0 });
+    source.children[0].dispatch("dragstart", { dataTransfer: { setData() {} } });
+    target.dispatch("drop", { clientY });
+    await flush();
+    await flush();
+  }
+
+  await dropOn("Sibling", 11);
+  await dropOn("Sibling", 29);
+  await dropOn("Cross parent", 11);
+  await dropOn("Source", 11);
+
+  const mutations = requests
+    .filter(({ options }) => options.method === "POST" || options.method === "PATCH")
+    .map(({ requestPath, options }) => [requestPath, JSON.parse(options.body)]);
+  assert.deepEqual(mutations, [
+    ["/api/workspace/reorder", { kind: "list", node_id: "source", target_id: "sibling", placement: "before" }],
+    ["/api/workspace/reorder", { kind: "list", node_id: "source", target_id: "sibling", placement: "after" }],
+    ["/api/workspace/reorder", { kind: "list", node_id: "source", target_id: "cross-parent", placement: "before" }],
+  ]);
+});
+
+test("priority menus support keyboard selection, Escape, and click-away dismissal", async () => {
+  const requests = [];
+  const task = activeTask({ priority: "normal" });
+  const { api, document } = loadApp({
+    initialize: true,
+    fetchImpl: (requestPath, options = {}) => {
+      requests.push({ requestPath, options });
+      if (requestPath === "/api/meta") return Promise.resolve({ ok: true, json: async () => ({ csrf_token: "token" }) });
+      if (requestPath === "/api/board") return Promise.resolve({ ok: true, json: async () => ({ tasks: [task], projects: [], folders: [] }) });
+      return Promise.resolve({ ok: true, json: async () => ({ task: { ...task, priority: "high" } }) });
+    },
+  });
+  api.setState({ latestBoard: { tasks: [task], projects: [], folders: [] }, queueMode: "all" });
+  const menu = api.prioritySelect(task);
+  const summary = menu.children[0];
+  const options = menu.children[1].children;
+  summary.dispatch("keydown", { key: "ArrowDown" });
+  assert.equal(menu.open, true);
+  assert.equal(document.activeElement, options[2]);
+  options[2].dispatch("keydown", { key: "ArrowUp" });
+  assert.equal(document.activeElement, options[1]);
+  options[1].dispatch("keydown", { key: "Enter" });
+  await flush();
+  assert.equal(menu.open, false);
+  const priorityPayload = JSON.parse(
+    requests.find(({ options }) => options.method === "PATCH").options.body,
+  );
+  assert.equal(priorityPayload.priority, "high");
+  assert.equal(priorityPayload._edit_client, "test-client");
+  assert.equal(priorityPayload._edit_revision, 1);
+
+  const escapeMenu = api.prioritySelect(task);
+  escapeMenu.open = true;
+  escapeMenu.children[1].children[0].dispatch("keydown", { key: "Escape" });
+  assert.equal(escapeMenu.open, false);
+  assert.equal(document.activeElement, escapeMenu.children[0]);
+
+  const outsideMenu = api.prioritySelect(task);
+  outsideMenu.open = true;
+  document.dispatch("click", { target: document.createElement("div") });
+  assert.equal(outsideMenu.open, false);
+});
+
+test("group collapse persists across reloads and restores focus to its toggle", () => {
+  const values = new Map();
+  const storage = { getItem: (key) => values.get(key) || null, setItem: (key, value) => values.set(key, value) };
+  const board = { tasks: [activeTask({ priority: "urgent", terminal_presence: "open" })], projects: [], folders: [] };
+  const first = loadApp({ storage });
+  first.api.setState({ latestBoard: board, queueMode: "all", statusFilter: "all" });
+  first.api.renderBoard(board);
+  const toggleId = "group-toggle-group-all-priority-urgent";
+  first.elementFor(toggleId).dispatch("click");
+  assert.equal(first.api.getState().collapsedGroups["group-all-priority-urgent"], true);
+  assert.equal(first.document.activeElement.id, toggleId);
+  assert.equal(first.elementFor("group-all-priority-urgent").hidden, true);
+
+  const restored = loadApp({ storage });
+  restored.api.setState({ latestBoard: board, queueMode: "all", statusFilter: "all" });
+  restored.api.restoreViewSettings();
+  restored.api.renderBoard(board);
+  assert.equal(restored.api.getState().collapsedGroups["group-all-priority-urgent"], true);
+  assert.equal(restored.elementFor("group-all-priority-urgent").hidden, true);
+});
+
+test("column resize controls are unique per priority group and retain focus after cancel", () => {
+  const board = {
+    tasks: [
+      activeTask({ task_id: "urgent", priority: "urgent", terminal_presence: "open" }),
+      activeTask({ task_id: "normal", priority: "normal", terminal_presence: "open" }),
+    ],
+    projects: [], folders: [],
+  };
+  const { api, elementFor, document, window } = loadApp();
+  api.setState({ latestBoard: board, queueMode: "all", statusFilter: "all" });
+  api.renderBoard(board);
+  const resizeControls = findAllByClass(elementFor("task-groups"), "column-resize");
+  assert.equal(new Set(resizeControls.map((control) => control.id)).size, resizeControls.length);
+  const normalNameResize = resizeControls.find((control) => control.id.includes("normal") && control.id.endsWith("-name"));
+  assert.ok(normalNameResize, "the normal-priority name resize control is addressable");
+  normalNameResize.dispatch("pointerdown", { clientX: 10 });
+  window.dispatch("pointercancel");
+  assert.equal(document.activeElement.id, normalNameResize.id);
+});
+
+test("a missing current-task transcript keeps fresh starts available without duplicate errors", async () => {
+  const task = activeTask({
+    session_id: "current-session",
+    actions: {
+      claude: { label: "Continue Claude", available: false, reason: "Transcript is unavailable" },
+      codex: { label: "Continue CodeX", available: false, reason: "Transcript is unavailable" },
+    },
+    start_actions: {
+      claude: { label: "Start fresh Claude", available: true },
+      codex: { label: "Start fresh CodeX", available: true },
+    },
+  });
+  const { api, elementFor, document } = loadApp({
+    fetchImpl: (requestPath) => {
+      assert.equal(requestPath, "/api/session/current-session");
+      return Promise.resolve({ ok: true, json: async () => ({
+        meta: {
+          session_id: "current-session", title: "Current task", folder: "/repo",
+          cwd: "/repo", provider_name: "Claude", msg_count: 0,
+        },
+        turns: [],
+        transcript_error: "The original transcript is unavailable.",
+      }) });
+    },
+  });
+  elementFor("task-dialog").dataset.taskId = task.task_id;
+  api.setState({ latestBoard: { tasks: [task], projects: [], folders: [] }, readerMode: "task" });
+  ["claude", "codex"].forEach((provider) => { elementFor("task-fresh-" + provider).disabled = true; });
+  api.updateFreshTaskActions(task);
+  api.selectSession("current-session");
+  await flush();
+
+  assert.equal(elementFor("thread-error").hidden, false);
+  assert.match(elementFor("thread-error").textContent, /original transcript/i);
+  assert.equal(elementFor("thread-search").hidden, true);
+  assert.equal(document.querySelector(".thread-search-label").hidden, true);
+  assert.equal(elementFor("transcript").children.length, 0, "the generic empty-transcript card is suppressed");
+  ["claude", "codex"].forEach((provider) => {
+    assert.equal(elementFor("task-" + provider + "-reason").hidden, true);
+    assert.match(elementFor("task-" + provider).title, /transcript/i);
+    assert.equal(elementFor("task-fresh-" + provider).disabled, false);
+    assert.equal(elementFor("task-fresh-" + provider).textContent, task.start_actions[provider].label);
+  });
+});
+
+test("stored view settings reset by scope and invalid data falls back to defaults", () => {
+  const values = new Map();
+  const storage = { getItem: (key) => values.get(key) || null, setItem: (key, value) => values.set(key, value) };
+  values.set("agent-board.view-settings.v2", JSON.stringify({
+    sidebarWidth: 420,
+    sidebarManualOrder: true,
+    views: {
+      open: {
+        sort: "priority", sortDirection: "desc",
+        columns: ["agent", "terminal", "priority", "updated", "due", "name"],
+        widths: { name: 310 }, collapsedGroups: { "group-open-priority-urgent": true },
+      },
+    },
+  }));
+  const { api } = loadApp({ storage });
+  api.setState({ queueMode: "open" });
+  api.restoreViewSettings();
+  assert.equal(api.getState().sortBy, "priority");
+  assert.equal(api.getState().widths.name, 310);
+
+  api.setState({ queueMode: "today" });
+  api.restoreViewSettings();
+  assert.equal(api.getState().sortBy, "manual");
+  assert.deepEqual(JSON.parse(JSON.stringify(api.getState().columns)), ["name", "due", "updated", "priority", "terminal", "agent"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(api.getState().widths)), {});
+  assert.deepEqual(JSON.parse(JSON.stringify(api.getState().collapsedGroups)), {});
+  assert.equal(api.getState().sidebarWidth, 420, "sidebar preference remains global");
+  assert.equal(api.getState().sidebarManualOrder, true);
+
+  values.set("agent-board.view-settings.v2", "not json");
+  api.restoreViewSettings();
+  assert.equal(api.getState().sortBy, "manual");
+  assert.equal(api.getState().sidebarWidth, 250);
+  assert.equal(api.getState().sidebarManualOrder, false);
+});
+
+test("Unknown presence shows the All-threads escape note", () => {
+  const { api, elementFor } = loadApp();
+  api.setState({
+    queueMode: "open",
+    latestBoard: { tasks: [activeTask({ terminal_presence: "unknown" })], projects: [], folders: [] },
+  });
+  api.renderBoard(api.getState().latestBoard);
+  assert.equal(elementFor("unknown-count").textContent, "(1 unknown)");
+  assert.equal(elementFor("presence-note").hidden, false);
+  assert.match(elementFor("presence-note").textContent, /Find them in All threads/);
 });

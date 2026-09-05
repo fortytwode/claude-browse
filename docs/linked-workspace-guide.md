@@ -2,6 +2,14 @@
 
 Open Agent Board at [http://127.0.0.1:51444/](http://127.0.0.1:51444/).
 
+## Start with what is open now
+
+**Open terminals on this Mac** is the default work view. It shows verified open Claude/Codex conversations, including idle ones, independently of whether you marked their work complete. Closing a terminal never archives its task.
+
+Use **All threads** for older conversations or **Today** for due work. The work-status filter distinguishes To do, Completed, and Archived. Presence is separate: Open, Closed, or Unknown. Unknown means the board could not verify that session on this Mac; it does not mean the terminal closed.
+
+Already-open conversations missed by older hooks are captured automatically. Sidebar counts show **open / total** threads. Lists start in **Open first** order; choose **Manual order** or drag a list to keep your own sibling order. Drag the sidebar edge to resize it.
+
 ## Organize work
 
 The sidebar is a hierarchy:
@@ -40,6 +48,8 @@ Task and List launch buttons show the destination and available agent.
 
 For a handoff, the original raw transcript must still be available on this Mac. If it is not, the task and existing history remain saved, but the handoff is blocked.
 
+**Start fresh** offers Claude or Codex in the linked working folder even when the original transcript is missing. This starts without the old conversation's context. The new conversation attaches to the same task, while its earlier history links remain available.
+
 The **Full access (skip permissions)** choice controls the agent's permission prompt behavior. It is not filesystem confinement: the List's working folder is the chosen launch destination, not a security sandbox.
 
 New terminal conversations started independently are captured as their own tasks. An intentional continuation keeps one visible task and retains its older conversations. In the task reader, use the **Conversation** selector to open an earlier or current conversation.
@@ -48,11 +58,17 @@ New terminal conversations started independently are captured as their own tasks
 
 Use the toolbar to group, sort, search, and filter tasks. You can sort by name, due date, last update, priority, terminal state, or agent.
 
-Drag column headers to change their order. Use the column-header `...` menu as a non-drag alternative. Task rows and sidebar items also offer **Move up** and **Move down** alternatives to drag-and-drop.
+Click a colored priority flag to choose Urgent (red), High (amber), Normal (blue), or Low (gray). The chevron beside each group collapses or expands it.
 
-Save a configured view with the **+** beside **Saved views** in the sidebar. Saved views retain their filters, grouping, sorting, and column order in this browser.
+Click a task title to read it, or its pencil to rename it. Enter saves and Escape cancels. The saved name also appears in the Agent Board terminal status line on its next update; existing operating-system tab titles and original provider transcripts are not rewritten.
 
-Closed work is recoverable through the **Completed** and **Archived** status filters. These replace the older standalone Done navigation.
+Drag column headers to change their order, or use their left/right arrows. Drag a column's resize edge to adjust its width; focused resize controls also accept keyboard arrows. Task rows and sidebar items offer **Move up** and **Move down** alternatives to drag-and-drop.
+
+Filters include agent, priority, presence, last reported terminal state, due date, and last update (24 hours, 7 days, or 30 days). Select **Last update** with descending order to see newest activity first.
+
+Save a configured view with the **+** beside **Saved views** in the sidebar. Saved views retain their filters, grouping, sorting, and table layout in this browser. Column layout and collapsed groups are view-specific; sidebar width and list-order preference apply across the workspace.
+
+Completed and archived work remain accessible through the work-status filter. **Thread History** stays available as a secondary, broader transcript search; ordinary reviewing and continuation do not require switching away from the work view.
 
 ## Current boundaries
 

@@ -16,19 +16,20 @@ edit/command detail, which no provider parser captures today.
 from __future__ import annotations
 
 import json
+import math
 import os
 import secrets
 import sqlite3
 import sys
 import threading
 import webbrowser
-from datetime import date
+from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import fts
-from .board import commands, launches, projects, store, work_items, workspace
+from .board import commands, discovery, launches, presence, projects, store, work_items, workspace
 from .core import display_cwd, folder_name, format_date, provider_display_name
 from .providers import get_provider
 
@@ -85,13 +86,49 @@ def _provider_available(provider: str) -> bool:
         return False
 
 
-def _launch_actions(session: dict) -> dict:
+def _provider_availability() -> dict[str, bool]:
+    """Snapshot local provider binaries once for one response."""
+    return {provider: _provider_available(provider) for provider in work_items.PROVIDERS}
+
+
+def _availability_check(availability: dict[str, bool] | None):
+    if availability is None:
+        return _provider_available
+    return lambda provider: availability.get(provider, False)
+
+
+def _launch_actions(session: dict, *, availability: dict[str, bool] | None = None) -> dict:
+    availability_check = _availability_check(availability)
     actions = {}
     for target in work_items.PROVIDERS:
         actions[target] = commands.action_status(
-            session, target, availability_check=_provider_available
+            session, target, availability_check=availability_check
         )
     return actions
+
+
+def _timestamp_seconds(value: object) -> float:
+    """Normalize runtime seconds and indexed ISO dates at the API boundary."""
+    if isinstance(value, bool) or value is None:
+        return 0.0
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            result = parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).timestamp()
+        except (TypeError, ValueError, OverflowError, OSError):
+            return 0.0
+    return result if math.isfinite(result) and result > 0 else 0.0
+
+
+def _thread_counts(tasks: list[dict]) -> dict[str, int]:
+    return {
+        "total": len(tasks),
+        "open_terminal": sum(task.get("terminal_presence") == "open" for task in tasks),
+        "closed_terminal": sum(task.get("terminal_presence") == "closed" for task in tasks),
+        "unknown_terminal": sum(task.get("terminal_presence") == "unknown" for task in tasks),
+    }
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -189,6 +226,9 @@ class _Handler(BaseHTTPRequestHandler):
             elif parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/launch"):
                 task_id = unquote(parsed.path[len("/api/tasks/") : -len("/launch")])
                 self._launch_task(task_id, body)
+            elif parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/start"):
+                task_id = unquote(parsed.path[len("/api/tasks/") : -len("/start")])
+                self._launch_task(task_id, body, fresh=True)
             elif parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/launch"):
                 sid = unquote(parsed.path[len("/api/sessions/") : -len("/launch")])
                 self._launch_session(sid, body)
@@ -372,7 +412,10 @@ class _Handler(BaseHTTPRequestHandler):
             launch = self._task_to_json(overlay)
             meta["task_launch"] = {
                 key: launch[key]
-                for key in ("task_id", "session_id", "launch_revision", "working_directory", "actions")
+                for key in (
+                    "task_id", "session_id", "launch_revision", "working_directory",
+                    "actions", "start_actions",
+                )
             }
         path = str(row.get("path") or "")
         if not path or not os.path.isfile(path):
@@ -402,17 +445,27 @@ class _Handler(BaseHTTPRequestHandler):
             }
         )
 
-    def _task_to_json(self, task: dict, indexed_session: dict | None = None, *, workspace_seeded: bool = False) -> dict:
+    def _task_to_json(
+        self, task: dict, indexed_session: dict | None = None, *,
+        workspace_seeded: bool = False, presence_state: str | None = None,
+        runtime: dict | None | object = commands._UNSET,
+        availability: dict[str, bool] | None = None,
+    ) -> dict:
         session_id = str(task.get("session_id") or "")
         provider = str(task.get("session_provider") or "claude")
         cwd = str(task.get("session_cwd") or "")
-        runtime = store.get(session_id) if session_id else None
+        if runtime is commands._UNSET:
+            runtime = store.get(session_id) if session_id else None
+        if presence_state is None:
+            presence_state = presence.snapshot([runtime] if runtime else []).get(session_id, "unknown")
         terminal_state = store.display_state(runtime) if runtime else "gone"
         unattended = store.is_unattended(runtime)
         needs_attention = bool(runtime and runtime.get("state") == "needs-input")
         last_activity = max(
-            float((runtime or {}).get("updated_at") or 0),
-            float(task.get("updated_at") or 0),
+            _timestamp_seconds((runtime or {}).get("updated_at")),
+            _timestamp_seconds(task.get("updated_at")),
+            _timestamp_seconds((indexed_session or {}).get("last_timestamp")),
+            _timestamp_seconds((indexed_session or {}).get("timestamp")),
         )
         work_status = str(task.get("status") or "active")
         due_date = task.get("due_date")
@@ -425,15 +478,23 @@ class _Handler(BaseHTTPRequestHandler):
             )
         )
         cwd_available = bool(cwd and os.path.isdir(cwd))
-        launch_session = commands.session_for_launch(session_id, indexed_session) or {
+        launch_session = commands.session_for_launch(
+            session_id, indexed_session, runtime
+        ) or {
             "session_id": session_id,
             "provider": provider,
             "cwd": cwd,
         }
         context = workspace.context_for_task(task, seeded=workspace_seeded)
+        availability_check = _availability_check(availability)
         actions = {
             target: launches.action_status(
-                launch_session, context, target, availability_check=_provider_available
+                launch_session, context, target, availability_check=availability_check
+            ) for target in work_items.PROVIDERS
+        }
+        start_actions = {
+            target: launches.action_status(
+                None, context, target, availability_check=availability_check
             ) for target in work_items.PROVIDERS
         }
         public_task = {
@@ -464,26 +525,37 @@ class _Handler(BaseHTTPRequestHandler):
             "summary": summary,
             "work_status": work_status,
             "terminal_state": terminal_state,
+            "terminal_runtime_state": (runtime or {}).get("state") or "unknown",
+            "terminal_presence": presence_state,
+            "terminal_open": presence_state == "open",
             "runtime_host": (runtime or {}).get("host") or "",
             "unattended": unattended,
             "in_today": in_today,
             "last_activity_at": last_activity,
             "project_available": cwd_available,
             "actions": actions,
+            "start_actions": start_actions,
             "sort_key": sort_key,
             **context,
         }
 
     def _serve_board(self) -> None:
+        availability = _provider_availability()
+        availability_check = _availability_check(availability)
         workspace_snapshot = workspace.snapshot()
         for listing in workspace_snapshot["lists"]:
             listing.update(workspace.context_for_list(listing["list_key"], seeded=True))
             listing["actions"] = {
                 target: launches.action_status(
-                    None, listing, target, availability_check=_provider_available
+                    None, listing, target, availability_check=availability_check
                 ) for target in work_items.PROVIDERS
             }
         raw_tasks = work_items.list_items(include_done=True)
+        runtime_rows = [
+            store.get(session_id) if (session_id := str(task.get("session_id") or "")) else None
+            for task in raw_tasks
+        ]
+        presence_states = presence.snapshot([row for row in runtime_rows if row])
         indexed: dict[str, dict] = {}
         try:
             conn = fts.open_db(read_only=True)
@@ -498,8 +570,12 @@ class _Handler(BaseHTTPRequestHandler):
         except (OSError, sqlite3.Error):
             pass
         tasks = [
-            self._task_to_json(task, indexed.get(str(task.get("session_id") or "")), workspace_seeded=True)
-            for task in raw_tasks
+            self._task_to_json(
+                task, indexed.get(str(task.get("session_id") or "")), workspace_seeded=True,
+                presence_state=presence_states.get(str(task.get("session_id") or ""), "unknown"),
+                runtime=runtime_rows[index], availability=availability,
+            )
+            for index, task in enumerate(raw_tasks)
             if task.get("session_id")
         ]
         tasks.sort(key=lambda task: tuple(task["sort_key"]))
@@ -511,11 +587,26 @@ class _Handler(BaseHTTPRequestHandler):
             self._project_to_json(project, tasks)
             for project in project_rows
         ]
+        # Counts follow user-owned placement, not the original repository.
+        # Completion and terminal presence are independent; count every task.
+        for listing in workspace_snapshot["lists"]:
+            listing["counts"] = _thread_counts([
+                task for task in tasks if task["list_key"] == listing["list_key"]
+            ])
+        for folder in workspace_snapshot["folders"]:
+            folder["counts"] = _thread_counts([
+                task for task in tasks if task["folder_id"] == folder["folder_id"]
+            ])
+        for space in workspace_snapshot["spaces"]:
+            space["counts"] = _thread_counts([
+                task for task in tasks if task["space_id"] == space["space_id"]
+            ])
         self._send_json({
             "tasks": tasks,
             "projects": projects_json,
             "folders": work_items.list_folders(),
             "workspace": workspace_snapshot,
+            "counts": _thread_counts(tasks),
         })
 
     def _serve_task_history(self, task_id: str) -> None:
@@ -589,8 +680,15 @@ class _Handler(BaseHTTPRequestHandler):
         ]})
 
     def _workspace_reorder_node(self, body: dict) -> None:
-        self._workspace_fields(body, {"kind", "node_id", "direction"}, {"kind", "node_id", "direction"})
-        self._send_json({"node": workspace.move_node(**body)})
+        if "target_id" in body or "placement" in body:
+            fields = {"kind", "node_id", "target_id", "placement"}
+            self._workspace_fields(body, fields, fields)
+            node = workspace.place_node(**body)
+        else:
+            fields = {"kind", "node_id", "direction"}
+            self._workspace_fields(body, fields, fields)
+            node = workspace.move_node(**body)
+        self._send_json({"node": node})
 
     def _project_to_json(self, project: dict, tasks: list[dict]) -> dict:
         project_tasks = [
@@ -606,6 +704,7 @@ class _Handler(BaseHTTPRequestHandler):
             "inherited_descriptions": project.get("inherited_descriptions") or [],
             "order": int(project.get("position") or 0),
             "counts": {
+                **_thread_counts(project_tasks),
                 "active": sum(task["work_status"] == "active" for task in project_tasks),
                 "today": sum(bool(task["in_today"]) for task in project_tasks),
                 "needs_input": sum(
@@ -636,12 +735,12 @@ class _Handler(BaseHTTPRequestHandler):
             {"projects": [self._project_to_json(row, []) for row in rows]}
         )
 
-    def _launch_task(self, task_id: str, body: dict) -> None:
+    def _launch_task(self, task_id: str, body: dict, *, fresh: bool = False) -> None:
         task = work_items.get(task_id)
         if not task or not task.get("session_id"):
             self._send_json({"error": "task not found"}, status=404)
             return
-        self._launch_workspace("task", task_id, body)
+        self._launch_workspace("task-new" if fresh else "task", task_id, body)
 
     def _launch_workspace(self, kind: str, target_id: str, body: dict) -> None:
         fields = {"provider", "full_access", "launch_revision"}
@@ -704,12 +803,21 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
 
+def _capture_and_reconcile() -> None:
+    """Enroll live roots before reconciling their project placement."""
+    try:
+        discovery.capture_live_sessions()
+    except (OSError, sqlite3.Error):
+        pass
+    try:
+        work_items.reconcile_sessions()
+    except (OSError, sqlite3.Error):
+        pass
+
+
 def _reconcile_periodically(stop: threading.Event, interval_s: float) -> None:
     while not stop.wait(interval_s):
-        try:
-            work_items.reconcile_sessions()
-        except (OSError, sqlite3.Error):
-            pass
+        _capture_and_reconcile()
 
 
 def run_server(
@@ -741,7 +849,7 @@ def run_server(
     server.csrf_token = secrets.token_urlsafe(32)  # type: ignore[attr-defined]
     server.edit_revision_lock = threading.Lock()  # type: ignore[attr-defined]
     server.edit_revisions = {}  # type: ignore[attr-defined]
-    work_items.reconcile_sessions()
+    _capture_and_reconcile()
     reconcile_stop = threading.Event()
     reconcile_thread = threading.Thread(
         target=_reconcile_periodically,

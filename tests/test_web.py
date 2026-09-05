@@ -349,7 +349,7 @@ def test_web_assets_define_project_priority_and_reorder_contract():
 
     for contract in (
         'PRIORITY_GROUPS = ["urgent", "high", "normal", "low"]',
-        'TERMINAL_GROUPS = ["needs-input", "working", "idle", "ended", "gone"]',
+        'TERMINAL_GROUPS = ["needs-input", "working", "idle", "ended", "gone", "unknown"]',
         '"/api/workspace/tasks/reorder"',
         'mutate("/api/projects/reorder"',
         '"/api/projects/" + encodeURIComponent',
@@ -368,7 +368,7 @@ def test_web_assets_define_project_priority_and_reorder_contract():
     ):
         assert contract in javascript
 
-    assert "grid-template-columns: 250px minmax(0, 1fr)" in stylesheet
+    assert "grid-template-columns: var(--sidebar-width, 250px) 10px minmax(0, 1fr)" in stylesheet
     assert "work-sidebar" in stylesheet
     assert "task-link" in stylesheet
     assert "@media (max-width: 680px)" in stylesheet
@@ -426,7 +426,10 @@ def test_board_returns_summary_fallback_and_project_aggregates(web_server):
     assert project["name"] == first["project_name"]
     assert project["path"] == first["project_path"]
     assert project["description"] == "Project context"
-    assert project["counts"] == {"active": 1, "today": 0, "needs_input": 0}
+    assert project["counts"] == {
+        "active": 1, "today": 0, "needs_input": 0, "total": 2,
+        "open_terminal": 0, "closed_terminal": 0, "unknown_terminal": 2,
+    }
 
     conn = fts.open_db(fts.DB_PATH)
     conn.execute("UPDATE sessions SET last_msg = ? WHERE sid = ?", ("x" * 300, "summary-last"))

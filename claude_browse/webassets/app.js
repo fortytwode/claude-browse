@@ -7,8 +7,8 @@
     activeSessionMeta = null,
     currentTurns = null,
     readerMode = "history";
-  var queueMode = "all",
-    statusFilter = "active",
+  var queueMode = "open",
+    statusFilter = "all",
     groupBy = "priority",
     sortBy = "manual",
     sortDirection = "asc",
@@ -22,6 +22,8 @@
       priority: "any",
       terminal: "any",
       due: "any",
+      presence: "any",
+      lastUpdate: "any",
     },
     collapsedFolders = Object.create(null);
   var boardTimer = null,
@@ -40,12 +42,16 @@
         ? window.crypto.randomUUID()
         : String(Date.now()) + "-" + Math.random();
   var PRIORITY_GROUPS = ["urgent", "high", "normal", "low"],
-    TERMINAL_GROUPS = ["needs-input", "working", "idle", "ended", "gone"];
+    TERMINAL_GROUPS = ["needs-input", "working", "idle", "ended", "gone", "unknown"];
+  var TASK_ACTION_MODES = {
+    continue: { actionField: "actions", keyPrefix: "task", buttonPrefix: "task", fallbackLabel: "Continue in", endpoint: "launch", unavailable: "This launch is unavailable.", success: "Launch requested — check Terminal" },
+    fresh: { actionField: "start_actions", keyPrefix: "task-new", buttonPrefix: "task-fresh", fallbackLabel: "Start fresh in", endpoint: "start", unavailable: "This fresh start is unavailable.", success: "Fresh conversation requested — earlier history remains attached" },
+  };
   var PRIORITY_LABELS = {
       urgent: "⚑ Urgent",
       high: "⚑ High",
-      normal: "Normal",
-      low: "Low",
+      normal: "⚑ Normal",
+      low: "⚑ Low",
     },
     TERMINAL_LABELS = {
       "needs-input": "Needs input",
@@ -53,11 +59,18 @@
       idle: "Idle",
       ended: "Ended",
       gone: "Gone",
+      unknown: "Unknown",
     };
   var SAVED_VIEWS_KEY = "agent-board.saved-views.v1";
-  var VIEW_SETTINGS_KEY = "agent-board.view-settings.v1";
+  // v2 changes the initial board from unfinished work to verified-open terminals.
+  var VIEW_SETTINGS_KEY = "agent-board.view-settings.v2";
   var DATA_COLUMNS = ["name", "due", "updated", "priority", "terminal", "agent"];
-  var columnOrder = DATA_COLUMNS.slice();
+  var columnOrder = DATA_COLUMNS.slice(),
+    columnWidths = Object.create(null),
+    collapsedGroups = Object.create(null),
+    sidebarManualOrder = false,
+    sidebarWidth = 250,
+    activePointerGesture = false;
   function $(id) {
     return document.getElementById(id);
   }
@@ -171,6 +184,14 @@
   }
   function taskProjectKey(task) {
     return task.list_key || task.project_key;
+  }
+  function taskPresence(task) {
+    if (task.terminal_presence === "open" || task.terminal_presence === "closed" || task.terminal_presence === "unknown") return task.terminal_presence;
+    return task.terminal_open === true ? "open" : "unknown";
+  }
+  function terminalText(task) {
+    var presence = taskPresence(task);
+    return presence.charAt(0).toUpperCase() + presence.slice(1);
   }
   function displayProjects(board) {
     board = board || {};
@@ -287,11 +308,13 @@
   }
   function hasFilters() {
     return (
-      statusFilter !== "active" ||
+      (queueMode === "all" && statusFilter !== "all") ||
       filters.provider !== "any" ||
       filters.priority !== "any" ||
       filters.terminal !== "any" ||
-      filters.due !== "any"
+      filters.due !== "any" ||
+      (filters.presence || "any") !== "any" ||
+      (filters.lastUpdate || "any") !== "any"
     );
   }
   function reorderLockReason() {
@@ -323,6 +346,10 @@
     $("filter-priority").value = filters.priority;
     $("filter-terminal").value = filters.terminal;
     $("filter-due").value = filters.due;
+    $("filter-presence").value = filters.presence;
+    $("filter-last-update").value = filters.lastUpdate;
+    $("sort-direction").textContent = sortDirection === "desc" ? "↓" : "↑";
+    $("sort-direction").setAttribute("aria-label", "Sort " + (sortDirection === "desc" ? "descending" : "ascending"));
   }
   function selectedProjectData() {
     return (
@@ -344,6 +371,8 @@
     return (
       projectDescriptionDirty() ||
       Object.keys(rowMutationTails).length > 0 ||
+      activePointerGesture ||
+      Boolean(document.querySelector(".inline-rename")) ||
       Boolean(document.querySelector("details[open], dialog[open]"))
     );
   }
@@ -425,8 +454,9 @@
   function taskMatches(task) {
     if (selectedProject && taskProjectKey(task) !== selectedProject) return false;
     var status = task.work_status === "done" ? "completed" : task.work_status;
-    if (statusFilter !== "all" && status !== statusFilter)
+    if (queueMode === "all" && statusFilter !== "all" && status !== statusFilter)
       return false;
+    if (queueMode === "open" && taskPresence(task) !== "open") return false;
     if (queueMode === "today" && !task.in_today) return false;
     var query = $("work-search").value.trim().toLowerCase();
     if (
@@ -450,10 +480,16 @@
       return false;
     if (filters.priority !== "any" && task.priority !== filters.priority)
       return false;
-    if (filters.terminal !== "any" && task.terminal_state !== filters.terminal)
+    if (filters.terminal !== "any" && (task.terminal_runtime_state || task.terminal_state) !== filters.terminal)
+      return false;
+    if ((filters.presence || "any") !== "any" && taskPresence(task) !== filters.presence)
       return false;
     if (filters.due === "today" && !isDueTodayOrOverdue(task)) return false;
     if (filters.due === "none" && task.due_date) return false;
+    if ((filters.lastUpdate || "any") !== "any") {
+      var windows = { "24h": 86400, "7d": 604800, "30d": 2592000 };
+      if (!task.last_activity_at || Number(task.last_activity_at) < Date.now() / 1000 - windows[filters.lastUpdate]) return false;
+    }
     return true;
   }
   function visibleTasks() {
@@ -463,23 +499,23 @@
     return groupBy === "priority"
       ? task.priority
       : groupBy === "terminal"
-        ? task.terminal_state
+        ? (task.terminal_runtime_state || task.terminal_state || "unknown")
         : "all";
   }
   function taskComparator(a, b) {
     var priorityRank = { urgent: 0, high: 1, normal: 2, low: 3 };
-    var terminalRank = { "needs-input": 0, working: 1, idle: 2, ended: 3, gone: 4 };
+    var terminalRank = { "needs-input": 0, working: 1, idle: 2, ended: 3, gone: 4, unknown: 5 };
     var comparison;
     if (sortBy === "name") comparison = String(a.title || "").localeCompare(String(b.title || ""));
     else if (sortBy === "priority") comparison = (priorityRank[a.priority] === undefined ? 99 : priorityRank[a.priority]) - (priorityRank[b.priority] === undefined ? 99 : priorityRank[b.priority]);
-    else if (sortBy === "terminal") comparison = (terminalRank[a.terminal_state] === undefined ? 99 : terminalRank[a.terminal_state]) - (terminalRank[b.terminal_state] === undefined ? 99 : terminalRank[b.terminal_state]);
+    else if (sortBy === "terminal") comparison = (terminalRank[a.terminal_runtime_state || a.terminal_state] === undefined ? 99 : terminalRank[a.terminal_runtime_state || a.terminal_state]) - (terminalRank[b.terminal_runtime_state || b.terminal_state] === undefined ? 99 : terminalRank[b.terminal_runtime_state || b.terminal_state]);
     else if (sortBy === "agent") comparison = String(a.session_provider || "").localeCompare(String(b.session_provider || ""));
-    else if (sortBy === "updated") comparison = Number(b.last_activity_at || 0) - Number(a.last_activity_at || 0);
+    else if (sortBy === "updated") comparison = Number(a.last_activity_at || 0) - Number(b.last_activity_at || 0);
     else if (sortBy === "due") comparison = String(a.due_date || "9999-12-31").localeCompare(String(b.due_date || "9999-12-31"));
     if (comparison) return sortDirection === "desc" ? -comparison : comparison;
     if (sortBy === "updated")
       return (
-        Number(b.last_activity_at || 0) - Number(a.last_activity_at || 0) ||
+        (Number(a.last_activity_at || 0) - Number(b.last_activity_at || 0)) * (sortDirection === "desc" ? -1 : 1) ||
         String(a.task_id).localeCompare(String(b.task_id))
       );
     if (sortBy === "due")
@@ -499,8 +535,8 @@
   }
   function selectScope(scope) {
     if (!afterPendingEdits(function () {})) return;
+    if (["open", "all", "today"].indexOf(scope) < 0) scope = "open";
     queueMode = scope;
-    if (scope === "all") statusFilter = "active";
     activeSavedView = null;
     restoreViewSettings();
     renderBoard(latestBoard);
@@ -681,6 +717,8 @@
   }
   function workspacePosition(kind, item, direction) {
     var id = kind === "space" ? item.space_id : kind === "folder" ? item.folder_id : item.list_key;
+    sidebarManualOrder = true;
+    storeViewSettings();
     return queueReorder("workspace-node:" + kind + ":" + id, function () {
       return mutate("/api/workspace/reorder", "POST", {
         kind: kind,
@@ -772,6 +810,8 @@
     return row;
   }
   function renderSidebar(data) {
+    var sidebarSort = $("sidebar-sort");
+    if (sidebarSort) sidebarSort.value = sidebarManualOrder ? "manual" : "open";
     Array.prototype.forEach.call(
       document.querySelectorAll(".scope-tab"),
       function (node) {
@@ -792,7 +832,7 @@
       workspace.spaces.slice().sort(function (a, b) { return Number(a.position || 0) - Number(b.position || 0); }).forEach(function (space) {
         var spaceBlock = el("div", "space-block"), spaceRow = el("div", "space-row"), spaceSelect = el("button", "space-select"), spaceId = "space:" + space.space_id;
         spaceSelect.type = "button";
-        spaceSelect.append(el("span", "tree-icon space-icon", "◆"), el("span", "project-name", space.name));
+        spaceSelect.append(el("span", "tree-icon space-icon", "◆"), el("span", "project-name", space.name), sidebarCount(space));
         spaceSelect.addEventListener("click", function () { collapsedFolders[spaceId] = !collapsedFolders[spaceId]; renderSidebar(data); });
         spaceRow.append(spaceSelect, workspaceMenu("space", space)); spaceBlock.appendChild(spaceRow);
         spaceBlock.addEventListener("dragover", function (event) { if (draggedProject) allowMoveDrop(event); });
@@ -805,7 +845,7 @@
           folders.forEach(function (folder) {
             var folderBlock = el("div", "tree-folder-block"), folderRow = el("div", "folder-row"), folderSelect = el("button", "folder-select"), folderId = "folder:" + folder.folder_id;
             folderSelect.type = "button";
-            folderSelect.append(el("span", "tree-icon folder-icon", "▱"), el("span", "folder-caret", collapsedFolders[folderId] ? "›" : "⌄"), el("span", "project-name", folder.name));
+            folderSelect.append(el("span", "tree-icon folder-icon", "▱"), el("span", "folder-caret", collapsedFolders[folderId] ? "›" : "⌄"), el("span", "project-name", folder.name), sidebarCount(folder));
             folderSelect.addEventListener("click", function () { collapsedFolders[folderId] = !collapsedFolders[folderId]; renderSidebar(data); });
             folderRow.append(folderSelect, workspaceMenu("folder", folder)); folderBlock.appendChild(folderRow);
             if (!collapsedFolders[folderId]) appendWorkspaceLists(folderBlock, workspace, space.space_id, folder.folder_id);
@@ -879,25 +919,52 @@
     }
     renderSavedViews();
   }
+  function sidebarCounts(item) {
+    var counts = item.counts;
+    if (counts && typeof counts.total === "number") return counts;
+    var key = item.list_key || item.project_key;
+    var matching = key ? (latestBoard.tasks || []).filter(function (task) { return taskProjectKey(task) === key; }) : [];
+    return { total: matching.length, open_terminal: matching.filter(function (task) { return taskPresence(task) === "open"; }).length };
+  }
+  function sidebarCount(item) {
+    var counts = sidebarCounts(item);
+    return el("span", "nav-count", String(counts.open_terminal || 0) + "/" + String(counts.total || 0));
+  }
   function appendWorkspaceLists(parent, workspace, spaceId, folderId) {
     var holder = el("div", "folder-projects workspace-lists");
-    workspace.lists.filter(function (list) { return list.space_id === spaceId && (list.folder_id || null) === folderId; }).forEach(function (list) {
+    workspace.lists.filter(function (list) { return list.space_id === spaceId && (list.folder_id || null) === folderId; }).sort(function (a, b) {
+      var aCounts = sidebarCounts(a), bCounts = sidebarCounts(b);
+      return sidebarManualOrder ? Number(a.position || 0) - Number(b.position || 0) : Number(bCounts.open_terminal || 0) - Number(aCounts.open_terminal || 0) || String(a.name).localeCompare(String(b.name));
+    }).forEach(function (list) {
       var row = el("div", "project-row list-row"), select = el("button", "project-select" + (selectedProject === list.list_key ? " active" : ""));
       select.type = "button"; select.draggable = true;
-      select.append(el("span", "tree-icon list-icon", "☷"), el("span", "project-name", list.name), el("span", "nav-count", String(latestBoard.tasks.filter(function (task) { return taskProjectKey(task) === list.list_key && task.work_status === "active"; }).length)));
+      select.append(el("span", "tree-icon list-icon", "☷"), el("span", "project-name", list.name), sidebarCount(list));
+      select.title = list.name;
       select.addEventListener("click", function () { if (!afterPendingEdits(function () {})) return; selectedProject = list.list_key; queueMode = "all"; activeSavedView = null; restoreViewSettings(); renderBoard(latestBoard); });
       select.addEventListener("dragstart", function (event) { draggedProject = list.list_key; setDragPayload(event, "application/x-agent-board-list", list.list_key); });
       select.addEventListener("dragend", function () { draggedProject = null; });
       row.append(select, workspaceMenu("list", list));
-      row.addEventListener("dragover", function (event) { if (draggedTask) allowMoveDrop(event); });
+      row.addEventListener("dragover", function (event) { if (draggedTask || draggedProject) allowMoveDrop(event); });
       row.addEventListener("drop", function (event) {
         event.preventDefault();
+        event.stopPropagation();
+        if (draggedProject && draggedProject !== list.list_key) {
+          var rect = row.getBoundingClientRect && row.getBoundingClientRect();
+          return placeWorkspaceNode("list", draggedProject, list.list_key, rect && event.clientY > rect.top + rect.height / 2 ? "after" : "before");
+        }
         var task = latestBoard.tasks.find(function (candidate) { return candidate.task_id === draggedTask; });
         if (task) moveTaskToList(task, list.list_key);
       });
       holder.appendChild(row);
     });
     if (holder.children.length) parent.appendChild(holder);
+  }
+  function placeWorkspaceNode(kind, nodeId, targetId, placement) {
+    if (!nodeId || !targetId || nodeId === targetId) return Promise.resolve();
+    sidebarManualOrder = true; storeViewSettings();
+    return queueReorder("workspace-node:" + kind + ":" + nodeId, function () {
+      return mutate("/api/workspace/reorder", "POST", { kind: kind, node_id: nodeId, target_id: targetId, placement: placement }).then(function () { return fetchBoard(true); });
+    }).then(function () { toast("List order saved (Manual)"); }).catch(function (error) { toast(error.message, true); });
   }
   function moveListToFolder(listKey, folder) {
     if (!listKey || !workspaceEnabled()) return;
@@ -1002,28 +1069,46 @@
     });
   }
   function prioritySelect(task) {
-    var select = el("select", "priority-select priority-" + task.priority);
-    select.disabled = task.work_status !== "active";
-    select.setAttribute("aria-label", "Set priority for " + task.title);
+    var menu = el("details", "priority-menu priority-" + task.priority),
+      summary = el("summary", "priority-flag", PRIORITY_LABELS[task.priority]),
+      panel = el("div", "priority-options"),
+      options = [];
+    summary.setAttribute("aria-label", "Set priority for " + task.title);
+    panel.setAttribute("role", "radiogroup");
+    panel.setAttribute("aria-label", "Priority for " + task.title);
+    if (task.work_status !== "active") summary.setAttribute("aria-disabled", "true");
     PRIORITY_GROUPS.forEach(function (priority) {
-      var option = el("option", "", PRIORITY_LABELS[priority]);
-      option.value = priority;
-      option.selected = task.priority === priority;
-      select.appendChild(option);
+      var option = el("button", "priority-option priority-" + priority, PRIORITY_LABELS[priority]);
+      option.type = "button";
+      option.setAttribute("role", "radio");
+      option.setAttribute("aria-checked", String(task.priority === priority));
+      option.tabIndex = task.priority === priority ? 0 : -1;
+      option.addEventListener("click", function () {
+        if (task.work_status !== "active" || priority === task.priority) { menu.open = false; return; }
+        menu.open = false;
+        saveTask(task, "priority", priority)
+          .then(function () { toast("Priority updated"); renderBoard(latestBoard); })
+          .catch(function (error) { toast(error.message, true); });
+      });
+      option.addEventListener("keydown", function (event) {
+        var index = options.indexOf(option), next;
+        if (event.key === "Escape") { menu.open = false; summary.focus(); return; }
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); option.click(); return; }
+        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+        event.preventDefault();
+        next = options[(index + (event.key === "ArrowDown" ? 1 : options.length - 1)) % options.length];
+        next.focus();
+      });
+      options.push(option); panel.appendChild(option);
     });
-    select.addEventListener("change", function () {
-      var next = select.value;
-      saveTask(task, "priority", next)
-        .then(function () {
-          toast("Priority updated");
-          renderBoard(latestBoard);
-        })
-        .catch(function (error) {
-          select.value = task.priority;
-          toast(error.message, true);
-        });
+    summary.addEventListener("keydown", function (event) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault(); menu.open = true;
+        options[task.priority ? PRIORITY_GROUPS.indexOf(task.priority) : 0].focus();
+      }
     });
-    return select;
+    menu.append(summary, panel);
+    return menu;
   }
   function markDone(task) {
     var next = task.work_status === "active" ? "done" : "active";
@@ -1034,6 +1119,23 @@
       .catch(function (error) {
         toast(error.message, true);
       });
+  }
+  function inlineRename(task, identity, crumb, title, pencil) {
+    var input = el("input", "inline-rename");
+    input.value = task.title || ""; input.maxLength = 500; input.setAttribute("aria-label", "Rename " + (task.title || "task"));
+    identity.replaceChildren(crumb, input);
+    input.focus(); input.select();
+    function cancel() { identity.replaceChildren(crumb, title, pencil); pencil.focus(); }
+    function save() {
+      var next = input.value.trim();
+      if (!next || next === task.title) return cancel();
+      input.disabled = true;
+      saveTask(task, "title", next).then(function (saved) {
+        Object.assign(task, saved); title.textContent = task.title; cancel(); toast("Task renamed");
+      }).catch(function (error) { input.disabled = false; input.setAttribute("aria-invalid", "true"); toast("Could not rename: " + error.message, true); });
+    }
+    input.addEventListener("keydown", function (event) { if (event.key === "Enter") { event.preventDefault(); save(); } if (event.key === "Escape") { event.preventDefault(); cancel(); } });
+    input.addEventListener("blur", function () { if (!input.disabled) cancel(); });
   }
   function openTaskDialog(task) {
     $("task-dialog").dataset.taskId = task.task_id;
@@ -1056,8 +1158,8 @@
     due.value = task.due_date || "";
     var status = el("select", "");
     [
-      ["active", "Active"],
-      ["done", "Done"],
+      ["active", "To do"],
+      ["done", "Completed"],
       ["archived", "Archived"],
     ].forEach(function (pair) {
       var opt = el("option", "", pair[1]);
@@ -1111,6 +1213,7 @@
     $("task-dialog").showModal();
     readerMode = "task";
     updateTaskActions(task);
+    updateFreshTaskActions(task);
     loadTaskHistory(task);
     selectSession(task.session_id);
   }
@@ -1139,13 +1242,23 @@
     };
   }
   function updateTaskActions(task) {
+    updateTaskActionButtons(task, TASK_ACTION_MODES.continue);
+  }
+  function updateFreshTaskActions(task) {
+    updateTaskActionButtons(task, TASK_ACTION_MODES.fresh);
+  }
+  function updateTaskActionButtons(task, mode) {
     ["claude", "codex"].forEach(function (provider) {
-      var action = launchAction(task.actions, provider, "Continue in"), key = "task:" + task.task_id + ":" + provider, button = $("task-" + provider), reason = $("task-" + provider + "-reason");
+      var action = launchAction(task[mode.actionField], provider, mode.fallbackLabel), key = mode.keyPrefix + ":" + task.task_id + ":" + provider, button = $(mode.buttonPrefix + "-" + provider), reason = $(mode.buttonPrefix + "-" + provider + "-reason");
       button.textContent = action.label;
       button.dataset.launchKey = key;
       button.dataset.launchAvailable = String(Boolean(action.available));
       button.disabled = !action.available || Boolean(launchesInFlight[key]);
+      button.title = action.available ? "" : action.reason || "Unavailable";
       reason.textContent = action.available ? "" : action.reason || "Unavailable";
+      reason.hidden = mode === TASK_ACTION_MODES.continue &&
+        task.session_id === activeSid && !$("thread-error").hidden &&
+        /transcript/i.test(action.reason || "");
     });
   }
   function updateListActions(project) {
@@ -1160,15 +1273,21 @@
     });
   }
   function launchTask(task, provider) {
-    var action = launchAction(task.actions, provider, "Continue in"), key = "task:" + task.task_id + ":" + provider;
-    if (!action.available) return toast(action.reason || "This launch is unavailable.", true);
+    return launchTaskAction(task, provider, TASK_ACTION_MODES.continue);
+  }
+  function startFreshTask(task, provider) {
+    return launchTaskAction(task, provider, TASK_ACTION_MODES.fresh);
+  }
+  function launchTaskAction(task, provider, mode) {
+    var action = launchAction(task[mode.actionField], provider, mode.fallbackLabel), key = mode.keyPrefix + ":" + task.task_id + ":" + provider;
+    if (!action.available) return toast(action.reason || mode.unavailable, true);
     if (launchesInFlight[key]) return Promise.resolve();
     launchesInFlight[key] = true;
-    updateTaskActions(task);
-    return mutate("/api/tasks/" + encodeURIComponent(task.task_id) + "/launch", "POST", { provider: provider, full_access: fullAccessEnabled(), launch_revision: task.launch_revision })
-      .then(function () { toast("Launch requested — check Terminal"); })
+    updateTaskActionButtons(task, mode);
+    return mutate("/api/tasks/" + encodeURIComponent(task.task_id) + "/" + mode.endpoint, "POST", { provider: provider, full_access: fullAccessEnabled(), launch_revision: task.launch_revision })
+      .then(function () { toast(mode.success); })
       .catch(function (error) { toast(error.message, true); })
-      .finally(function () { delete launchesInFlight[key]; updateTaskActions(task); });
+      .finally(function () { delete launchesInFlight[key]; updateTaskActionButtons(task, mode); });
   }
   function launchList(project, provider) {
     var action = launchAction(project.actions, provider, "Start"), key = "list:" + project.project_key + ":" + provider;
@@ -1237,9 +1356,10 @@
     }
     return rowMenu(items, "Task actions for " + task.title);
   }
-  function header(text, cls, sort, column) {
+  function header(text, cls, sort, column, groupId) {
     var th = el("th", cls + (sort ? " sortable" : ""));
     th.scope = "col";
+    if (column && columnWidths[column]) th.style.width = columnWidths[column] + "px";
     if (sort) {
       var button = el("button", "", text);
       button.type = "button";
@@ -1264,7 +1384,16 @@
       th.addEventListener("dragover", function (event) { if (draggedColumn && draggedColumn !== column) { allowMoveDrop(event); setColumnDropTarget(th); } });
       th.addEventListener("dragleave", function () { if (columnDropTarget === th) clearColumnDropTarget(); });
       th.addEventListener("drop", function (event) { event.preventDefault(); clearColumnDropTarget(); moveColumn(draggedColumn, column); });
-      th.appendChild(rowMenu([["Move left", function () { moveColumn(column, columnOrder[Math.max(0, columnOrder.indexOf(column) - 1)]); }], ["Move right", function () { moveColumn(column, columnOrder[Math.min(columnOrder.length - 1, columnOrder.indexOf(column) + 1)]); }]], "Column actions for " + text));
+      var left = el("button", "column-arrow", "‹"), right = el("button", "column-arrow", "›"), resize = el("button", "column-resize", "↔"), index = columnOrder.indexOf(column);
+      left.type = right.type = resize.type = "button";
+      resize.id = "column-resize-" + (groupId || "table") + "-" + column;
+      left.disabled = index === 0; right.disabled = index === columnOrder.length - 1;
+      left.setAttribute("aria-label", "Move " + text + " left"); right.setAttribute("aria-label", "Move " + text + " right"); resize.setAttribute("aria-label", "Resize " + text);
+      left.addEventListener("click", function () { moveColumn(column, columnOrder[Math.max(0, columnOrder.indexOf(column) - 1)]); });
+      right.addEventListener("click", function () { moveColumn(column, columnOrder[Math.min(columnOrder.length - 1, columnOrder.indexOf(column) + 1)]); });
+      resize.addEventListener("keydown", function (event) { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); setColumnWidth(column, renderedColumnWidth(th, column) + (event.key === "ArrowLeft" ? -12 : 12)); storeViewSettings(); renderBoardWithFocus(resize.id); } });
+      resize.addEventListener("pointerdown", function (event) { event.preventDefault(); event.stopPropagation(); beginColumnResize(event, column); });
+      th.append(left, right, resize);
     }
     return th;
   }
@@ -1283,6 +1412,35 @@
     if (from < 0 || to < 0 || from === to) return;
     columnOrder.splice(from, 1); columnOrder.splice(to, 0, column);
     storeViewSettings(); renderBoard(latestBoard);
+  }
+  function setColumnWidth(column, width) {
+    columnWidths[column] = Math.max(72, Math.min(600, Number(width) || 130));
+  }
+  function renderedColumnWidth(header, column) {
+    var rect = header && typeof header.getBoundingClientRect === "function" ? header.getBoundingClientRect() : null;
+    return rect && rect.width ? rect.width : columnWidths[column] || 130;
+  }
+  function beginColumnResize(event, column) {
+    if (activePointerGesture) return;
+    var header = event.currentTarget.parentElement, startX = event.clientX, start = renderedColumnWidth(header, column), resizeId = event.currentTarget.id, finished = false;
+    activePointerGesture = true;
+    function move(next) {
+      setColumnWidth(column, start + next.clientX - startX);
+      header.style.width = columnWidths[column] + "px";
+    }
+    function end() { if (finished) return; finished = true; activePointerGesture = false; storeViewSettings(); window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end); window.removeEventListener("blur", end); renderBoardWithFocus(resizeId); }
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", end); window.addEventListener("pointercancel", end); window.addEventListener("blur", end);
+  }
+  function beginSidebarResize(event) {
+    if (activePointerGesture) return;
+    var startX = event.clientX, start = sidebarWidth, finished = false;
+    activePointerGesture = true;
+    function move(next) {
+      sidebarWidth = Math.max(190, Math.min(480, start + next.clientX - startX));
+      if (document.documentElement && document.documentElement.style) document.documentElement.style.setProperty("--sidebar-width", sidebarWidth + "px");
+    }
+    function end() { if (finished) return; finished = true; activePointerGesture = false; storeViewSettings(); window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end); window.removeEventListener("blur", end); }
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", end); window.addEventListener("pointercancel", end); window.addEventListener("blur", end);
   }
   function renderTaskRow(task) {
     var row = el("tr", "work-row");
@@ -1327,7 +1485,7 @@
           }) || { name: task.project_name },
         ),
       ),
-      title = el("button", "task-link", task.title || "Untitled task");
+      title = el("button", "task-link", task.title || "Untitled task"), pencil = el("button", "rename-pencil", "✎");
     crumb.type = title.type = "button";
     crumb.addEventListener("click", function () {
       if (!afterPendingEdits(function () {})) return;
@@ -1338,7 +1496,9 @@
     title.addEventListener("click", function () {
       openTaskDialog(task);
     });
-    identity.append(crumb, title);
+    pencil.type = "button"; pencil.setAttribute("aria-label", "Rename " + task.title);
+    pencil.addEventListener("click", function () { inlineRename(task, identity, crumb, title, pencil); });
+    identity.append(crumb, title, pencil);
     var due = el("td", "work-due"),
       dueValue = el(
         "span",
@@ -1359,15 +1519,12 @@
     var priority = el("td", "work-priority");
     priority.appendChild(prioritySelect(task));
     var terminal = el("td", "work-terminal");
-    terminal.appendChild(
-      el(
-        "span",
-        "runtime state-" + task.terminal_state,
-        TERMINAL_LABELS[task.terminal_state] ||
-          task.terminal_state ||
-          "Unknown",
-      ),
-    );
+    var presence = taskPresence(task), terminalValue = el("span", "runtime presence-" + presence, terminalText(task));
+    terminal.appendChild(terminalValue);
+    if (presence === "open") {
+      var runtime = task.terminal_runtime_state || task.terminal_state;
+      if (runtime && runtime !== "gone") terminal.appendChild(el("span", "runtime-secondary", TERMINAL_LABELS[runtime] || runtime));
+    }
     var agent = el("td", "work-agent");
     agent.appendChild(el("span", "agent", providerName(task.session_provider)));
     var actions = el("td", "work-actions");
@@ -1494,10 +1651,14 @@
   }
   function appendGroup(root, key, label, tasks) {
     var section = el("section", "project-group"),
-      heading = el("h3", "project-heading");
+      heading = el("h3", "project-heading"), groupId = "group-" + (selectedProject || queueMode) + "-" + groupBy + "-" + key,
+      toggle = el("button", "group-toggle", "⌄"), content = el("div", "group-content");
     section.dataset.groupKey = key;
+    toggle.type = "button"; toggle.id = "group-toggle-" + groupId; toggle.setAttribute("aria-controls", groupId); toggle.setAttribute("aria-expanded", String(!collapsedGroups[groupId])); toggle.setAttribute("aria-label", "Toggle " + label);
+    toggle.addEventListener("click", function () { collapsedGroups[groupId] = !collapsedGroups[groupId]; storeViewSettings(); renderBoardWithFocus(toggle.id); });
     heading.append(
-      el("span", "", label),
+      toggle,
+      el("span", groupBy === "priority" ? "priority-heading priority-" + key : "", label),
       el(
         "span",
         "count",
@@ -1510,7 +1671,7 @@
       body = document.createElement("tbody");
     headRow.appendChild(header("", "column-order"));
     var definitions = { name: ["Name / List", "column-name", "name"], due: ["Due date", "column-due", "due"], updated: ["Last update", "column-updated", "updated"], priority: ["Priority", "column-priority", "priority"], terminal: ["Terminal state", "column-terminal", "terminal"], agent: ["Agent", "column-agent", "agent"] };
-    columnOrder.forEach(function (column) { var definition = definitions[column]; headRow.appendChild(header(definition[0], definition[1], definition[2], column)); });
+    columnOrder.forEach(function (column) { var definition = definitions[column]; headRow.appendChild(header(definition[0], definition[1], definition[2], column, groupId)); });
     headRow.appendChild(header("", "column-actions"));
     thead.appendChild(headRow);
     sorted(tasks).forEach(function (task) {
@@ -1563,14 +1724,18 @@
       if (key === taskGroupKey(dragged)) reorderTask(dragged, key, null);
     });
     table.append(thead, body);
+    content.id = groupId; content.hidden = Boolean(collapsedGroups[groupId]);
     section.appendChild(heading);
-    if (tasks.length) section.appendChild(table);
+    if (tasks.length) content.appendChild(table);
     else section.classList.add("empty-group");
+    if (!tasks.length) content.appendChild(el("p", "compact-drop-target", "Drop a task here"));
+    section.appendChild(content);
     root.appendChild(section);
   }
   function renderBoard(data) {
     if (!data) return;
     latestBoard = data;
+    if (document.documentElement && document.documentElement.style) document.documentElement.style.setProperty("--sidebar-width", sidebarWidth + "px");
     if (selectedProject && !selectedProjectData()) selectedProject = null;
     renderSidebar(data);
     renderProjectDetail();
@@ -1587,17 +1752,23 @@
       ? projectName(selectedProjectData())
       : queueMode === "today"
         ? "Today"
+        : queueMode === "open"
+        ? "Open terminals on this Mac"
         : statusFilter === "completed"
           ? "Completed"
           : statusFilter === "archived"
             ? "Archived"
             : statusFilter === "all"
               ? "All work"
-              : "All active";
+              : "All threads";
+    var unknown = (latestBoard.tasks || []).filter(function (task) { return taskPresence(task) === "unknown"; }).length;
+    $("unknown-count").textContent = unknown ? "(" + unknown + " unknown)" : "";
+    $("presence-note").hidden = !unknown;
+    $("presence-note").textContent = unknown ? "This Mac could not verify " + unknown + " saved thread" + (unknown === 1 ? "." : "s.") + " Find them in All threads." : "";
     var root = $("task-groups"),
       tasks = visibleTasks();
     root.replaceChildren();
-    if (!tasks.length) return empty(root, "No tasks match this view.");
+    if (!tasks.length) return empty(root, queueMode === "open" ? "No verified open terminals. Choose All threads to review saved work." : "No tasks match this view.");
     if (groupBy === "none") return appendGroup(root, "all", "Tasks", tasks);
     var keys = groupBy === "priority" ? PRIORITY_GROUPS : TERMINAL_GROUPS,
       labels = groupBy === "priority" ? PRIORITY_LABELS : TERMINAL_LABELS;
@@ -1609,6 +1780,11 @@
         appendGroup(root, key, labels[key], matches);
       }
     });
+  }
+  function renderBoardWithFocus(id) {
+    renderBoard(latestBoard);
+    var control = $(id);
+    if (control && typeof control.focus === "function") control.focus();
   }
   function fetchBoard(force) {
     if (!force && hasProtectedWorkControls()) return Promise.resolve();
@@ -1679,6 +1855,8 @@
       sort: sortBy,
       sortDirection: sortDirection,
       columns: columnOrder.slice(),
+      columnWidths: Object.assign({}, columnWidths),
+      collapsedGroups: Object.assign({}, collapsedGroups),
       filters: Object.assign({}, filters),
     };
   }
@@ -1687,7 +1865,7 @@
       return announce(
         "Save or cancel the project description before changing views.",
       );
-    queueMode = ["all", "today"].indexOf(snapshot.scope) >= 0 ? snapshot.scope : "all";
+    queueMode = snapshot.scope === "closed" || snapshot.scope === "completed" || snapshot.scope === "archived" || snapshot.scope === "all-status" ? "all" : ["open", "all", "today"].indexOf(snapshot.scope) >= 0 ? snapshot.scope : "open";
     statusFilter = snapshot.scope === "closed" || snapshot.scope === "completed"
       ? "completed"
       : snapshot.scope === "archived"
@@ -1708,7 +1886,10 @@
         ? snapshot.sort
         : "manual";
     sortDirection = snapshot.sortDirection === "desc" ? "desc" : "asc";
-    columnOrder = Array.isArray(snapshot.columns) && snapshot.columns.length === DATA_COLUMNS.length && snapshot.columns.every(function (column) { return DATA_COLUMNS.indexOf(column) >= 0; }) ? snapshot.columns.slice() : DATA_COLUMNS.slice();
+    columnOrder = Array.isArray(snapshot.columns) && snapshot.columns.length === DATA_COLUMNS.length && new Set(snapshot.columns).size === DATA_COLUMNS.length && snapshot.columns.every(function (column) { return DATA_COLUMNS.indexOf(column) >= 0; }) ? snapshot.columns.slice() : DATA_COLUMNS.slice();
+    columnWidths = Object.create(null);
+    if (snapshot.columnWidths && typeof snapshot.columnWidths === "object") Object.keys(snapshot.columnWidths).forEach(function (column) { if (DATA_COLUMNS.indexOf(column) >= 0) setColumnWidth(column, snapshot.columnWidths[column]); });
+    collapsedGroups = snapshot.collapsedGroups && typeof snapshot.collapsedGroups === "object" ? Object.assign(Object.create(null), snapshot.collapsedGroups) : Object.create(null);
     var savedFilters = snapshot.filters || {};
     filters = {
       provider:
@@ -1729,23 +1910,38 @@
         ["any", "today", "none"].indexOf(savedFilters.due) >= 0
           ? savedFilters.due
           : "any",
+      presence: ["any", "open", "closed", "unknown"].indexOf(savedFilters.presence) >= 0 ? savedFilters.presence : "any",
+      lastUpdate: ["any", "24h", "7d", "30d"].indexOf(savedFilters.lastUpdate) >= 0 ? savedFilters.lastUpdate : "any",
     };
     renderBoard(latestBoard);
   }
   function storeViewSettings() {
     try {
       var saved = JSON.parse(localStorage.getItem(VIEW_SETTINGS_KEY) || "{}"), views = saved.views || {};
-      views[(selectedProject || queueMode) + ""] = { sort: sortBy, sortDirection: sortDirection, columns: columnOrder };
-      localStorage.setItem(VIEW_SETTINGS_KEY, JSON.stringify({ views: views }));
+      views[(selectedProject || queueMode) + ""] = { sort: sortBy, sortDirection: sortDirection, columns: columnOrder, widths: columnWidths, collapsedGroups: collapsedGroups };
+      localStorage.setItem(VIEW_SETTINGS_KEY, JSON.stringify({ views: views, sidebarWidth: sidebarWidth, sidebarManualOrder: sidebarManualOrder }));
     } catch (_error) {}
   }
   function restoreViewSettings() {
+    columnOrder = DATA_COLUMNS.slice();
+    columnWidths = Object.create(null);
+    collapsedGroups = Object.create(null);
+    sortBy = "manual";
+    sortDirection = "asc";
+    sidebarWidth = 250;
+    sidebarManualOrder = false;
     try {
-      var settings = JSON.parse(localStorage.getItem(VIEW_SETTINGS_KEY) || "{}");
-      settings = (settings.views || {})[(selectedProject || queueMode) + ""] || settings;
+      var saved = JSON.parse(localStorage.getItem(VIEW_SETTINGS_KEY) || "{}");
+      if (!saved || typeof saved !== "object" || Array.isArray(saved)) return;
+      var settings = (saved.views || {})[(selectedProject || queueMode) + ""] || {};
+      if (!settings || typeof settings !== "object" || Array.isArray(settings)) settings = {};
       if (["manual", "name", "updated", "due", "priority", "terminal", "agent"].indexOf(settings.sort) >= 0) sortBy = settings.sort;
       sortDirection = settings.sortDirection === "desc" ? "desc" : "asc";
-      if (Array.isArray(settings.columns) && settings.columns.length === DATA_COLUMNS.length && settings.columns.every(function (column) { return DATA_COLUMNS.indexOf(column) >= 0; })) columnOrder = settings.columns.slice();
+      if (Array.isArray(settings.columns) && settings.columns.length === DATA_COLUMNS.length && new Set(settings.columns).size === DATA_COLUMNS.length && settings.columns.every(function (column) { return DATA_COLUMNS.indexOf(column) >= 0; })) columnOrder = settings.columns.slice();
+      if (settings.widths && typeof settings.widths === "object") Object.keys(settings.widths).forEach(function (column) { if (DATA_COLUMNS.indexOf(column) >= 0) setColumnWidth(column, settings.widths[column]); });
+      collapsedGroups = settings.collapsedGroups && typeof settings.collapsedGroups === "object" ? Object.assign(Object.create(null), settings.collapsedGroups) : Object.create(null);
+      sidebarWidth = Math.max(190, Math.min(480, Number(saved.sidebarWidth === undefined ? settings.sidebarWidth : saved.sidebarWidth) || 250));
+      sidebarManualOrder = Boolean(saved.sidebarManualOrder === undefined ? settings.sidebarManualOrder : saved.sidebarManualOrder);
     } catch (_error) {}
   }
   function renderSavedViews() {
@@ -1849,15 +2045,19 @@
       button.dataset.launchKey = key;
       button.dataset.launchAvailable = String(Boolean(action.available));
       button.disabled = !action.available || Boolean(launchesInFlight[key]);
+      button.title = action.available ? "" : action.reason || "Unavailable";
       reason.textContent = action.available
         ? ""
         : action.reason || "Unavailable";
+      reason.hidden = !isHistorical && !$("thread-error").hidden &&
+        /transcript/i.test(action.reason || "");
     });
   }
   function selectSession(sid) {
     activeSid = sid;
     activeSessionMeta = null;
     $("thread-search").value = "";
+    $("thread-search-count").textContent = "";
     $("thread-actions").hidden = true;
     $("thread-error").hidden = true;
     $("viewer-title").textContent = "Loading…";
@@ -1885,9 +2085,12 @@
           $("thread-actions").hidden = false;
         } else {
           $("thread-actions").hidden = true;
+          var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; });
+          if (task) updateTaskActions(task);
         }
-        $("thread-search").hidden = false;
-        document.querySelector(".thread-search-label").hidden = false;
+        var missingTranscript = Boolean(data.transcript_error && !(data.turns || []).length);
+        $("thread-search").hidden = missingTranscript;
+        document.querySelector(".thread-search-label").hidden = missingTranscript;
         renderTranscript("");
       })
       .catch(function (error) {
@@ -1900,8 +2103,10 @@
   function renderTranscript(query) {
     var transcript = $("transcript");
     transcript.replaceChildren();
-    if (!currentTurns || !currentTurns.length)
+    if (!currentTurns || !currentTurns.length) {
+      if (!$('thread-error').hidden) return;
       return empty(transcript, "No messages in this session.");
+    }
     var lower = query.trim().toLowerCase(),
       count = 0;
     currentTurns.forEach(function (turn) {
@@ -1973,6 +2178,10 @@
       });
     },
   );
+  if (typeof document.addEventListener === "function") document.addEventListener("click", function (event) {
+    if (event.target && typeof event.target.closest === "function" && event.target.closest(".priority-menu")) return;
+    Array.prototype.forEach.call(document.querySelectorAll(".priority-menu[open]"), function (menu) { menu.open = false; });
+  });
   Array.prototype.forEach.call(
     document.querySelectorAll(".scope-tab"),
     function (button) {
@@ -1996,19 +2205,36 @@
   $("filter-status").addEventListener("change", function () {
     selectStatus(this.value);
   });
-  ["provider", "priority", "terminal", "due"].forEach(function (name) {
+  ["provider", "priority", "terminal", "due", "presence", "last-update"].forEach(function (name) {
     $("filter-" + name).addEventListener("change", function () {
-      filters[name] = this.value;
+      filters[name === "last-update" ? "lastUpdate" : name] = this.value;
       activeSavedView = null;
       renderBoard(latestBoard);
     });
   });
   $("clear-filters").addEventListener("click", function () {
-    filters = { provider: "any", priority: "any", terminal: "any", due: "any" };
-    ["provider", "priority", "terminal", "due"].forEach(function (name) {
+    filters = { provider: "any", priority: "any", terminal: "any", due: "any", presence: "any", lastUpdate: "any" };
+    ["provider", "priority", "terminal", "due", "presence", "last-update"].forEach(function (name) {
       $("filter-" + name).value = "any";
     });
     renderBoard(latestBoard);
+  });
+  $("sort-direction").addEventListener("click", function () {
+    sortDirection = sortDirection === "asc" ? "desc" : "asc";
+    storeViewSettings(); renderBoard(latestBoard);
+  });
+  if ($("sidebar-sort")) $("sidebar-sort").addEventListener("change", function () {
+    sidebarManualOrder = this.value === "manual";
+    storeViewSettings();
+    renderBoard(latestBoard);
+  });
+  $("sidebar-resize").addEventListener("pointerdown", beginSidebarResize);
+  $("sidebar-resize").addEventListener("keydown", function (event) {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      sidebarWidth = Math.max(190, Math.min(480, sidebarWidth + (event.key === "ArrowLeft" ? -12 : 12)));
+      storeViewSettings(); renderBoard(latestBoard);
+    }
   });
   $("work-search").addEventListener(
     "input",
@@ -2156,6 +2382,8 @@
   $("list-codex").addEventListener("click", function () { var project = selectedProjectData(); if (project) launchList(project, "codex"); });
   $("task-claude").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) launchTask(task, "claude"); });
   $("task-codex").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) launchTask(task, "codex"); });
+  $("task-fresh-claude").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) startFreshTask(task, "claude"); });
+  $("task-fresh-codex").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) startFreshTask(task, "codex"); });
   restoreViewSettings();
   request("/api/meta")
     .then(function (meta) {

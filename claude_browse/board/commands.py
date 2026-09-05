@@ -53,8 +53,11 @@ def _raw_provider_path(provider: str, session_id: str) -> str | None:
     if provider == "claude":
         root = claude_provider.SESSIONS_DIR
 
-        def paths(root: str):
-            return glob.iglob(os.path.join(root, "*", "*.jsonl"))
+        def paths(_root: str):
+            # Claude's history is an additional, local index of exact session
+            # filenames.  It catches a project directory that a plain glob
+            # misses, without accepting a path outside the approved root.
+            return claude_provider.list_session_files()
 
         def path_id(path: str) -> str:
             return Path(path).stem
@@ -179,10 +182,15 @@ def _indexed_session(session_id: str) -> dict | None:
 
 
 def session_for_launch(
-    session_id: str, indexed: dict | None | object = _UNSET
+    session_id: str,
+    indexed: dict | None | object = _UNSET,
+    runtime: dict | None | object = _UNSET,
 ) -> dict | None:
     """Resolve a hook-backed session while FTS catches up with local files."""
-    runtime = store.get(session_id)
+    # Board polling has already read every runtime row. Preserve an explicit
+    # ``None`` (a task whose runtime disappeared) rather than fetching it
+    # again; direct callers retain the exact lazy lookup behavior.
+    runtime = store.get(session_id) if runtime is _UNSET else runtime
     indexed = _indexed_session(session_id) if indexed is _UNSET else indexed
     if runtime is None and indexed is None:
         return None

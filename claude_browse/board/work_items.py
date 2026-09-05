@@ -392,63 +392,94 @@ def ensure_for_session(row: dict, *, reactivate_done: bool = False) -> dict:
     sparse overlay is therefore initialized from the first observed session
     snapshot and subsequently changed only by explicit user edits.
     """
+    conn = _conn()
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        return _ensure_for_session(conn, row, reactivate_done=reactivate_done)
+
+
+def _ensure_for_session(
+    conn: sqlite3.Connection, row: dict, *, reactivate_done: bool = False
+) -> dict:
+    """Initialize or refresh an overlay under the caller's writer transaction."""
     session_id = _text(row.get("session_id"), "session_id", limit=500, required=True)
     cwd = str(row.get("cwd") or "")
     title = str(row.get("name") or os.path.basename(cwd) or session_id)
     provider = _provider(row.get("provider") or store.DEFAULT_PROVIDER)
     project = _folder_project(cwd)
     now = time.time()
-    with _conn() as conn:
-        # A SessionStart or other delayed hook for a conversation that became
-        # historical through an intentional continuation must keep addressing
-        # its canonical card.  Check this before the current-session unique
-        # upsert below, otherwise it would manufacture a second work item.
-        linked = conn.execute(
-            """SELECT work_items.* FROM task_session_links
-               JOIN work_items USING (task_id)
-               WHERE task_session_links.session_id = ?
-                 AND work_items.session_id != ?""",
-            (session_id, session_id),
-        ).fetchone()
-        if linked is not None:
-            return dict(linked)
-        conn.execute(
-            """INSERT INTO work_items
-               (task_id, title, project_key, project_name, project_path, status,
-                due_date, session_id, session_provider, notes, created_at,
-                updated_at, completed_at, title_override, title_source, session_cwd,
-                priority, position, project_resolved)
-               VALUES (?, ?, ?, ?, ?, 'active', NULL, ?, ?, '', ?, ?, NULL,
-                       NULL, 'automatic', ?, 'normal', ?, 0)
-               ON CONFLICT(session_id) DO UPDATE SET
-                 title = CASE WHEN work_items.title_source != 'manual'
-                              THEN excluded.title ELSE work_items.title END,
-                 session_provider = excluded.session_provider,
-                 session_cwd = CASE WHEN excluded.session_cwd != ''
-                                    THEN excluded.session_cwd ELSE work_items.session_cwd END,
-                 status = CASE WHEN ? AND work_items.status = 'done'
-                               THEN 'active' ELSE work_items.status END,
-                 completed_at = CASE WHEN ? AND work_items.status = 'done'
-                                     THEN NULL ELSE work_items.completed_at END,
-                 updated_at = CASE WHEN work_items.title_source != 'manual'
-                                        OR (? AND work_items.status = 'done')
-                                   THEN excluded.updated_at ELSE work_items.updated_at END""",
-            (
-                str(uuid.uuid4()), title, project["key"], project["name"],
-                project["path"], session_id, provider, now, now, cwd, time.time_ns(),
-                reactivate_done, reactivate_done, reactivate_done,
-            ),
-        )
-        result = conn.execute(
-            "SELECT * FROM work_items WHERE session_id = ?", (session_id,)
-        ).fetchone()
-        conn.execute(
-            """INSERT OR IGNORE INTO task_session_links
-               (session_id, task_id, provider, cwd, created_at) VALUES (?, ?, ?, ?, ?)""",
-            (session_id, result["task_id"], provider, cwd, now),
-        )
-        _ensure_project_setting(conn, result["project_key"])
+    # A delayed hook for a historical conversation must keep addressing its
+    # canonical card. The writer lock excludes adoption between this check
+    # and the current-session upsert below.
+    linked = conn.execute(
+        """SELECT work_items.* FROM task_session_links
+           JOIN work_items USING (task_id)
+           WHERE task_session_links.session_id = ?
+             AND work_items.session_id != ?""",
+        (session_id, session_id),
+    ).fetchone()
+    if linked is not None:
+        return dict(linked)
+    conn.execute(
+        """INSERT INTO work_items
+           (task_id, title, project_key, project_name, project_path, status,
+            due_date, session_id, session_provider, notes, created_at,
+            updated_at, completed_at, title_override, title_source, session_cwd,
+            priority, position, project_resolved)
+           VALUES (?, ?, ?, ?, ?, 'active', NULL, ?, ?, '', ?, ?, NULL,
+                   NULL, 'automatic', ?, 'normal', ?, 0)
+           ON CONFLICT(session_id) DO UPDATE SET
+             title = CASE WHEN work_items.title_source != 'manual'
+                          THEN excluded.title ELSE work_items.title END,
+             session_provider = excluded.session_provider,
+             session_cwd = CASE WHEN excluded.session_cwd != ''
+                                THEN excluded.session_cwd ELSE work_items.session_cwd END,
+             status = CASE WHEN ? AND work_items.status = 'done'
+                           THEN 'active' ELSE work_items.status END,
+             completed_at = CASE WHEN ? AND work_items.status = 'done'
+                                 THEN NULL ELSE work_items.completed_at END,
+             updated_at = CASE WHEN work_items.title_source != 'manual'
+                                    OR (? AND work_items.status = 'done')
+                               THEN excluded.updated_at ELSE work_items.updated_at END""",
+        (
+            str(uuid.uuid4()), title, project["key"], project["name"],
+            project["path"], session_id, provider, now, now, cwd, time.time_ns(),
+            reactivate_done, reactivate_done, reactivate_done,
+        ),
+    )
+    result = conn.execute(
+        "SELECT * FROM work_items WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    conn.execute(
+        """INSERT OR IGNORE INTO task_session_links
+           (session_id, task_id, provider, cwd, created_at) VALUES (?, ?, ?, ?, ?)""",
+        (session_id, result["task_id"], provider, cwd, now),
+    )
+    _ensure_project_setting(conn, result["project_key"])
     return dict(result)
+
+
+def capture_discovered_session(session_id: str) -> bool:
+    """Create only an unowned overlay that cannot race token-based adoption."""
+    from claude_browse.board import launches
+
+    conn = _conn()
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        runtime = conn.execute(
+            "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if runtime is None or conn.execute(
+            """SELECT 1 FROM work_items WHERE session_id = ?
+               UNION ALL SELECT 1 FROM task_session_links WHERE session_id = ?""",
+            (session_id, session_id),
+        ).fetchone() is not None:
+            return False
+        provider = _provider(runtime["provider"] or store.DEFAULT_PROVIDER)
+        if launches.awaiting_task_adoption(conn, provider, runtime["cwd"] or ""):
+            return False
+        _ensure_for_session(conn, dict(runtime))
+        return True
 
 
 def reconcile_sessions(*, limit: int = _RECONCILE_LIMIT) -> int:
@@ -458,6 +489,8 @@ def reconcile_sessions(*, limit: int = _RECONCILE_LIMIT) -> int:
     then committed as one idempotent batch, so startup either publishes the
     whole reconciliation or none of it.
     """
+    from claude_browse.board import launches
+
     if limit <= 0:
         return 0
     conn = _conn()
@@ -507,6 +540,12 @@ def reconcile_sessions(*, limit: int = _RECONCILE_LIMIT) -> int:
                 "SELECT * FROM work_items WHERE session_id = ?", (session_id,)
             ).fetchone()
             if existing is None:
+                # Recheck links after out-of-transaction project discovery:
+                # this session may now be historical after hook adoption.
+                if conn.execute(
+                    "SELECT 1 FROM task_session_links WHERE session_id = ?", (session_id,)
+                ).fetchone() is not None or launches.awaiting_task_adoption(conn, provider, cwd):
+                    continue
                 task_id = str(uuid.uuid4())
                 conn.execute(
                     """INSERT INTO work_items
