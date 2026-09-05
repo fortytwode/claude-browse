@@ -16,7 +16,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -399,6 +399,33 @@ def test_automatic_thread_update_and_board_roundtrip(web_server):
 
     _status, board = _get_json(base + "/api/board")
     assert [item["title"] for item in board["tasks"]] == ["Ship it"]
+
+
+def test_automatic_due_date_defaults_to_last_pause_until_overridden(web_server):
+    base, _server = web_server
+    task = _board_thread("paused", provider="codex", name="Paused work")
+    paused_day = date.today() - timedelta(days=1)
+    store.upsert(
+        "paused",
+        state="idle",
+        paused_at=datetime.combine(paused_day, time(hour=12)).timestamp(),
+    )
+
+    _status, board = _get_json(base + "/api/board")
+    rendered = next(item for item in board["tasks"] if item["task_id"] == task["task_id"])
+    assert rendered["due_date"] == paused_day.isoformat()
+    assert rendered["due_date_defaulted"] is True
+
+    _status, updated = _mutate_json(
+        base + "/api/tasks/" + task["task_id"],
+        "PATCH",
+        {"due_date": None},
+    )
+    assert updated["task"]["due_date"] is None
+    _status, board = _get_json(base + "/api/board")
+    rendered = next(item for item in board["tasks"] if item["task_id"] == task["task_id"])
+    assert rendered["due_date"] is None
+    assert rendered["due_date_defaulted"] is False
 
 
 def test_board_returns_summary_fallback_and_project_aggregates(web_server):

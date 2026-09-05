@@ -350,6 +350,70 @@
     $("filter-last-update").value = filters.lastUpdate;
     $("sort-direction").textContent = sortDirection === "desc" ? "↓" : "↑";
     $("sort-direction").setAttribute("aria-label", "Sort " + (sortDirection === "desc" ? "descending" : "ascending"));
+    refreshCustomSelects();
+  }
+  var customSelects = Object.create(null);
+  function refreshCustomSelect(id) {
+    var item = customSelects[id];
+    if (!item) return;
+    var select = item.select;
+    item.button.textContent = select.options[select.selectedIndex] ? select.options[select.selectedIndex].textContent : "";
+    Array.prototype.forEach.call(item.menu.querySelectorAll(".toolbar-select-option"), function (option) {
+      option.setAttribute("aria-selected", String(option.dataset.value === select.value));
+    });
+  }
+  function refreshCustomSelects() {
+    Object.keys(customSelects).forEach(refreshCustomSelect);
+  }
+  function enhanceSelect(id) {
+    var select = $(id);
+    if (!select || customSelects[id] || !select.options) return;
+    var shell = document.createElement("span");
+    shell.className = "toolbar-select";
+    shell.dataset.selectId = id;
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "toolbar-select-button";
+    button.setAttribute("aria-haspopup", "listbox");
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-controls", id + "-menu");
+    var menu = document.createElement("span");
+    menu.className = "toolbar-select-menu";
+    menu.id = id + "-menu";
+    menu.setAttribute("role", "listbox");
+    menu.hidden = true;
+    Array.prototype.forEach.call(select.options, function (source) {
+      var option = document.createElement("button");
+      option.type = "button";
+      option.className = "toolbar-select-option";
+      option.textContent = source.textContent;
+      option.dataset.value = source.value;
+      option.setAttribute("role", "option");
+      option.addEventListener("click", function () {
+        select.value = source.value;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        menu.hidden = true;
+        button.setAttribute("aria-expanded", "false");
+      });
+      menu.appendChild(option);
+    });
+    button.addEventListener("click", function (event) {
+      event.stopPropagation();
+      var open = menu.hidden;
+      Array.prototype.forEach.call(document.querySelectorAll(".toolbar-select-menu"), function (other) {
+        other.hidden = true;
+        var otherButton = other.parentNode.querySelector(".toolbar-select-button");
+        if (otherButton) otherButton.setAttribute("aria-expanded", "false");
+      });
+      menu.hidden = !open;
+      button.setAttribute("aria-expanded", String(open));
+    });
+    select.parentNode.insertBefore(shell, select);
+    shell.appendChild(button);
+    shell.appendChild(menu);
+    shell.appendChild(select);
+    customSelects[id] = { select: select, button: button, menu: menu };
+    refreshCustomSelect(id);
   }
   function selectedProjectData() {
     return (
@@ -1523,7 +1587,9 @@
     var due = el("td", "work-due"), dueValue = el("input", "due-input");
     dueValue.type = "date";
     dueValue.value = task.due_date || "";
-    dueValue.title = task.due_date ? "Due " + dueText(task.due_date) : "Set due date";
+    dueValue.title = task.due_date_defaulted
+      ? "Defaulted from the last pause; choose a date to override"
+      : task.due_date ? "Due " + dueText(task.due_date) : "Set due date";
     dueValue.setAttribute("aria-label", "Due date for " + task.title);
     dueValue.addEventListener("change", function () {
       dueValue.disabled = true;
@@ -2414,6 +2480,15 @@
   $("task-codex").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) continueOrFocusTask(task, "codex"); });
   $("task-fresh-claude").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) startFreshTask(task, "claude"); });
   $("task-fresh-codex").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) startFreshTask(task, "codex"); });
+  ["filter-status", "group-by", "sort-by", "filter-provider", "filter-priority", "filter-terminal", "filter-presence", "filter-due", "filter-last-update"].forEach(enhanceSelect);
+  document.addEventListener("click", function (event) {
+    if (event.target && event.target.closest && event.target.closest(".toolbar-select")) return;
+    Array.prototype.forEach.call(document.querySelectorAll(".toolbar-select-menu"), function (menu) {
+      menu.hidden = true;
+      var button = menu.parentNode.querySelector(".toolbar-select-button");
+      if (button) button.setAttribute("aria-expanded", "false");
+    });
+  });
   restoreViewSettings();
   request("/api/meta")
     .then(function (meta) {

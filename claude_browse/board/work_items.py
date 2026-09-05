@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS work_items (
     project_path     TEXT NOT NULL,
     status           TEXT NOT NULL DEFAULT 'active',
     due_date         TEXT,
+    due_date_source  TEXT NOT NULL DEFAULT 'automatic',
     session_id       TEXT UNIQUE,
     session_provider TEXT,
     notes            TEXT,
@@ -169,7 +170,7 @@ def _migrate_planning(conn: sqlite3.Connection) -> None:
     has_settings = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_settings'"
     ).fetchone()
-    if {"priority", "position", "project_resolved"} <= columns and has_settings:
+    if {"priority", "position", "project_resolved", "due_date_source"} <= columns and has_settings:
         return
     backup_path = (
         project_resolution_migration_backup_path()
@@ -200,6 +201,15 @@ def _migrate_planning(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "ALTER TABLE work_items ADD COLUMN project_resolved INTEGER "
                 "NOT NULL DEFAULT 0"
+            )
+        if "due_date_source" not in columns:
+            conn.execute(
+                "ALTER TABLE work_items ADD COLUMN due_date_source TEXT "
+                "NOT NULL DEFAULT 'automatic'"
+            )
+            conn.execute(
+                "UPDATE work_items SET due_date_source = 'manual' "
+                "WHERE due_date IS NOT NULL"
             )
         conn.execute(_PROJECT_SETTINGS_SCHEMA)
         conn.execute(_FOLDERS_SCHEMA)
@@ -737,6 +747,7 @@ def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
         )
     if "due_date" in changes:
         values["due_date"] = _due(changes["due_date"])
+        values["due_date_source"] = "manual"
     if "priority" in changes:
         values["priority"] = _priority(changes["priority"])
     values["updated_at"] = time.time()

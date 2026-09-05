@@ -343,6 +343,9 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 return False
         else:
             _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
+            # Even without a matching start event, Stop is the last observed
+            # pause (for example after a helper restart).
+            store.upsert(session_id, paused_at=time.time())
         if working_since and should_notify:
             name = (row or {}).get("name") or _placeholder_name(cwd)
             notify.notify(_notify_title("done", cwd, model_label), _notify_body(name))
@@ -374,6 +377,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             working_since=None,
             done_at=None,
             done_turn_s=None,
+            paused_at=time.time(),
             pending_alert=None,
             **transcript_fields,
             **({"model_label": model_label} if model_label else {}),
@@ -388,6 +392,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
         # back to is still a thread you can resume, and the board's job is
         # to keep it visible until you do, or ack it.
         _set_state(session_id, "ended", cwd=cwd, model_label=model_label or None)
+        store.upsert(session_id, paused_at=time.time())
         _capture_work(session_id)
         return True
 

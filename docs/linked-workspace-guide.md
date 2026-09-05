@@ -43,7 +43,7 @@ The task reader shows the next launch destination. Selecting the task title open
 
 Task and List launch buttons show the destination and available agent.
 
-The work table keeps its controls in the row: choose **Task status** directly, set **Due date** directly, and use the checkmark to toggle a task between **To do** and **Done**. The two agent buttons adapt to the task: **Continue** when its compatible conversation can be resumed, **Restart** when that continuation will launch a new terminal after its old terminal closed, and **Start** when a new conversation is required.
+The work table keeps its controls in the row: choose **Task status** directly, set **Due date** directly, and use the checkmark to toggle a task between **To do** and **Done**. When no manual due date exists, the board displays the local calendar day of the session's last pause; editing or clearing it makes an explicit manual choice. The two agent buttons adapt to the task: **Continue** when its compatible conversation can be resumed, **Restart** when that continuation will launch a new terminal after its old terminal closed, and **Start** when a new conversation is required.
 
 For an open conversation with the same provider, Continue first proves the live process and its Terminal TTY again, then selects that exact Terminal tab and brings it forward. If the session or tab changed between the board refresh and click, Agent Board does not guess: it safely starts the requested continuation in a new Terminal instead.
 

@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     sync_revision      INTEGER NOT NULL DEFAULT 0,
     published_revision INTEGER NOT NULL DEFAULT 0,
     pending_alert_revision INTEGER,
+    paused_at           REAL,
     transcript_path    TEXT
 )
 """
@@ -65,10 +66,15 @@ _COLUMNS = (
     "sync_revision",
     "published_revision",
     "pending_alert_revision",
+    # Last provider Stop/Interrupt/SessionEnd timestamp. Unlike updated_at,
+    # this is not advanced by statusline heartbeats and is safe for the board
+    # to use as the default calendar due date.
+    "paused_at",
     "transcript_path",
 )
 
 _COLUMN_TYPES = {
+    "paused_at": "REAL",
     "host": "TEXT",
     "cwd": "TEXT",
     "name": "TEXT",
@@ -344,7 +350,8 @@ def finish_turn_with_decision(
             "acked_at = CASE WHEN ? THEN NULL ELSE acked_at END, "
             "pending_alert = CASE WHEN ? THEN 'done' ELSE NULL END, "
             "pending_alert_revision = CASE WHEN ? "
-            "THEN COALESCE(sync_revision, 0) + 1 ELSE NULL END "
+            "THEN COALESCE(sync_revision, 0) + 1 ELSE NULL END, "
+            "paused_at = ? "
             "WHERE session_id = ? AND working_since IS ?",
             (
                 cwd,
@@ -359,6 +366,7 @@ def finish_turn_with_decision(
                 should_mark_unattended,
                 should_alert,
                 should_alert,
+                now,
                 session_id,
                 working_since,
             ),

@@ -482,6 +482,15 @@ class _Handler(BaseHTTPRequestHandler):
         )
         work_status = str(task.get("status") or "active")
         due_date = task.get("due_date")
+        due_date_defaulted = False
+        if not due_date and task.get("due_date_source", "automatic") != "manual" and runtime:
+            paused_at = runtime.get("paused_at")
+            try:
+                if paused_at:
+                    due_date = datetime.fromtimestamp(float(paused_at)).date().isoformat()
+                    due_date_defaulted = True
+            except (TypeError, ValueError, OverflowError, OSError):
+                pass
         in_today = bool(
             work_status == "active"
             and (
@@ -537,6 +546,8 @@ class _Handler(BaseHTTPRequestHandler):
             "order": int(task.get("position") or 0),
             "summary": summary,
             "work_status": work_status,
+            "due_date": due_date,
+            "due_date_defaulted": due_date_defaulted,
             "terminal_state": terminal_state,
             "terminal_runtime_state": (runtime or {}).get("state") or "unknown",
             "terminal_presence": presence_state,
