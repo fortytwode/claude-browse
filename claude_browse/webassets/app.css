@@ -609,8 +609,11 @@ select {
 .column-name {
   width: auto;
 }
+.column-status {
+  width: 105px;
+}
 .column-due {
-  width: 12%;
+  width: 132px;
 }
 .column-updated {
   width: 12%;
@@ -625,7 +628,7 @@ select {
   width: 8%;
 }
 .column-actions {
-  width: 35px;
+  width: 178px;
 }
 .order-controls {
   display: flex;
@@ -691,6 +694,34 @@ select {
 .due-label.overdue {
   color: #df3a3a;
 }
+.task-status,
+.due-input {
+  max-width: 100%;
+  padding: 4px 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+}
+.due-input { width: 124px; }
+.work-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.grid-launch {
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.grid-launch:hover:not(:disabled) { border-color: var(--purple); color: var(--purple); }
+.grid-launch:disabled { cursor: not-allowed; opacity: .52; }
 .priority-menu { position: relative; }
 .priority-menu summary { list-style: none; cursor: pointer; }
 .priority-menu summary::-webkit-details-marker { display: none; }
@@ -1138,9 +1169,9 @@ dialog::backdrop {
   }
   .work-row {
     display: grid;
-    grid-template-columns: 48px minmax(0, 1fr) 88px 30px;
-    grid-template-areas: "order name due menu" "order priority updated menu";
-    min-height: 74px;
+    grid-template-columns: 48px minmax(0, 1fr) 100px;
+    grid-template-areas: "order name status" "order due priority" "order updated actions";
+    min-height: 104px;
     border-bottom: 1px solid var(--line);
   }
   .work-table td {
@@ -1158,6 +1189,9 @@ dialog::backdrop {
   .work-due {
     grid-area: due;
   }
+  .work-status {
+    grid-area: status;
+  }
   .work-priority {
     grid-area: priority;
   }
@@ -1165,7 +1199,7 @@ dialog::backdrop {
     grid-area: updated;
   }
   .work-actions {
-    grid-area: menu;
+    grid-area: actions;
   }
   #history-view {
     height: auto;

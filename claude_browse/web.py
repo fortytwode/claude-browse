@@ -29,7 +29,17 @@ from importlib import resources
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import fts
-from .board import commands, discovery, launches, presence, projects, store, work_items, workspace
+from .board import (
+    commands,
+    discovery,
+    launches,
+    presence,
+    projects,
+    store,
+    terminal_focus,
+    work_items,
+    workspace,
+)
 from .core import display_cwd, folder_name, format_date, provider_display_name
 from .providers import get_provider
 
@@ -226,6 +236,9 @@ class _Handler(BaseHTTPRequestHandler):
             elif parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/launch"):
                 task_id = unquote(parsed.path[len("/api/tasks/") : -len("/launch")])
                 self._launch_task(task_id, body)
+            elif parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/focus"):
+                task_id = unquote(parsed.path[len("/api/tasks/") : -len("/focus")])
+                self._focus_task(task_id, body)
             elif parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/start"):
                 task_id = unquote(parsed.path[len("/api/tasks/") : -len("/start")])
                 self._launch_task(task_id, body, fresh=True)
@@ -741,6 +754,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "task not found"}, status=404)
             return
         self._launch_workspace("task-new" if fresh else "task", task_id, body)
+
+    def _focus_task(self, task_id: str, body: dict) -> None:
+        if body:
+            raise ValueError("focus does not accept fields")
+        task = work_items.get(task_id)
+        if not task or not task.get("session_id"):
+            self._send_json({"error": "task not found"}, status=404)
+            return
+        self._send_json(terminal_focus.focus_session(
+            str(task["session_id"]), str(task.get("session_provider") or store.DEFAULT_PROVIDER)
+        ))
 
     def _launch_workspace(self, kind: str, target_id: str, body: dict) -> None:
         fields = {"provider", "full_access", "launch_revision"}

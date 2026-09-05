@@ -64,7 +64,7 @@
   var SAVED_VIEWS_KEY = "agent-board.saved-views.v1";
   // v2 changes the initial board from unfinished work to verified-open terminals.
   var VIEW_SETTINGS_KEY = "agent-board.view-settings.v2";
-  var DATA_COLUMNS = ["name", "due", "updated", "priority", "terminal", "agent"];
+  var DATA_COLUMNS = ["name", "status", "due", "updated", "priority", "terminal", "agent"];
   var columnOrder = DATA_COLUMNS.slice(),
     columnWidths = Object.create(null),
     collapsedGroups = Object.create(null),
@@ -1111,7 +1111,7 @@
     return menu;
   }
   function markDone(task) {
-    var next = task.work_status === "active" ? "done" : "active";
+    var next = task.work_status === "done" ? "active" : "done";
     saveTask(task, "status", next)
       .then(function () {
         fetchBoard(true);
@@ -1119,6 +1119,31 @@
       .catch(function (error) {
         toast(error.message, true);
       });
+  }
+  function taskStatusSelect(task) {
+    var select = el("select", "task-status");
+    select.setAttribute("aria-label", "Task status for " + task.title);
+    [
+      ["active", "To do"],
+      ["done", "Done"],
+      ["archived", "Archived"],
+    ].forEach(function (pair) {
+      var option = el("option", "", pair[1]);
+      option.value = pair[0];
+      option.selected = task.work_status === pair[0];
+      select.appendChild(option);
+    });
+    select.addEventListener("change", function () {
+      select.disabled = true;
+      saveTask(task, "status", select.value)
+        .then(function () { fetchBoard(true); })
+        .catch(function (error) {
+          select.value = task.work_status;
+          toast(error.message, true);
+        })
+        .finally(function () { select.disabled = false; });
+    });
+    return select;
   }
   function inlineRename(task, identity, crumb, title, pencil) {
     var input = el("input", "inline-rename");
@@ -1275,6 +1300,29 @@
   function launchTask(task, provider) {
     return launchTaskAction(task, provider, TASK_ACTION_MODES.continue);
   }
+  function continueOrFocusTask(task, provider) {
+    var isCurrentOpenSession = taskPresence(task) === "open" && task.session_provider === provider,
+      key = "focus:" + task.task_id + ":" + provider;
+    if (!isCurrentOpenSession) return launchTask(task, provider);
+    if (launchesInFlight[key]) return Promise.resolve();
+    launchesInFlight[key] = true;
+    return mutate("/api/tasks/" + encodeURIComponent(task.task_id) + "/focus", "POST", {})
+      .then(function (result) {
+        if (result.focused) {
+          toast("Opened the existing " + providerName(provider) + " terminal");
+          return undefined;
+        }
+        toast((result.reason || "That terminal is no longer available.") + " Continuing in a new Terminal.");
+        return launchTask(task, provider);
+      })
+      .catch(function () {
+        // A board server from before this feature, or an OS automation denial,
+        // must never prevent an otherwise valid continuation.
+        toast("Could not focus that terminal. Continuing in a new Terminal.");
+        return launchTask(task, provider);
+      })
+      .finally(function () { delete launchesInFlight[key]; });
+  }
   function startFreshTask(task, provider) {
     return launchTaskAction(task, provider, TASK_ACTION_MODES.fresh);
   }
@@ -1289,6 +1337,31 @@
       .catch(function (error) { toast(error.message, true); })
       .finally(function () { delete launchesInFlight[key]; updateTaskActionButtons(task, mode); });
   }
+  function gridLaunchAction(task, provider) {
+    var continuation = launchAction(task.actions, provider, "Continue in"),
+      fresh = launchAction(task.start_actions, provider, "Start"),
+      useContinuation = continuation.available,
+      action = useContinuation ? continuation : fresh,
+      presence = taskPresence(task),
+      label = useContinuation
+        ? (presence === "closed" ? "Restart " : "Continue in ") + providerName(provider)
+        : "Start " + providerName(provider),
+      button = el("button", "grid-launch " + provider, label);
+    button.type = "button";
+    button.disabled = !action.available;
+    button.title = !action.available
+      ? action.reason || "Unavailable"
+      : presence === "open" && task.session_provider === provider
+        ? "Opens the existing Terminal window for this task. If it changed, safely continues in a new Terminal."
+        : useContinuation
+          ? "Continue this task in a new Terminal launch."
+          : "Start a new conversation; earlier task history remains attached.";
+    button.addEventListener("click", function () {
+      if (useContinuation) continueOrFocusTask(task, provider);
+      else startFreshTask(task, provider);
+    });
+    return button;
+  }
   function launchList(project, provider) {
     var action = launchAction(project.actions, provider, "Start"), key = "list:" + project.project_key + ":" + provider;
     if (!action.available) return toast(action.reason || "This launch is unavailable.", true);
@@ -1299,62 +1372,6 @@
       .then(function () { toast("Launch requested — check Terminal"); })
       .catch(function (error) { toast(error.message, true); })
       .finally(function () { delete launchesInFlight[key]; updateListActions(project); });
-  }
-  function taskMenu(task) {
-    var items = [
-        [
-          "Open details",
-          function () {
-            openTaskDialog(task);
-          },
-        ],
-        [
-          "Rename",
-          function () {
-            openEditor("Rename task", "Task name", task.title, function (name) {
-              return saveTask(task, "title", name);
-            });
-          },
-        ],
-        [
-          "Set due date",
-          function () {
-            openEditor(
-              "Set due date",
-              "YYYY-MM-DD (leave blank to clear)",
-              task.due_date || "",
-              function (date) {
-                return saveTask(task, "due_date", date || null);
-              },
-              { allowEmpty: true, type: "date" },
-            );
-          },
-        ],
-        [
-          task.work_status === "active" ? "Mark done" : "Reopen",
-          function () {
-            markDone(task);
-          },
-        ],
-        [
-          "Move up",
-          function () {
-            moveTask(task, -1);
-          },
-        ],
-        [
-          "Move down",
-          function () {
-            moveTask(task, 1);
-          },
-        ],
-      ];
-    if (workspaceEnabled()) {
-      (latestBoard.workspace.lists || []).forEach(function (list) {
-        if (list.list_key !== taskProjectKey(task)) items.push(["Move to " + list.name, function () { moveTaskToList(task, list.list_key); }]);
-      });
-    }
-    return rowMenu(items, "Task actions for " + task.title);
   }
   function header(text, cls, sort, column, groupId) {
     var th = el("th", cls + (sort ? " sortable" : ""));
@@ -1459,9 +1476,9 @@
     handle.setAttribute("aria-label", "Drag " + task.title);
     done.setAttribute(
       "aria-label",
-      task.work_status === "active"
-        ? "Mark " + task.title + " done"
-        : "Reopen " + task.title,
+      task.work_status === "done"
+        ? "Mark " + task.title + " to do"
+        : "Mark " + task.title + " done",
     );
     done.addEventListener("click", function () {
       markDone(task);
@@ -1493,22 +1510,28 @@
       queueMode = "all";
       renderBoard(latestBoard);
     });
+    title.setAttribute("aria-label", "Open details for " + task.title);
+    title.title = "Open details";
     title.addEventListener("click", function () {
       openTaskDialog(task);
     });
     pencil.type = "button"; pencil.setAttribute("aria-label", "Rename " + task.title);
     pencil.addEventListener("click", function () { inlineRename(task, identity, crumb, title, pencil); });
     identity.append(crumb, title, pencil);
-    var due = el("td", "work-due"),
-      dueValue = el(
-        "span",
-        "due-label" +
-          (task.due_date && dueText(task.due_date) === "Overdue"
-            ? " overdue"
-            : ""),
-        dueText(task.due_date),
-      );
-    dueValue.title = task.due_date || "";
+    var status = el("td", "work-status");
+    status.appendChild(taskStatusSelect(task));
+    var due = el("td", "work-due"), dueValue = el("input", "due-input");
+    dueValue.type = "date";
+    dueValue.value = task.due_date || "";
+    dueValue.title = task.due_date ? "Due " + dueText(task.due_date) : "Set due date";
+    dueValue.setAttribute("aria-label", "Due date for " + task.title);
+    dueValue.addEventListener("change", function () {
+      dueValue.disabled = true;
+      saveTask(task, "due_date", dueValue.value || null)
+        .then(function () { fetchBoard(true); })
+        .catch(function (error) { dueValue.value = task.due_date || ""; toast(error.message, true); })
+        .finally(function () { dueValue.disabled = false; });
+    });
     due.appendChild(dueValue);
     var updated = el("td", "work-updated"),
       updateValue = el("span", "updated", relativeTime(task.last_activity_at));
@@ -1528,8 +1551,8 @@
     var agent = el("td", "work-agent");
     agent.appendChild(el("span", "agent", providerName(task.session_provider)));
     var actions = el("td", "work-actions");
-    actions.appendChild(taskMenu(task));
-    var cells = { name: identity, due: due, updated: updated, priority: priority, terminal: terminal, agent: agent };
+    actions.append(gridLaunchAction(task, "claude"), gridLaunchAction(task, "codex"));
+    var cells = { name: identity, status: status, due: due, updated: updated, priority: priority, terminal: terminal, agent: agent };
     row.appendChild(order);
     columnOrder.forEach(function (column) { row.appendChild(cells[column]); });
     row.appendChild(actions);
@@ -1670,9 +1693,9 @@
       headRow = document.createElement("tr"),
       body = document.createElement("tbody");
     headRow.appendChild(header("", "column-order"));
-    var definitions = { name: ["Name / List", "column-name", "name"], due: ["Due date", "column-due", "due"], updated: ["Last update", "column-updated", "updated"], priority: ["Priority", "column-priority", "priority"], terminal: ["Terminal state", "column-terminal", "terminal"], agent: ["Agent", "column-agent", "agent"] };
+    var definitions = { name: ["Name / List", "column-name", "name"], status: ["Task status", "column-status"], due: ["Due date", "column-due", "due"], updated: ["Last update", "column-updated", "updated"], priority: ["Priority", "column-priority", "priority"], terminal: ["Terminal state", "column-terminal", "terminal"], agent: ["Agent", "column-agent", "agent"] };
     columnOrder.forEach(function (column) { var definition = definitions[column]; headRow.appendChild(header(definition[0], definition[1], definition[2], column, groupId)); });
-    headRow.appendChild(header("", "column-actions"));
+    headRow.appendChild(header("Actions", "column-actions"));
     thead.appendChild(headRow);
     sorted(tasks).forEach(function (task) {
       var row = renderTaskRow(task);
@@ -1860,6 +1883,12 @@
       filters: Object.assign({}, filters),
     };
   }
+  function normalizedColumns(columns) {
+    if (!Array.isArray(columns) || new Set(columns).size !== columns.length || !columns.every(function (column) { return DATA_COLUMNS.indexOf(column) >= 0 || column === "name" || column === "due" || column === "updated" || column === "priority" || column === "terminal" || column === "agent"; })) return DATA_COLUMNS.slice();
+    var result = columns.filter(function (column) { return DATA_COLUMNS.indexOf(column) >= 0; });
+    if (result.indexOf("status") < 0) result.splice(Math.max(0, result.indexOf("name") + 1), 0, "status");
+    return result.length === DATA_COLUMNS.length && new Set(result).size === DATA_COLUMNS.length ? result : DATA_COLUMNS.slice();
+  }
   function applySnapshot(snapshot) {
     if (projectDescriptionDirty())
       return announce(
@@ -1886,7 +1915,7 @@
         ? snapshot.sort
         : "manual";
     sortDirection = snapshot.sortDirection === "desc" ? "desc" : "asc";
-    columnOrder = Array.isArray(snapshot.columns) && snapshot.columns.length === DATA_COLUMNS.length && new Set(snapshot.columns).size === DATA_COLUMNS.length && snapshot.columns.every(function (column) { return DATA_COLUMNS.indexOf(column) >= 0; }) ? snapshot.columns.slice() : DATA_COLUMNS.slice();
+    columnOrder = normalizedColumns(snapshot.columns);
     columnWidths = Object.create(null);
     if (snapshot.columnWidths && typeof snapshot.columnWidths === "object") Object.keys(snapshot.columnWidths).forEach(function (column) { if (DATA_COLUMNS.indexOf(column) >= 0) setColumnWidth(column, snapshot.columnWidths[column]); });
     collapsedGroups = snapshot.collapsedGroups && typeof snapshot.collapsedGroups === "object" ? Object.assign(Object.create(null), snapshot.collapsedGroups) : Object.create(null);
@@ -1937,7 +1966,7 @@
       if (!settings || typeof settings !== "object" || Array.isArray(settings)) settings = {};
       if (["manual", "name", "updated", "due", "priority", "terminal", "agent"].indexOf(settings.sort) >= 0) sortBy = settings.sort;
       sortDirection = settings.sortDirection === "desc" ? "desc" : "asc";
-      if (Array.isArray(settings.columns) && settings.columns.length === DATA_COLUMNS.length && new Set(settings.columns).size === DATA_COLUMNS.length && settings.columns.every(function (column) { return DATA_COLUMNS.indexOf(column) >= 0; })) columnOrder = settings.columns.slice();
+      columnOrder = normalizedColumns(settings.columns);
       if (settings.widths && typeof settings.widths === "object") Object.keys(settings.widths).forEach(function (column) { if (DATA_COLUMNS.indexOf(column) >= 0) setColumnWidth(column, settings.widths[column]); });
       collapsedGroups = settings.collapsedGroups && typeof settings.collapsedGroups === "object" ? Object.assign(Object.create(null), settings.collapsedGroups) : Object.create(null);
       sidebarWidth = Math.max(190, Math.min(480, Number(saved.sidebarWidth === undefined ? settings.sidebarWidth : saved.sidebarWidth) || 250));
@@ -2380,8 +2409,8 @@
   });
   $("list-claude").addEventListener("click", function () { var project = selectedProjectData(); if (project) launchList(project, "claude"); });
   $("list-codex").addEventListener("click", function () { var project = selectedProjectData(); if (project) launchList(project, "codex"); });
-  $("task-claude").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) launchTask(task, "claude"); });
-  $("task-codex").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) launchTask(task, "codex"); });
+  $("task-claude").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) continueOrFocusTask(task, "claude"); });
+  $("task-codex").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) continueOrFocusTask(task, "codex"); });
   $("task-fresh-claude").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) startFreshTask(task, "claude"); });
   $("task-fresh-codex").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) startFreshTask(task, "codex"); });
   restoreViewSettings();

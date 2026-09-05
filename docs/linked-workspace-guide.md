@@ -35,13 +35,17 @@ An unlinked or missing folder does not hide the List or its tasks. It prevents n
 
 ## Move a task
 
-Drag a task onto another List, or use the task's `...` menu and choose **Move to**. This changes the task's List membership and its **next launch destination**. It does not interrupt or relocate a terminal that is already running. A short-lived **Undo** action appears after a move.
+Drag a task onto another List. This changes the task's List membership and its **next launch destination**. It does not interrupt or relocate a terminal that is already running. A short-lived **Undo** action appears after a move.
 
 The task reader shows the next launch destination. Selecting the task title opens the reader; selecting a List opens its description panel.
 
 ## Continue work
 
 Task and List launch buttons show the destination and available agent.
+
+The work table keeps its controls in the row: choose **Task status** directly, set **Due date** directly, and use the checkmark to toggle a task between **To do** and **Done**. The two agent buttons adapt to the task: **Continue** when its compatible conversation can be resumed, **Restart** when that continuation will launch a new terminal after its old terminal closed, and **Start** when a new conversation is required.
+
+For an open conversation with the same provider, Continue first proves the live process and its Terminal TTY again, then selects that exact Terminal tab and brings it forward. If the session or tab changed between the board refresh and click, Agent Board does not guess: it safely starts the requested continuation in a new Terminal instead.
 
 - **Resume** is used for the same provider in the original working folder.
 - **Continue in Claude/CodeX** is a handoff when the provider or working folder changes. It starts with the task's context rather than claiming a native resume in the new location.

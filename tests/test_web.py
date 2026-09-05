@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from claude_browse import fts, web
-from claude_browse.board import hook, launches, store, work_items, workspace
+from claude_browse.board import hook, launches, store, terminal_focus, work_items, workspace
 
 
 def _seed(
@@ -647,6 +647,24 @@ def test_launch_is_server_built_and_rejects_missing_project(web_server, monkeypa
     assert launched == {"ok": True}
     assert "launch-intent" in opened[0]
     assert "launchable" not in opened[0]
+
+
+def test_focus_task_returns_native_focus_result_without_a_launch(web_server, monkeypatch):
+    base, _server = web_server
+    _board_thread("focusable", cwd=tempfile.gettempdir(), provider="codex", name="Focus me")
+    _status, board = _get_json(base + "/api/board")
+    task_id = next(row for row in board["tasks"] if row["session_id"] == "focusable")["task_id"]
+    calls = []
+    monkeypatch.setattr(
+        terminal_focus,
+        "focus_session",
+        lambda sid, provider: calls.append((sid, provider)) or {"focused": True, "reason": ""},
+    )
+
+    _status, result = _mutate_json(base + f"/api/tasks/{task_id}/focus", "POST", {})
+
+    assert result == {"focused": True, "reason": ""}
+    assert calls == [("focusable", "codex")]
 
     _board_thread("missing", cwd="/definitely/not/here", name="Missing")
     _status, board = _get_json(base + "/api/board")

@@ -216,6 +216,7 @@ globalThis.testApi = {
   displayProjects,
   moveTaskToList,
   launchTask,
+  continueOrFocusTask,
   loadTaskHistory,
   updateTaskActions,
   updateFreshTaskActions,
@@ -590,6 +591,46 @@ test("task drag handle supplies a browser-recognized payload", () => {
   assert.equal(payloads["text/plain"], "task-1");
 });
 
+test("grid exposes direct status, due-date, and provider actions without a row menu", () => {
+  const { api } = loadApp();
+  const task = activeTask({
+    terminal_presence: "closed",
+    actions: {
+      claude: { label: "Resume Claude", available: true },
+      codex: { label: "Continue in CodeX", available: false, reason: "Transcript unavailable" },
+    },
+    start_actions: {
+      claude: { label: "Start fresh Claude", available: true },
+      codex: { label: "Start fresh CodeX", available: true },
+    },
+  });
+  api.setState({ latestBoard: { tasks: [task], projects: [], folders: [] } });
+  const row = api.renderTaskRow(task);
+  assert.ok(findByClass(row, "task-status"), "status is directly editable in the grid");
+  assert.ok(findByClass(row, "due-input"), "due date is directly editable in the grid");
+  assert.equal(findByClass(row, "row-menu"), null, "row menu clutter is removed");
+  const actions = findAllByClass(row, "grid-launch");
+  assert.deepEqual(actions.map((button) => button.textContent), ["Restart Claude", "Start CodeX"]);
+  assert.match(actions[0].title, /new Terminal launch/i);
+});
+
+test("Continue focuses its verified open same-provider terminal before launching", async () => {
+  const requests = [];
+  const { api } = loadApp({
+    fetchImpl: (path, options = {}) => {
+      requests.push({ path, options });
+      return Promise.resolve({ ok: true, json: async () => ({ focused: true }) });
+    },
+  });
+  const task = activeTask({
+    terminal_presence: "open",
+    session_provider: "codex",
+    actions: { codex: { label: "Continue in CodeX", available: true } },
+  });
+  await api.continueOrFocusTask(task, "codex");
+  assert.deepEqual(requests.map((request) => request.path), ["/api/tasks/task-1/focus"]);
+});
+
 test("header sorting supports every workspace data column with a stable task-id tie break", () => {
   const { api } = loadApp();
   api.setState({ sortBy: "priority", sortDirection: "asc" });
@@ -621,7 +662,7 @@ test("saved view widths and collapsed groups round trip with clamps", () => {
   assert.equal(state.widths.due, 600);
   assert.equal(state.collapsedGroups["group-all-priority-urgent"], true);
   api.applySnapshot({ scope: "all", columns: ["name", "name", "updated", "priority", "terminal", "agent"] });
-  assert.deepEqual(JSON.parse(JSON.stringify(api.getState().columns)), ["name", "due", "updated", "priority", "terminal", "agent"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(api.getState().columns)), ["name", "status", "due", "updated", "priority", "terminal", "agent"]);
   assert.deepEqual(JSON.parse(JSON.stringify(api.getState().widths)), {});
 });
 
@@ -1213,7 +1254,7 @@ test("stored view settings reset by scope and invalid data falls back to default
   api.setState({ queueMode: "today" });
   api.restoreViewSettings();
   assert.equal(api.getState().sortBy, "manual");
-  assert.deepEqual(JSON.parse(JSON.stringify(api.getState().columns)), ["name", "due", "updated", "priority", "terminal", "agent"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(api.getState().columns)), ["name", "status", "due", "updated", "priority", "terminal", "agent"]);
   assert.deepEqual(JSON.parse(JSON.stringify(api.getState().widths)), {});
   assert.deepEqual(JSON.parse(JSON.stringify(api.getState().collapsedGroups)), {});
   assert.equal(api.getState().sidebarWidth, 420, "sidebar preference remains global");

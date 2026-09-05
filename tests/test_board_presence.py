@@ -51,6 +51,40 @@ def test_claude_exact_live_process_overrides_stale_runtime(tmp_path, monkeypatch
     assert presence.snapshot([_row("claude-live")]) == {"claude-live": "open"}
 
 
+def test_verified_terminal_tty_requires_the_exact_claude_process(tmp_path, monkeypatch):
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "42.json").write_text(json.dumps({
+        "pid": 42, "sessionId": "claude-live", "procStart": "Fri Sep  5 01:02:03 2026",
+    }))
+    monkeypatch.setattr(presence, "_claude_sessions_root", lambda: sessions)
+    monkeypatch.setattr(
+        presence,
+        "_run",
+        lambda _args, _timeout: _completed("42 ttys004 claude Fri Sep  5 01:02:03 2026\n"),
+    )
+
+    assert presence.verified_terminal_tty("claude-live", "claude") == ("ttys004", "")
+
+
+def test_verified_terminal_tty_refuses_ambiguous_or_nonterminal_claude(tmp_path, monkeypatch):
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "42.json").write_text(json.dumps({
+        "pid": 42, "sessionId": "claude-live", "procStart": "Fri Sep  5 01:02:03 2026",
+    }))
+    monkeypatch.setattr(presence, "_claude_sessions_root", lambda: sessions)
+    monkeypatch.setattr(
+        presence,
+        "_run",
+        lambda _args, _timeout: _completed("42 ?? claude Fri Sep  5 01:02:03 2026\n"),
+    )
+
+    tty, reason = presence.verified_terminal_tty("claude-live", "claude")
+    assert tty is None
+    assert "could not be verified" in reason
+
+
 @pytest.mark.parametrize(
     "ps_line",
     [
@@ -153,6 +187,37 @@ def test_codex_only_writable_canonical_matching_descriptor_opens(tmp_path, monke
 
     monkeypatch.setattr(presence, "_run", run)
     assert presence.snapshot([_row("a-b-c-d-e", "codex")]) == {"a-b-c-d-e": "open"}
+
+
+def test_verified_terminal_tty_returns_only_one_exact_codex_process(tmp_path, monkeypatch):
+    root = tmp_path / "codex" / "sessions"
+    writable = _rollout(root, "a-b-c-d-e")
+    monkeypatch.setattr(presence, "_codex_sessions_root", lambda: root)
+
+    def run(args, timeout):
+        if args[0] == "ps":
+            return _completed("9 ttys001 codex\n")
+        assert args[-1] == "9"
+        return _completed(f"p9\nf21\nau\nn{writable}\n")
+
+    monkeypatch.setattr(presence, "_run", run)
+    assert presence.verified_terminal_tty("a-b-c-d-e", "codex") == ("ttys001", "")
+
+
+def test_verified_terminal_tty_refuses_multiple_codex_processes(tmp_path, monkeypatch):
+    root = tmp_path / "codex" / "sessions"
+    writable = _rollout(root, "a-b-c-d-e")
+    monkeypatch.setattr(presence, "_codex_sessions_root", lambda: root)
+
+    def run(args, timeout):
+        if args[0] == "ps":
+            return _completed("9 ttys001 codex\n10 ttys002 codex\n")
+        return _completed(f"p{args[-1]}\nf21\nau\nn{writable}\n")
+
+    monkeypatch.setattr(presence, "_run", run)
+    tty, reason = presence.verified_terminal_tty("a-b-c-d-e", "codex")
+    assert tty is None
+    assert "uniquely verified" in reason
 
 
 @pytest.mark.parametrize("access,source,expected", [("r", "user", "unknown"), ("u", "subagent", "unknown")])

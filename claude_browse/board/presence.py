@@ -428,3 +428,89 @@ def live_sessions() -> list[dict[str, str]]:
                 record["path"] = session.path
             records.append(record)
     return sorted(records, key=lambda record: (record["provider"], record["session_id"]))
+
+
+def verified_terminal_tty(session_id: str, provider: str) -> tuple[str | None, str]:
+    """Return one native Terminal TTY only when session identity is proven.
+
+    Presence answers the cheaper question "is this thread open?".  Bringing a
+    window forward needs stronger evidence: one exact provider process and one
+    terminal TTY.  This deliberately performs a fresh, bounded scan rather
+    than relying on the presence cache, since a PID or tab can disappear
+    between a board refresh and a click.
+    """
+    if not isinstance(session_id, str) or not session_id:
+        return None, "The task has no valid session identity."
+    if provider not in {"claude", "codex"}:
+        return None, "This provider cannot be focused locally."
+
+    deadline = time.monotonic() + TOTAL_SCAN_TIMEOUT_S
+    try:
+        if provider == "claude":
+            matches: set[str] = set()
+            root = _claude_sessions_root()
+            try:
+                entries = list(root.iterdir())
+            except FileNotFoundError:
+                return None, "Claude session metadata is not available on this Mac."
+            for path in entries:
+                if path.suffix != ".json" or not path.stem.isdecimal():
+                    continue
+                if time.monotonic() >= deadline:
+                    raise TimeoutError
+                try:
+                    payload = json.loads(path.read_bytes()[:METADATA_SCAN_BYTES])
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict) or payload.get("sessionId") != session_id:
+                    continue
+                pid = payload.get("pid")
+                if not isinstance(pid, int) or pid != int(path.stem):
+                    return None, "Claude process identity could not be verified."
+                output = _claude_pid_command(pid, deadline)
+                if output is None:
+                    return None, "The Claude terminal is no longer open."
+                process = next((
+                    parsed for line in output.splitlines()
+                    if (parsed := _parse_ps_line(line, 4)) is not None
+                ), None)
+                if process is None:
+                    return None, "Claude process identity could not be verified."
+                actual_pid, tty, command, started = process
+                if (
+                    actual_pid != str(pid)
+                    or not _terminal_tty(tty)
+                    or not _command_is(command, "claude")
+                    or not _same_start(payload.get("procStart"), started)
+                ):
+                    return None, "Claude process identity could not be verified."
+                matches.add(tty)
+            if len(matches) != 1:
+                return None, "No uniquely verified Claude terminal is open for this task."
+            return matches.pop(), ""
+
+        output = _command(["ps", "-axo", "pid=,tty=,comm="], deadline)
+        matches: set[tuple[str, str]] = set()
+        uncertain = False
+        root = _codex_sessions_root()
+        for pid, tty, command in _parse_processes(output):
+            if not _terminal_tty(tty) or not _command_is(command, "codex"):
+                continue
+            lsof = _command(["lsof", "-n", "-P", "-Ffan", "-p", pid], deadline)
+            for access, raw_path in _lsof_descriptors(lsof):
+                path = Path(raw_path)
+                if path.suffix != ".jsonl" or not _within_root(path, root):
+                    continue
+                identity = _codex_descriptor_identity(path, deadline)
+                if identity is None or identity[0] != session_id:
+                    continue
+                _sid, valid_identity, _enrollment = identity
+                if access not in {"w", "u"} or not valid_identity:
+                    uncertain = True
+                else:
+                    matches.add((pid, tty))
+        if uncertain or len(matches) != 1:
+            return None, "No uniquely verified Codex terminal is open for this task."
+        return next(iter(matches))[1], ""
+    except (OSError, RuntimeError, TimeoutError, subprocess.TimeoutExpired):
+        return None, "Terminal verification was unavailable; no window was focused."
