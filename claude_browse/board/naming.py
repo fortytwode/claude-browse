@@ -219,6 +219,8 @@ def maybe_name(session_id: str) -> None:
     row = store.get(session_id)
     if row is None:
         return
+    if row.get("name_source") == "manual":
+        return
 
     path = _find_jsonl_path(session_id)
     if not path:
@@ -237,4 +239,11 @@ def maybe_name(session_id: str) -> None:
 
     name = compute_name(session_id, info=info)
     if name:
-        store.upsert(session_id, name=name, name_source="haiku", named_at_msg_count=msg_count)
+        store.set_automatic_name_if_unchanged(
+            session_id,
+            expected_name=row.get("name"),
+            expected_source=row.get("name_source"),
+            expected_named_at=row.get("named_at_msg_count"),
+            name=name,
+            named_at_msg_count=msg_count,
+        )

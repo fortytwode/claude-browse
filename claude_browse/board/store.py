@@ -11,6 +11,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 _DB_PATH = Path(os.environ["AGENT_BOARD_DB_PATH"]) if os.environ.get(
@@ -38,7 +39,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     acked_at           REAL,
     sync_revision      INTEGER NOT NULL DEFAULT 0,
     published_revision INTEGER NOT NULL DEFAULT 0,
-    pending_alert_revision INTEGER
+    pending_alert_revision INTEGER,
+    paused_at           REAL,
+    transcript_path    TEXT
 )
 """
 
@@ -63,9 +66,15 @@ _COLUMNS = (
     "sync_revision",
     "published_revision",
     "pending_alert_revision",
+    # Last provider Stop/Interrupt/SessionEnd timestamp. Unlike updated_at,
+    # this is not advanced by statusline heartbeats and is safe for the board
+    # to use as the default calendar due date.
+    "paused_at",
+    "transcript_path",
 )
 
 _COLUMN_TYPES = {
+    "paused_at": "REAL",
     "host": "TEXT",
     "cwd": "TEXT",
     "name": "TEXT",
@@ -101,6 +110,9 @@ _COLUMN_TYPES = {
     # Couples an alert to the transition that created it, so an old worker
     # cannot post or clear a newer alert of the same kind.
     "pending_alert_revision": "INTEGER",
+    # Local-only path used to guard launches before FTS indexes a session.
+    # session_doc() deliberately excludes it from remote publication.
+    "transcript_path": "TEXT",
 }
 
 
@@ -121,6 +133,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
 _conn_cache: sqlite3.Connection | None = None
 _conn_cache_path: Path | None = None
 _conn_cache_owner: tuple[int, int] | None = None
+_conn_setup_lock = threading.Lock()
 
 
 def get_conn() -> sqlite3.Connection:
@@ -143,17 +156,29 @@ def get_conn() -> sqlite3.Connection:
     ):
         return _conn_cache
 
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(_DB_PATH, timeout=3)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=3000")
-    conn.execute(_SCHEMA)
-    _migrate(conn)
-    _conn_cache = conn
-    _conn_cache_path = _DB_PATH
-    _conn_cache_owner = owner
-    return conn
+    # SQLite can serialize ordinary WAL writes itself, but first-use setup is
+    # different: several hook threads racing through journal-mode/schema
+    # initialization can raise ``database is locked`` before busy_timeout is
+    # installed. Serialize only this cold path; normal hook reads/writes stay
+    # concurrent after each thread owns a configured connection.
+    with _conn_setup_lock:
+        if (
+            _conn_cache is not None
+            and _conn_cache_path == _DB_PATH
+            and _conn_cache_owner == owner
+        ):
+            return _conn_cache
+        _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(_DB_PATH, timeout=3)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=3000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(_SCHEMA)
+        _migrate(conn)
+        _conn_cache = conn
+        _conn_cache_path = _DB_PATH
+        _conn_cache_owner = owner
+        return conn
 
 
 def upsert(session_id: str, **fields: object) -> None:
@@ -175,6 +200,57 @@ def upsert(session_id: str, **fields: object) -> None:
             f"ON CONFLICT(session_id) DO UPDATE SET {update_clause}",
             values,
         )
+
+
+def set_automatic_name_if_unchanged(
+    session_id: str,
+    *,
+    expected_name: object,
+    expected_source: object,
+    expected_named_at: object,
+    name: str,
+    named_at_msg_count: int,
+) -> bool:
+    """CAS an automatic title and its overlay projection in one transaction.
+
+    A user rename changes ``name_source`` to ``manual`` on the same database,
+    so a namer that began earlier loses this compare-and-swap at commit time.
+    """
+    now = time.time()
+    with get_conn() as conn:
+        cursor = conn.execute(
+            "UPDATE sessions SET name = ?, name_source = 'haiku', "
+            "named_at_msg_count = ?, updated_at = ? "
+            "WHERE session_id = ? AND name IS ? AND name_source IS ? "
+            "AND named_at_msg_count IS ? AND COALESCE(name_source, '') != 'manual'",
+            (
+                name,
+                int(named_at_msg_count),
+                now,
+                session_id,
+                expected_name,
+                expected_source,
+                expected_named_at,
+            ),
+        )
+        if cursor.rowcount != 1:
+            return False
+        # Older databases may not have initialized the overlay yet.
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'work_items'"
+        ).fetchone()
+        if table is not None:
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(work_items)").fetchall()
+            }
+            if "title_source" in columns:
+                conn.execute(
+                    "UPDATE work_items SET title = ?, updated_at = ? "
+                    "WHERE session_id = ? AND title_source != 'manual'",
+                    (name, now, session_id),
+                )
+    return True
 
 
 def get(session_id: str) -> dict | None:
@@ -235,8 +311,36 @@ def finish_turn(
     The compare-and-swap makes duplicate or stale Stop events harmless. If a
     newer prompt replaced ``working_since``, its working state is preserved.
     """
+    finished, _alert_allowed = finish_turn_with_decision(
+        session_id,
+        working_since,
+        turn_s,
+        cwd=cwd,
+        host=host,
+        model_label=model_label,
+        mark_unattended=mark_unattended,
+    )
+    return finished
+
+
+def finish_turn_with_decision(
+    session_id: str,
+    working_since: float,
+    turn_s: float,
+    *,
+    cwd: str | None,
+    host: str,
+    model_label: str | None = None,
+    mark_unattended: bool = True,
+    alert_allowed: Callable[[sqlite3.Connection], bool] | None = None,
+) -> tuple[bool, bool]:
+    """Serialize Stop with an optional same-database alert decision."""
     now = time.time()
-    with get_conn() as conn:
+    conn = get_conn()
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        should_alert = alert_allowed(conn) if alert_allowed else True
+        should_mark_unattended = mark_unattended and should_alert
         cursor = conn.execute(
             "UPDATE sessions SET state = 'idle', working_since = NULL, "
             "cwd = COALESCE(?, cwd), host = ?, "
@@ -244,8 +348,10 @@ def finish_turn(
             "done_at = CASE WHEN ? THEN ? ELSE done_at END, "
             "done_turn_s = CASE WHEN ? THEN ? ELSE done_turn_s END, "
             "acked_at = CASE WHEN ? THEN NULL ELSE acked_at END, "
-            "pending_alert = 'done', "
-            "pending_alert_revision = COALESCE(sync_revision, 0) + 1 "
+            "pending_alert = CASE WHEN ? THEN 'done' ELSE NULL END, "
+            "pending_alert_revision = CASE WHEN ? "
+            "THEN COALESCE(sync_revision, 0) + 1 ELSE NULL END, "
+            "paused_at = ? "
             "WHERE session_id = ? AND working_since IS ?",
             (
                 cwd,
@@ -253,16 +359,20 @@ def finish_turn(
                 model_label,
                 now,
                 now,
-                mark_unattended,
+                should_mark_unattended,
                 now,
-                mark_unattended,
+                should_mark_unattended,
                 float(turn_s),
-                mark_unattended,
+                should_mark_unattended,
+                should_alert,
+                should_alert,
+                now,
                 session_id,
                 working_since,
             ),
         )
-    return cursor.rowcount == 1
+    finished = cursor.rowcount == 1
+    return finished, bool(finished and should_alert)
 
 
 def heartbeat(session_id: str) -> None:

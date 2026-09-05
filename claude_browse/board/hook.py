@@ -90,18 +90,7 @@ def _set_state(
     cwd: str | None,
     model_label: str | None = None,
 ) -> None:
-    """store.set_state, always including host, and refreshing the heartbeat.
-
-    Centralizes the host backfill here so a future new hook event handler
-    can't reintroduce the host=None bug found in this session's own live
-    data. Also bumps heartbeat_at: statusline.py's refreshInterval is the
-    primary heartbeat source, but its actual invocation cadence during a
-    long tool-heavy sequence turned out to be uncertain -- observed live in
-    this session's own build (it showed 'gone' on the real Slack board
-    while actively being worked on). Stop fires reliably on every turn per
-    the verified hook contract, so it's a second, more dependable heartbeat
-    source that doesn't depend on the statusline actually re-rendering.
-    """
+    """Refresh host and heartbeat whenever a hook updates runtime state."""
     store.set_state(session_id, state, cwd=cwd, host=_hostname(), model_label=model_label)
     store.heartbeat(session_id)
 
@@ -200,14 +189,8 @@ def _notify_title(action: str, cwd: str | None, model_label: str = "") -> str:
     return f"{prefix}{model}{action}"
 
 
-def _notify_body(name: str, cwd: str | None) -> str:
-    """Just the session name. The [folder] tag lives in the TITLE only
-    (_notify_title) -- two authors added it to both surfaces independently,
-    which shipped banners like 'title: [claude-browse] Opus done / body:
-    final qa smoke test [claude-browse]' with the folder twice (user-caught
-    bug). The title always carries the folder, so the body never needs it.
-    """
-    del cwd
+def _notify_body(name: str) -> str:
+    """Keep the folder tag in the notification title only."""
     return name
 
 
@@ -232,6 +215,19 @@ def _parse_provider(argv: list[str]) -> str:
     return store.DEFAULT_PROVIDER
 
 
+def _capture_work(session_id: str, *, reactivate_done: bool = False) -> dict | None:
+    """Best-effort local overlay capture; runtime hooks must remain fail-open."""
+    try:
+        from claude_browse.board import work_items
+
+        row = store.get(session_id)
+        return work_items.ensure_for_session(
+            row or {}, reactivate_done=reactivate_done
+        )
+    except Exception:
+        return None
+
+
 def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
     """Apply one recognized state transition and report whether it mutated."""
     event = payload.get("hook_event_name")
@@ -241,6 +237,21 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
     cwd = payload.get("cwd")
     row = store.get(session_id)
     model_label = _model_label(payload, row)
+    transcript_path = payload.get("transcript_path")
+    transcript_fields = (
+        {"transcript_path": transcript_path}
+        if isinstance(transcript_path, str) and transcript_path
+        else {}
+    )
+    if (
+        transcript_fields
+        and event in {"Stop", "Notification", "SessionEnd", *_NEEDS_INPUT_EVENTS}
+    ):
+        # Some provider hook streams begin mid-session. Preserve the source
+        # path from whichever recognized event arrives first so guarded resume
+        # does not depend on the FTS refresh having run already.
+        store.upsert(session_id, **transcript_fields)
+        row = store.get(session_id)
 
     if event == "SessionStart":
         if row is None:
@@ -252,14 +263,29 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 name=_placeholder_name(cwd),
                 name_source="provisional",
                 provider=provider,
+                **transcript_fields,
                 **({"model_label": model_label} if model_label else {}),
             )
         else:
             fields: dict[str, object] = {"provider": provider}
+            fields.update(transcript_fields)
+            if cwd is not None:
+                fields["cwd"] = cwd
             if model_label:
                 fields["model_label"] = model_label
             store.upsert(session_id, **fields)
         store.heartbeat(session_id)
+        # An explicitly launched continuation adopts its canonical task before
+        # automatic capture. Failed/stale tokens never prevent an ordinary
+        # terminal conversation from appearing on the board.
+        if os.environ.get("AGENT_BOARD_LAUNCH_TOKEN"):
+            try:
+                from claude_browse.board import launches
+
+                launches.adopt_session(session_id, provider)
+            except Exception:
+                pass
+        _capture_work(session_id)
         return True
 
     elif event == "UserPromptSubmit":
@@ -276,10 +302,11 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             "done_at": None,
             "done_turn_s": None,
             "pending_alert": None,
+            **transcript_fields,
         }
         if model_label:
             fields["model_label"] = model_label
-        if row is None or row.get("name_source") != "haiku":
+        if row is None or row.get("name_source") not in {"haiku", "manual"}:
             prompt = payload.get("prompt", "")
             name = _name_from_prompt(prompt)
             if name:
@@ -287,13 +314,21 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 fields["name_source"] = "provisional"
         store.upsert(session_id, **fields)
         store.heartbeat(session_id)
+        _capture_work(session_id, reactivate_done=True)
         return True
 
     elif event == "Stop":
+        if row is None:
+            _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
+            row = store.get(session_id)
         working_since = row.get("working_since") if row else None
         turn_s = (time.time() - working_since) if working_since else 0.0
+        _capture_work(session_id)
+        should_notify = False
         if working_since:
-            if not store.finish_turn(
+            from claude_browse.board import work_items
+
+            finished, should_notify = work_items.finish_turn(
                 session_id,
                 working_since,
                 turn_s,
@@ -301,15 +336,19 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 host=_hostname(),
                 model_label=model_label or None,
                 mark_unattended=turn_s >= _unattended_min_turn_s(),
-            ):
+            )
+            if not finished:
                 # A duplicate Stop or a Stop for a superseded turn must not
                 # replay the banner or overwrite a newer prompt's state.
                 return False
         else:
             _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
-        if working_since:
+            # Even without a matching start event, Stop is the last observed
+            # pause (for example after a helper restart).
+            store.upsert(session_id, paused_at=time.time())
+        if working_since and should_notify:
             name = (row or {}).get("name") or _placeholder_name(cwd)
-            notify.notify(_notify_title("done", cwd, model_label), _notify_body(name, cwd))
+            notify.notify(_notify_title("done", cwd, model_label), _notify_body(name))
         return True
 
     elif event == "Notification" or event in _NEEDS_INPUT_EVENTS:
@@ -317,9 +356,11 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
         if event in _NEEDS_INPUT_EVENTS or notification_type not in _IGNORED_NOTIFICATION_TYPES:
             _set_state(session_id, "needs-input", cwd=cwd, model_label=model_label or None)
             name = (row or {}).get("name") or _placeholder_name(cwd)
-            notify.notify(_notify_title("needs input", cwd, model_label), _notify_body(name, cwd))
+            notify.notify(_notify_title("needs input", cwd, model_label), _notify_body(name))
             store.set_pending_alert(session_id, "needs-input")
+            _capture_work(session_id)
             return True
+        _capture_work(session_id)
         return False
 
     elif event == "Interrupt" and provider == "codex":
@@ -336,10 +377,13 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             working_since=None,
             done_at=None,
             done_turn_s=None,
+            paused_at=time.time(),
             pending_alert=None,
+            **transcript_fields,
             **({"model_label": model_label} if model_label else {}),
         )
         store.heartbeat(session_id)
+        _capture_work(session_id)
         return True
 
     elif event == "SessionEnd":
@@ -348,6 +392,8 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
         # back to is still a thread you can resume, and the board's job is
         # to keep it visible until you do, or ack it.
         _set_state(session_id, "ended", cwd=cwd, model_label=model_label or None)
+        store.upsert(session_id, paused_at=time.time())
+        _capture_work(session_id)
         return True
 
     return False

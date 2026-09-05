@@ -248,3 +248,28 @@ def test_maybe_name_leaves_provisional_untouched_on_compute_failure(tmp_path, mo
     row = store.get("s7")
     assert row["name"] == "provisional-name"
     assert row["name_source"] == "provisional"
+
+
+def test_paused_automatic_namer_cannot_overwrite_manual_rename(tmp_path, monkeypatch):
+    from claude_browse.board import work_items
+
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert(
+        "race", host="air", cwd=str(tmp_path), state="idle",
+        name="automatic old", name_source="provisional",
+    )
+    work_items.ensure_for_session(store.get("race"))
+    monkeypatch.setattr(naming, "_find_jsonl_path", lambda sid: "/fake/path.jsonl")
+    monkeypatch.setattr(naming, "get_session_info", lambda path: {"name": None, "msg_count": 3})
+
+    def compute_then_rename(session_id, info=None):
+        item = work_items.get_for_session(session_id)
+        work_items.mutate(item["task_id"], title="user canonical title")
+        return "late automatic title"
+
+    monkeypatch.setattr(naming, "compute_name", compute_then_rename)
+    naming.maybe_name("race")
+
+    assert store.get("race")["name"] == "user canonical title"
+    assert store.get("race")["name_source"] == "manual"
+    assert work_items.get_for_session("race")["title"] == "user canonical title"

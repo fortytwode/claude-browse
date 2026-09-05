@@ -37,6 +37,32 @@ def _read(path):
     return json.loads(Path(path).read_text())
 
 
+def test_atomic_json_write_replaces_valid_file_and_preserves_mode(installer, tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text('{"old": true}\n')
+    path.chmod(0o640)
+
+    installer._write_json_atomic(path, {"new": True})
+
+    assert _read(path) == {"new": True}
+    assert path.stat().st_mode & 0o777 == 0o640
+
+
+def test_atomic_json_write_preserves_original_when_replace_fails(
+    installer, tmp_path, monkeypatch
+):
+    path = tmp_path / "settings.json"
+    original = b'{"old": true}\n'
+    path.write_bytes(original)
+    monkeypatch.setattr(installer.os, "replace", lambda *_args: (_ for _ in ()).throw(OSError("boom")))
+
+    with pytest.raises(OSError, match="boom"):
+        installer._write_json_atomic(path, {"new": True})
+
+    assert path.read_bytes() == original
+    assert list(tmp_path.glob(".settings.json.*")) == []
+
+
 def test_fresh_install_wires_one_post_commit_hook_per_event(installer, capsys):
     assert installer.run() == 0
 

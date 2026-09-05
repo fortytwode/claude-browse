@@ -94,32 +94,92 @@ claude-browse --web         # open a local browser tab to read full past transcr
 claude-browse --web
 ```
 
-Opens a local-only browser tab (bound to `127.0.0.1`, no accounts, no outbound
-network calls) alongside the usual fzf picker -- not a replacement for it.
-Use it when you actually want to *read* a past conversation: a sidebar lists
-sessions (current folder first, searchable, "this folder only" toggle) and
-selecting one renders the full thread -- opened at the latest exchange,
-scroll up for history -- with fenced code blocks and an in-thread search
-box. This is prose only (user/assistant text) -- tool calls, file edits,
-and command output aren't captured. `--here` scopes the whole server to the
-current folder; `--all` widens the sidebar past the default 100 sessions.
+Opens the **Agent Board** on a local-only `127.0.0.1` server. Transcripts and
+work metadata remain on this Mac; a live session may still publish its small
+runtime status record through the already-configured optional Agent Board
+sync. Every hook-observed Claude or CodeX terminal session becomes one work row
+automatically, including multiple sessions opened in the same folder. There is
+no Add or Save step.
+
+Work opens to **All active** with a persistent project sidebar for **All
+active, Today, Done & Archived**, and every real Git repository or canonical
+folder. Today contains active work that needs input, has an unattended
+completion, is overdue, or is due today. Selecting a project filters the list
+and shows its exact path, counts, and local project description; each row also
+shows a one-line transcript preview derived from the search index.
+
+Every thread has exactly one planning priority: **Urgent, High, Normal, or
+Low**. The list groups in fixed order by **Priority or Terminal state**.
+Drag handles persist manual task order, including a priority change when a row
+crosses priority groups; keyboard Move up, Move down, and Set priority controls
+provide the same operations. Projects can be presentation-reordered in the
+sidebar, but tasks never move between projects. Terminal state is runtime
+truth, so cross-state drops are rejected. Closed work can reorder only in Done
+& Archived, and **Reordering is disabled while searching**.
+
+The dense list labels **Work status** and **Terminal state** separately. Work
+status is the planning choice (`Active`, `Done`, or `Archived`); Terminal state
+is current runtime truth such as `working`, `idle`, `needs-input`, `gone`, or
+`ended`. Names improve automatically until you rename them, and manual names
+and due dates persist through runtime updates. Done returns to Active only when
+that same session receives a new prompt. Archived stays archived until you
+manually restore it; merely reading Thread History changes neither state.
+
+One global **Full access** toggle applies to both providers and is on by
+default; turn it off to keep provider permission checks enabled. A
+same-provider action uses the native guarded resume policy, including active
+writer and large-session safeguards. A cross-provider action starts a new
+context and therefore a new work row, seeded with recent transcript context,
+without changing the source row. Actions are disabled individually—with a
+reason—when the provider binary, exact working directory, or required
+cross-provider transcript is unavailable.
+
+Thread History preserves the original reader: a searchable sidebar lists
+sessions and selecting one renders the full thread, opened at the latest
+exchange, with fenced code blocks and in-thread search. This is prose only
+(user/assistant text); tool calls, file edits, and command output aren't
+captured. `--here` scopes the server to the current folder; `--all` widens the
+sidebar past the default 100 sessions.
+
+Queue metadata is stored in `~/.claude/agent-board/state.db`, separately from
+the rebuildable search index and hook-owned live session state. Work metadata,
+due dates, priorities, manual order, project descriptions, archive state, and
+transcripts remain local to this Mac. Cross-Mac
+work metadata and Mission Control rendering are deferred; optional sync carries
+only the existing live-status projection, not the Work overlay or transcript.
+
 Requests from any Host other than `127.0.0.1`/`localhost` are rejected
-(DNS-rebinding protection). `Ctrl-C` in the terminal shuts the server down.
+(DNS-rebinding protection), and every write or Terminal launch requires a
+per-server request token. The token is a browser CSRF and DNS-rebinding control,
+not an operating-system authentication boundary: same-user local processes are
+trusted. `Ctrl-C` in the terminal shuts the server down.
 
 #### Scripting the web viewer (JSON API)
 
-The page is backed by three JSON endpoints you can call directly (the
+The page is backed by these JSON endpoints (the
 server prints its URL to stderr on startup; the port is OS-assigned):
 
 | Endpoint | Returns |
 | -------- | ------- |
-| `GET /api/meta` | `{"here_only_forced": bool}` -- whether `--here` scoping is forced server-side |
+| `GET /api/meta` | Viewer settings, detected launch project, and the per-server request token |
+| `GET /api/board` | All session-backed work rows and real projects, including priorities, ordering, summaries, counts, Terminal state, and available actions |
 | `GET /api/sessions?q=<query>&here=1` | `{"sessions": [...]}` -- session list; `q` runs the same ranked search as the fzf picker, `here=1` scopes to the launch folder. Each session carries `session_id`, `provider`, `provider_name`, `folder`, `cwd`, `title`, `first_msg`, `last_msg`, `msg_count`, `timestamp`, `last_timestamp`, and a preformatted `when` |
 | `GET /api/session/<sid>` | `{"meta": {...}, "turns": [{"role", "text"}, ...]}` -- the full prose transcript, newlines preserved |
+| `PATCH /api/tasks/<task-id>` | Change `title`, `due_date`, `priority`, or `status` (`active`, `done`, or `archived`) on an automatic row |
+| `POST /api/tasks/reorder` | Persist the supplied same-project visible group order, optionally changing active rows to one priority |
+| `PATCH /api/projects/<project-key>` | Save a local project description (maximum 1000 characters) |
+| `POST /api/projects/reorder` | Persist the presentation order of all real projects |
+| `POST /api/tasks/<task-id>/launch` | Launch a Work row in Claude or CodeX |
+| `POST /api/sessions/<sid>/launch` | Launch a Thread History session in Claude or CodeX |
 
-Errors come back as JSON too: `404` (unknown session/route), `403` (foreign
-Host header), `500` (unreadable transcript), `503` (search index mid-rebuild
--- retry shortly). For non-HTTP scripting, the same primitives are plain
+Mutation requests require `Content-Type: application/json`, the
+`X-Agent-Board-Token` returned by `/api/meta`, and JSON bodies. Launch bodies
+must include `provider` (`claude` or `codex`) and an actual boolean
+`full_access`; omission and non-booleans fail closed. Errors come back as JSON
+too: `404` (unknown session/route), `403` (foreign Host or invalid token), `400`
+(invalid JSON fields), `415` (non-JSON write), `500` (unreadable transcript),
+or `503` (search index mid-rebuild -- retry shortly). For non-HTTP scripting,
+the same primitives are plain
 Python imports: `claude_browse.fts.list_recent` / `sessions_for_cwd` /
 `search_ranked` / `get_by_sid`, and
 `claude_browse.providers.get_provider(p).transcript_turns(path, sid)`.
