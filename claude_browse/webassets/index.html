@@ -1,85 +1,317 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agent Board</title>
-<link rel="stylesheet" href="/app.css">
-</head>
-<body>
-<header id="topbar">
-  <div class="brand"><div class="eyebrow">CLAUDE + CODEX</div><h1>Agent Board</h1></div>
-  <nav aria-label="Primary">
-    <button class="tab active" data-view="board" aria-pressed="true">Work</button>
-    <button class="tab" data-view="history" aria-pressed="false">Thread History</button>
-  </nav>
-  <label id="full-access-label"><input id="full-access" type="checkbox" checked>Full access (skip permissions)</label>
-</header>
-<main id="board-view" class="page">
-  <div id="board-error" class="error" role="alert" hidden></div>
-  <div class="work-shell">
-    <aside id="work-sidebar" aria-label="Work navigation">
-      <div class="work-sidebar-heading"><h2>Work</h2><span id="task-count" class="count"></span></div>
-      <nav class="work-scopes" aria-label="Saved work views">
-        <button class="work-scope active" data-scope="all" data-mode="active" aria-pressed="true"><span>All active</span><span id="all-count" class="nav-count"></span></button>
-        <button class="work-scope" data-scope="today" data-mode="today" aria-pressed="false"><span>Today</span><span id="today-count" class="nav-count"></span></button>
-        <button class="work-scope" data-scope="closed" data-mode="done" aria-pressed="false"><span>Done &amp; Archived</span><span id="closed-count" class="nav-count"></span></button>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Board</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header id="topbar">
+      <div class="brand">
+        <span class="brand-mark">A</span>
+        <h1>My workspace</h1>
+      </div>
+      <nav class="primary-tabs" aria-label="Primary">
+        <button class="tab active" data-view="board" aria-pressed="true">
+          Work</button
+        ><button class="tab" data-view="history" aria-pressed="false">
+          Thread History
+        </button>
       </nav>
-      <div class="project-list-heading"><h3>Projects</h3><span>Drag to order</span></div>
-      <div id="project-list" data-mode="projects"></div>
-    </aside>
-    <section class="work-main" aria-labelledby="work-heading">
-      <div id="project-detail" class="project-detail" hidden>
-        <div class="project-title-line"><div><h2 id="project-name"></h2><p id="project-path"></p></div><div id="project-counts" class="project-counts"></div></div>
-        <div class="description-editor">
-          <label for="project-description">Project description</label>
-          <textarea id="project-description" maxlength="10000" rows="2" placeholder="Add local context for this project…"></textarea>
-          <div class="description-actions"><span id="description-limit">0 / 10000</span><button id="save-description" type="button">Save</button><button id="cancel-description" type="button">Cancel</button></div>
-          <div id="project-inherited" class="project-inherited" hidden><strong>Inherited project notes</strong><div id="project-inherited-list"></div></div>
-          <p id="description-error" class="field-error" role="alert" hidden></p>
+      <label id="full-access-label"
+        ><input id="full-access" type="checkbox" checked /> Full access (skip
+        permissions)</label
+      >
+    </header>
+    <main id="board-view" class="board-page">
+      <aside id="work-sidebar" aria-label="Workspace navigation">
+        <div class="workspace-heading">
+          <span class="workspace-icon">A</span><strong>My workspace</strong>
         </div>
-      </div>
-      <div class="section-heading queue-heading">
-        <div><h3 id="work-heading">All active</h3><span id="visible-count" class="count"></span></div>
-        <div class="work-tools">
-          <label class="search-label" for="work-search">Search work</label>
-          <input id="work-search" type="search" placeholder="Title, summary, project, agent, or session ID" autocomplete="off">
-          <label class="search-label" for="group-by">Group by</label>
-          <select id="group-by"><option value="priority">Priority</option><option value="terminal">Terminal state</option></select>
+        <nav class="work-scopes" aria-label="Built-in views">
+          <button
+            class="work-scope active"
+            data-scope="all"
+            aria-pressed="true"
+          >
+            <span>All active</span
+            ><span id="all-count" class="nav-count"></span></button
+          ><button class="work-scope" data-scope="today" aria-pressed="false">
+            <span>Today</span
+            ><span id="today-count" class="nav-count"></span></button
+          ><button class="work-scope" data-scope="closed" aria-pressed="false">
+            <span>Done</span><span id="closed-count" class="nav-count"></span>
+          </button>
+        </nav>
+        <div class="sidebar-section-title">
+          <span>Folders</span
+          ><button
+            id="new-folder"
+            class="icon-button"
+            type="button"
+            aria-label="New folder"
+          >
+            ＋
+          </button>
         </div>
+        <div id="folder-list"></div>
+        <div class="sidebar-section-title saved-title">
+          <span>Saved views</span
+          ><button
+            id="save-view"
+            class="icon-button"
+            type="button"
+            aria-label="Save current view"
+          >
+            ＋
+          </button>
+        </div>
+        <div id="saved-view-list"></div>
+      </aside>
+      <section class="work-main" aria-labelledby="work-heading">
+        <div id="board-error" class="error" role="alert" hidden></div>
+        <div id="project-detail" class="project-detail" hidden>
+          <div>
+            <p class="eyebrow">PROJECT</p>
+            <h2 id="project-name"></h2>
+            <p id="project-path"></p>
+          </div>
+          <div class="project-detail-actions">
+            <button
+              id="edit-project-description"
+              class="text-button"
+              type="button"
+            >
+              Edit description</button
+            ><span id="project-counts"></span>
+          </div>
+          <div id="project-description-editor" hidden>
+            <label for="project-description">Project description</label
+            ><textarea
+              id="project-description"
+              maxlength="10000"
+              rows="3"
+              placeholder="Add local context for this project…"
+            ></textarea>
+            <div class="description-actions">
+              <span id="description-limit">0 / 10000</span
+              ><button id="cancel-description" type="button">Cancel</button
+              ><button
+                id="save-description"
+                class="primary-button"
+                type="button"
+              >
+                Save
+              </button>
+            </div>
+            <p
+              id="description-error"
+              class="field-error"
+              role="alert"
+              hidden
+            ></p>
+          </div>
+          <p
+            id="project-description-preview"
+            class="project-description-preview"
+          ></p>
+          <div id="project-inherited" class="project-inherited" hidden>
+            <strong>Inherited project notes</strong>
+            <div id="project-inherited-list"></div>
+          </div>
+        </div>
+        <div class="view-tabs" role="tablist" aria-label="Work views">
+          <button
+            class="scope-tab active"
+            data-scope="all"
+            role="tab"
+            aria-selected="true"
+          >
+            All active</button
+          ><button
+            class="scope-tab"
+            data-scope="today"
+            role="tab"
+            aria-selected="false"
+          >
+            Today</button
+          ><button
+            class="scope-tab"
+            data-scope="closed"
+            role="tab"
+            aria-selected="false"
+          >
+            Done
+          </button>
+        </div>
+        <div class="board-toolbar">
+          <div>
+            <h2 id="work-heading">All active</h2>
+            <p id="today-note" class="toolbar-note" hidden>
+              Today includes due-today, overdue, and work that needs your input.
+            </p>
+          </div>
+          <div class="toolbar-controls">
+            <label class="sr-only" for="work-search">Search work</label
+            ><input
+              id="work-search"
+              type="search"
+              placeholder="Search tasks"
+              autocomplete="off"
+            />
+            <details class="popover">
+              <summary id="filter-summary">Filters</summary>
+              <div class="popover-panel">
+                <label
+                  >Provider<select id="filter-provider">
+                    <option value="any">Any provider</option>
+                    <option value="claude">Claude</option>
+                    <option value="codex">CodeX</option>
+                  </select></label
+                ><label
+                  >Priority<select id="filter-priority">
+                    <option value="any">Any priority</option>
+                    <option value="urgent">Urgent</option>
+                    <option value="high">High</option>
+                    <option value="normal">Normal</option>
+                    <option value="low">Low</option>
+                  </select></label
+                ><label
+                  >Terminal state<select id="filter-terminal">
+                    <option value="any">Any state</option>
+                    <option value="needs-input">Needs input</option>
+                    <option value="working">Working</option>
+                    <option value="idle">Idle</option>
+                    <option value="ended">Ended</option>
+                    <option value="gone">Gone</option>
+                  </select></label
+                ><label
+                  >Due date<select id="filter-due">
+                    <option value="any">Any due date</option>
+                    <option value="today">Today or overdue</option>
+                    <option value="none">No due date</option>
+                  </select></label
+                ><button id="clear-filters" class="text-button" type="button">
+                  Clear filters
+                </button>
+              </div>
+            </details>
+            <label
+              >Group<select id="group-by">
+                <option value="priority">Priority</option>
+                <option value="terminal">Terminal state</option>
+                <option value="none">None</option>
+              </select></label
+            ><label
+              >Sort<select id="sort-by">
+                <option value="manual">Manual</option>
+                <option value="updated">Last update</option>
+                <option value="due">Due date</option>
+              </select></label
+            >
+          </div>
+        </div>
+        <p id="reorder-reason" class="reorder-reason" aria-live="polite"></p>
+        <div id="task-groups"></div>
+      </section>
+    </main>
+    <main id="history-view" hidden>
+      <aside id="sidebar" aria-label="Thread History">
+        <div id="sidebar-header">
+          <label class="search-label" for="search-input"
+            >Search Thread History</label
+          ><input
+            id="search-input"
+            type="search"
+            placeholder="Search transcripts..."
+            autocomplete="off"
+          /><label id="here-toggle-label"
+            ><input id="here-toggle" type="checkbox" />This folder only</label
+          >
+          <p class="history-note">
+            History is read-only. Review transcripts or launch a continuation
+            here.
+          </p>
+        </div>
+        <div id="session-list" aria-live="polite"></div>
+      </aside>
+      <section id="viewer" aria-label="Transcript viewer">
+        <div id="viewer-header">
+          <div id="viewer-title">Select a session on the left</div>
+          <div id="viewer-meta"></div>
+          <div id="thread-error" class="field-error" hidden></div>
+          <div id="thread-actions" class="launch-actions" hidden>
+            <div class="launch-choice">
+              <button id="thread-claude" class="launch claude">Claude</button
+              ><span id="thread-claude-reason" class="disabled-reason"></span>
+            </div>
+            <div class="launch-choice">
+              <button id="thread-codex" class="launch codex">CodeX</button
+              ><span id="thread-codex-reason" class="disabled-reason"></span>
+            </div>
+          </div>
+          <label
+            class="search-label thread-search-label"
+            for="thread-search"
+            hidden
+            >Search in this thread</label
+          ><input
+            id="thread-search"
+            type="search"
+            placeholder="Search in this thread..."
+            autocomplete="off"
+            hidden
+          />
+          <div id="thread-search-count" aria-live="polite"></div>
+        </div>
+        <div id="transcript"></div>
+      </section>
+    </main>
+    <dialog id="task-dialog" aria-labelledby="dialog-task-title">
+      <div class="dialog-header">
+        <div>
+          <p id="dialog-project" class="task-breadcrumb"></p>
+          <h2 id="dialog-task-title"></h2>
+        </div>
+        <button
+          id="close-task-dialog"
+          class="icon-button"
+          type="button"
+          aria-label="Close task"
+        >
+          ×
+        </button>
       </div>
-      <p id="reorder-reason" class="reorder-reason" aria-live="polite"></p>
-      <div id="task-groups"></div>
-    </section>
-  </div>
-</main>
-<main id="history-view" hidden>
-  <aside id="sidebar" aria-label="Thread History">
-    <div id="sidebar-header">
-      <label class="search-label" for="search-input">Search Thread History</label>
-      <input id="search-input" type="search" placeholder="Search transcripts..." autocomplete="off">
-      <label id="here-toggle-label"><input id="here-toggle" type="checkbox">This folder only</label>
-      <p class="history-note">History is read-only. Review transcripts or launch a continuation here.</p>
-    </div>
-    <div id="session-list" aria-live="polite"></div>
-  </aside>
-  <section id="viewer" aria-label="Transcript viewer">
-    <div id="viewer-header">
-      <div id="viewer-title">Select a session on the left</div>
-      <div id="viewer-meta"></div>
-      <div id="thread-actions" class="launch-actions" hidden>
-        <div class="launch-choice"><button id="thread-claude" class="launch claude">Claude</button><span id="thread-claude-reason" class="disabled-reason" aria-live="polite"></span></div>
-        <div class="launch-choice"><button id="thread-codex" class="launch codex">CodeX</button><span id="thread-codex-reason" class="disabled-reason" aria-live="polite"></span></div>
-      </div>
-      <label class="search-label thread-search-label" for="thread-search" hidden>Search in this thread</label>
-      <input id="thread-search" type="search" placeholder="Search in this thread..." autocomplete="off" hidden>
-      <div id="thread-search-count" aria-live="polite"></div>
-    </div>
-    <div id="transcript"></div>
-  </section>
-</main>
-<div id="toast" role="status" aria-live="polite"></div>
-<div id="work-announcer" class="sr-only" role="status" aria-live="assertive" aria-atomic="true"></div>
-<script src="/app.js"></script>
-</body>
+      <div id="dialog-task-fields" class="dialog-fields"></div>
+      <div id="dialog-access" class="dialog-access"></div>
+      <button id="discard-task-edits" class="text-button" type="button" hidden>
+        Discard unsaved edits
+      </button>
+      <div id="conversation-host"></div>
+    </dialog>
+    <dialog id="editor-dialog" aria-labelledby="editor-title">
+      <form method="dialog" id="editor-form">
+        <h2 id="editor-title">Edit</h2>
+        <label id="editor-label" for="editor-input">Name</label
+        ><input id="editor-input" maxlength="500" />
+        <div class="dialog-actions">
+          <button id="editor-cancel" type="button">Cancel</button
+          ><button id="editor-submit" class="primary-button" value="default">
+            Save
+          </button>
+        </div>
+        <p id="editor-error" class="field-error" hidden></p>
+      </form>
+    </dialog>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <div
+      id="work-announcer"
+      class="sr-only"
+      role="status"
+      aria-live="assertive"
+      aria-atomic="true"
+    ></div>
+    <script src="/app.js"></script>
+  </body>
 </html>

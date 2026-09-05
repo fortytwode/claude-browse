@@ -269,7 +269,7 @@ def test_assets_are_served_with_content_types(web_server):
             assert len(resp.read()) > 0
 
 
-def test_web_assets_define_dense_work_and_history_contract():
+def test_web_assets_define_reading_first_work_and_history_contract():
     assets = Path(web.__file__).with_name("webassets")
     html = (assets / "index.html").read_text()
     javascript = (assets / "app.js").read_text()
@@ -277,20 +277,20 @@ def test_web_assets_define_dense_work_and_history_contract():
 
     assert 'id="work-search"' in html
     assert 'id="full-access"' in html
-    assert 'Full access (skip permissions)' in html
+    assert 'Full access (skip permissions)' in " ".join(html.split())
     assert 'id="full-access" type="checkbox" checked' in html
-    assert 'data-mode="active"' in html
-    assert 'data-mode="today"' in html
-    assert 'data-mode="projects"' in html
-    assert 'data-mode="done"' in html
+    assert 'data-scope="all"' in html
+    assert 'data-scope="today"' in html
+    assert 'id="folder-list"' in html
+    assert 'data-scope="closed"' in html
 
     for heading in (
         "Name / Project",
         "Due date",
         "Work status",
         "Terminal state",
-        "Agent / activity",
-        "Actions",
+        "Last update",
+        "Open details",
     ):
         assert heading in javascript
     for searchable_field in (
@@ -301,21 +301,20 @@ def test_web_assets_define_dense_work_and_history_contract():
     ):
         assert searchable_field in javascript
 
-    assert "task.actions[provider]" in javascript
+    assert "meta.actions" in javascript
     assert "action.label" in javascript
     assert "fullAccessEnabled()" in javascript
     assert 'setAttribute("aria-invalid", "true")' in javascript
-    assert 'setAttribute("role", "alert")' in javascript
-    assert "flushPendingEdits" in javascript
+    assert 'role="alert"' in html
+    assert "saveTask" in javascript
     assert "afterPendingEdits" in javascript
-    assert "flushDirtyEditsOnPageHide" in javascript
     assert "_edit_revision" in javascript
     assert "editRevisionCounters" in javascript
     assert 'window.addEventListener("pagehide"' in javascript
-    assert "boardRenderPending" in javascript
+    assert "closeTaskDialog" in javascript
     assert "setLaunchBusy" in javascript
     assert "rowMutationTails" in javascript
-    assert "delete rowMutationTails[state.taskId]" in javascript
+    assert "delete rowMutationTails[key]" in javascript
     assert "Save or cancel the project description before changing views." in javascript
     assert "hasProtectedWorkControls" in javascript
     assert "History is read-only" in html
@@ -331,7 +330,7 @@ def test_web_assets_define_project_priority_and_reorder_contract():
 
     for element_id in (
         "work-sidebar",
-        "project-list",
+        "folder-list",
         "project-detail",
         "project-description",
         "group-by",
@@ -345,8 +344,8 @@ def test_web_assets_define_project_priority_and_reorder_contract():
     assert 'data-scope="closed"' in html
 
     for contract in (
-        'var PRIORITY_GROUPS = ["urgent", "high", "normal", "low"]',
-        'var TERMINAL_GROUPS = ["needs-input", "working", "idle", "ended", "gone"]',
+        'PRIORITY_GROUPS = ["urgent", "high", "normal", "low"]',
+        'TERMINAL_GROUPS = ["needs-input", "working", "idle", "ended", "gone"]',
         'mutate("/api/tasks/reorder"',
         'mutate("/api/projects/reorder"',
         '"/api/projects/" + encodeURIComponent',
@@ -357,18 +356,18 @@ def test_web_assets_define_project_priority_and_reorder_contract():
         'Move up',
         'Move down',
         'Set priority',
-        'Reordering is disabled while searching.',
+        'Manual reordering is disabled while searching.',
         'Terminal state is runtime truth',
         'queueMode = "all"',
         'Closed rows cannot change priority by dragging.',
-        'restoreFocus',
+        'function queueReorder',
     ):
         assert contract in javascript
 
-    assert "grid-template-columns:240px minmax(0,1fr)" in stylesheet
+    assert "grid-template-columns: 250px minmax(0, 1fr)" in stylesheet
     assert "work-sidebar" in stylesheet
-    assert "task-summary" in stylesheet
-    assert "@media (max-width:760px)" in stylesheet
+    assert "task-link" in stylesheet
+    assert "@media (max-width: 680px)" in stylesheet
 
 
 def test_automatic_thread_update_and_board_roundtrip(web_server):
@@ -753,3 +752,86 @@ def test_history_launch_actions_report_scoped_prerequisite_failures(
     assert detail["meta"]["actions"]["claude"]["available"] is False
     assert "directory" in detail["meta"]["actions"]["claude"]["reason"].lower()
     assert detail["meta"]["actions"]["codex"]["available"] is False
+
+
+def test_hook_only_thread_can_be_read_without_search_index(web_server, tmp_path, monkeypatch):
+    base, _server = web_server
+    transcript = tmp_path / "new-thread.jsonl"
+    transcript.write_text('{"message":{"role":"user","content":"Fresh conversation"}}\n')
+    item = _board_thread("fresh-reader", cwd=str(tmp_path), name="Renamed task")
+    store.upsert("fresh-reader", transcript_path=str(transcript))
+    monkeypatch.setattr(web, "_provider_available", lambda _provider: True)
+    monkeypatch.setattr(fts, "open_db", lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("rebuilding")))
+
+    status, detail = _get_json(base + "/api/session/fresh-reader")
+
+    assert status == 200
+    assert detail["turns"] == [{"role": "user", "text": "Fresh conversation"}]
+    assert detail["meta"]["title"] == item["title"]
+    assert detail["meta"]["msg_count"] == 1
+    assert detail["meta"]["actions"]["codex"]["available"] is True
+
+
+def test_known_missing_transcript_keeps_metadata_and_native_action(web_server, tmp_path, monkeypatch):
+    base, _server = web_server
+    _board_thread("lost-reader", cwd=str(tmp_path), name="Keep this task")
+    monkeypatch.setattr(web, "_provider_available", lambda _provider: True)
+
+    status, detail = _get_json(base + "/api/session/lost-reader")
+
+    assert status == 200
+    assert detail["meta"]["title"] == "Keep this task"
+    assert detail["turns"] == []
+    assert "not available on this Mac" in detail["transcript_error"]
+    assert detail["meta"]["actions"]["claude"]["available"] is True
+    assert detail["meta"]["actions"]["codex"]["available"] is False
+
+
+def test_project_alias_folder_roundtrip_does_not_move_repository(web_server):
+    base, _server = web_server
+    item = _board_thread("organized", cwd="/w/keep-repository")
+    _, created = _mutate_json(base + "/api/folders", "POST", {"name": "Products"})
+    folder_id = created["folder"]["folder_id"]
+    project_url = base + "/api/projects/" + urllib.parse.quote(item["project_key"], safe="")
+    _, changed = _mutate_json(project_url, "PATCH", {"display_name": "Agent tools", "folder_id": folder_id})
+    assert changed["project"]["name"] == "Agent tools"
+    assert changed["project"]["path"] == item["project_path"]
+    _, board = _get_json(base + "/api/board")
+    assert board["folders"][0]["folder_id"] == folder_id
+    assert board["projects"][0]["folder_id"] == folder_id
+    assert board["tasks"][0]["project_name"] == "Agent tools"
+    assert board["tasks"][0]["session_cwd"] == item["session_cwd"]
+    _, renamed = _mutate_json(base + "/api/folders/" + folder_id, "PATCH", {"name": "Studio"})
+    assert renamed["folder"]["name"] == "Studio"
+    _, reordered = _mutate_json(base + "/api/folders/reorder", "POST", {"folder_ids": [folder_id]})
+    assert reordered["folders"][0]["name"] == "Studio"
+    _, unfiled = _mutate_json(project_url, "PATCH", {"folder_id": None})
+    assert unfiled["project"]["folder_id"] is None
+
+
+@pytest.mark.parametrize("route,method,body", [
+    ("/api/folders", "POST", {"name": "Blocked"}),
+    ("/api/folders/reorder", "POST", {"folder_ids": []}),
+    ("/api/folders/unknown", "PATCH", {"name": "Blocked"}),
+])
+def test_folder_routes_require_csrf(web_server, route, method, body):
+    base, _server = web_server
+    with pytest.raises(urllib.error.HTTPError) as error:
+        _mutate_json(base + route, method, body, token="wrong")
+    assert error.value.code == 403
+
+
+def test_server_can_reuse_a_local_port_without_widening_host(monkeypatch):
+    addresses = []
+
+    class BoundAddress(Exception):
+        pass
+
+    def bind(address, handler):
+        addresses.append(address)
+        raise BoundAddress
+
+    monkeypatch.setattr(web, "ThreadingHTTPServer", bind)
+    with pytest.raises(BoundAddress):
+        web.run_server("/tmp", port=51444)
+    assert addresses == [("127.0.0.1", 51444)]

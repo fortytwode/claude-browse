@@ -146,6 +146,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._reorder_tasks(body)
             elif parsed.path == "/api/projects/reorder":
                 self._reorder_projects(body)
+            elif parsed.path == "/api/folders":
+                if set(body) != {"name"}:
+                    raise ValueError("name is required; no other fields are accepted")
+                self._send_json({"folder": work_items.create_folder(body["name"])})
+            elif parsed.path == "/api/folders/reorder":
+                if set(body) != {"folder_ids"}:
+                    raise ValueError("folder_ids is required; no other fields are accepted")
+                self._send_json({"folders": work_items.reorder_folders(body["folder_ids"])})
             elif parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/launch"):
                 task_id = unquote(parsed.path[len("/api/tasks/") : -len("/launch")])
                 self._launch_task(task_id, body)
@@ -167,15 +175,13 @@ class _Handler(BaseHTTPRequestHandler):
             body = self._read_json()
             if parsed.path.startswith("/api/projects/"):
                 project_key = unquote(parsed.path[len("/api/projects/") :])
-                unknown = set(body) - {"description"}
-                if unknown:
-                    raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
-                if "description" not in body:
-                    raise ValueError("description is required")
-                project = work_items.set_project_description(
-                    project_key, body["description"]
-                )
+                project = work_items.update_project(project_key, **body)
                 self._send_json({"project": self._project_to_json(project, [])})
+            elif parsed.path.startswith("/api/folders/"):
+                folder_id = unquote(parsed.path[len("/api/folders/") :])
+                if set(body) != {"name"}:
+                    raise ValueError("name is required; no other fields are accepted")
+                self._send_json({"folder": work_items.update_folder(folder_id, body["name"])})
             elif parsed.path.startswith("/api/tasks/"):
                 task_id = unquote(parsed.path[len("/api/tasks/") :])
                 edit_client = body.pop("_edit_client", None)
@@ -309,31 +315,41 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json({"sessions": [_session_to_json(r, prefixes) for r in rows]})
 
     def _serve_session(self, sid: str) -> None:
-        conn = fts.open_db(read_only=True)
-        try:
-            row = fts.get_by_sid(conn, sid)
-        finally:
-            conn.close()
+        # Runtime capture and search indexing have independent clocks. Reading
+        # and launching must resolve the same local file, including hook-only
+        # threads and valid fallbacks for stale cached paths.
+        row = commands.session_for_launch(sid)
         if not row:
             self._send_json({"error": "session not found"}, status=404)
+            return
+        overlay = work_items.get_for_session(sid)
+        if overlay:
+            row["name"] = overlay["title"]
+        meta = _session_to_json(row, self.server.folder_prefixes)  # type: ignore[attr-defined]
+        path = str(row.get("path") or "")
+        if not path or not os.path.isfile(path):
+            self._send_json({
+                "meta": meta,
+                "turns": [],
+                "transcript_error": "The transcript is not available on this Mac. "
+                "This task is still saved. Native resume may locate provider-managed "
+                "history, but reading or handing off requires the original transcript.",
+            })
             return
         try:
             spec = get_provider(row.get("provider"))
             # flatten=False keeps newlines so code blocks and paragraphs
             # actually render; every other consumer gets flattened text.
-            turns = spec.transcript_turns(row["path"], sid, flatten=False)
+            turns = spec.transcript_turns(path, sid, flatten=False)
         except (ValueError, OSError, AttributeError, TypeError, KeyError) as exc:
             # Broad on purpose: provider parsers read arbitrary user files, and
             # a malformed one must degrade to a JSON error, not a dead thread.
-            self._send_json(
-                {"error": f"could not load transcript: {exc}"}, status=500
-            )
+            self._send_json({"meta": meta, "turns": [], "transcript_error": f"Could not read this transcript: {exc}"})
             return
+        meta["msg_count"] = len(turns)
         self._send_json(
             {
-                "meta": {
-                    **_session_to_json(row, self.server.folder_prefixes),  # type: ignore[attr-defined]
-                },
+                "meta": meta,
                 "turns": [{"role": role, "text": text} for role, text in turns],
             }
         )
@@ -346,7 +362,10 @@ class _Handler(BaseHTTPRequestHandler):
         terminal_state = store.display_state(runtime) if runtime else "gone"
         unattended = store.is_unattended(runtime)
         needs_attention = bool(runtime and runtime.get("state") == "needs-input")
-        last_activity = (runtime or {}).get("updated_at") or task.get("updated_at") or 0
+        last_activity = max(
+            float((runtime or {}).get("updated_at") or 0),
+            float(task.get("updated_at") or 0),
+        )
         work_status = str(task.get("status") or "active")
         due_date = task.get("due_date")
         in_today = bool(
@@ -426,11 +445,15 @@ class _Handler(BaseHTTPRequestHandler):
             if task.get("session_id")
         ]
         tasks.sort(key=lambda task: tuple(task["sort_key"]))
+        project_rows = work_items.list_projects()
+        names = {project["project_key"]: project["name"] for project in project_rows}
+        for task in tasks:
+            task["project_name"] = names.get(task["project_key"], task["project_name"])
         projects_json = [
             self._project_to_json(project, tasks)
-            for project in work_items.list_projects()
+            for project in project_rows
         ]
-        self._send_json({"tasks": tasks, "projects": projects_json})
+        self._send_json({"tasks": tasks, "projects": projects_json, "folders": work_items.list_folders()})
 
     def _project_to_json(self, project: dict, tasks: list[dict]) -> dict:
         project_tasks = [
@@ -441,6 +464,8 @@ class _Handler(BaseHTTPRequestHandler):
             "name": project["name"],
             "path": project["path"],
             "description": project.get("description") or "",
+            "display_name": project.get("display_name") or "",
+            "folder_id": project.get("folder_id"),
             "inherited_descriptions": project.get("inherited_descriptions") or [],
             "order": int(project.get("position") or 0),
             "counts": {
@@ -557,6 +582,8 @@ def run_server(
     prefixes: tuple[str, ...] = (),
     cwd_filter: str | None = None,
     limit: int = _SESSIONS_LIMIT,
+    *,
+    port: int = 0,
 ) -> None:
     """Start the local viewer in the foreground until Ctrl+C.
 
@@ -568,8 +595,10 @@ def run_server(
     scoped to that folder, regardless of the client's checkbox state.
     `limit` caps every session list; the CLI passes its own resolved limit
     so `--web --all` widens the sidebar just like `--all` widens the picker.
+    `port` optionally preserves a local launcher's origin across restarts;
+    zero keeps the default of choosing an available loopback port.
     """
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     server.launch_cwd = cwd  # type: ignore[attr-defined]
     server.cwd_filter = cwd_filter  # type: ignore[attr-defined]
     server.folder_prefixes = prefixes  # type: ignore[attr-defined]

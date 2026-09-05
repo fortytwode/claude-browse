@@ -1,553 +1,1790 @@
-// Agent Board local web app. Vanilla JS, no build step and no network assets.
+// Agent Board local UI. Vanilla JS; all persistence is browser-local or local API calls.
 (function () {
   "use strict";
-  var csrfToken = "", activeSid = null, activeSessionMeta = null;
-  var queueMode = "all", groupBy = "priority", selectedProject = null;
-  var latestBoard = null, currentTurns = null, draggedTask = null, draggedProject = null;
-  var sessionsSeq = 0, boardSeq = 0, boardTimer = null, editSequence = 0;
-  var rowMutationTails = Object.create(null), editStates = [];
-  var boardRenderPending = false;
-  var editRevisionCounters = Object.create(null);
-  var launchesInFlight = Object.create(null);
-  var reorderMutationTails = Object.create(null);
-  var editClientId = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : String(Date.now()) + "-" + Math.random();
-  var PRIORITY_GROUPS = ["urgent", "high", "normal", "low"];
-  var TERMINAL_GROUPS = ["needs-input", "working", "idle", "ended", "gone"];
-  var PRIORITY_LABELS = { urgent: "Urgent", high: "High", normal: "Normal", low: "Low" };
-  var TERMINAL_LABELS = { "needs-input": "Needs input", working: "Working", idle: "Idle", ended: "Ended", gone: "Gone" };
-
-  function $(id) { return document.getElementById(id); }
-  function element(tag, className, textValue) {
+  var csrfToken = "",
+    latestBoard = null,
+    activeSid = null,
+    activeSessionMeta = null,
+    currentTurns = null;
+  var queueMode = "all",
+    groupBy = "priority",
+    sortBy = "manual",
+    selectedProject = null,
+    draggedTask = null,
+    draggedProject = null;
+  var filters = {
+      provider: "any",
+      priority: "any",
+      terminal: "any",
+      due: "any",
+    },
+    collapsedFolders = Object.create(null);
+  var boardTimer = null,
+    boardSeq = 0,
+    sessionsSeq = 0,
+    rowMutationTails = Object.create(null),
+    reorderMutationTails = Object.create(null),
+    editRevisionCounters = Object.create(null),
+    launchesInFlight = Object.create(null);
+  var editorAction = null,
+    editorAllowEmpty = false,
+    activeSavedView = null,
+    editClientId =
+      window.crypto && window.crypto.randomUUID
+        ? window.crypto.randomUUID()
+        : String(Date.now()) + "-" + Math.random();
+  var PRIORITY_GROUPS = ["urgent", "high", "normal", "low"],
+    TERMINAL_GROUPS = ["needs-input", "working", "idle", "ended", "gone"];
+  var PRIORITY_LABELS = {
+      urgent: "⚑ Urgent",
+      high: "⚑ High",
+      normal: "Normal",
+      low: "Low",
+    },
+    TERMINAL_LABELS = {
+      "needs-input": "Needs input",
+      working: "Working",
+      idle: "Idle",
+      ended: "Ended",
+      gone: "Gone",
+    };
+  var SAVED_VIEWS_KEY = "agent-board.saved-views.v1";
+  function $(id) {
+    return document.getElementById(id);
+  }
+  function el(tag, cls, text) {
     var node = document.createElement(tag);
-    if (className) node.className = className;
-    if (textValue !== undefined) node.textContent = textValue;
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
     return node;
   }
   function request(path, options) {
-    options = options || {}; options.headers = options.headers || {};
+    options = options || {};
+    options.headers = options.headers || {};
     if (options.body) {
       options.headers["Content-Type"] = "application/json";
       options.headers["X-Agent-Board-Token"] = csrfToken;
     }
-    return fetch(path, options).then(function (res) {
-      return res.json().then(function (data) {
-        if (!res.ok || data.error) throw new Error(data.error || "Request failed");
-        return data;
+    // A stalled task edit must not hold its save queue or detail dialog open
+    // indefinitely. Aborting the response does not prove the server rolled back.
+    var controller =
+        options.method === "PATCH" && path.indexOf("/api/tasks/") === 0
+          ? new AbortController()
+          : null,
+      timer = controller
+        ? setTimeout(function () {
+            controller.abort();
+          }, 15000)
+        : null;
+    if (controller) options.signal = controller.signal;
+    return fetch(path, options)
+      .then(function (res) {
+        return res
+          .json()
+          .catch(function () {
+            return {};
+          })
+          .then(function (data) {
+            if (!res.ok || data.error)
+              throw new Error(data.error || "Request failed");
+            return data;
+          });
+      })
+      .catch(function (error) {
+        if (controller && controller.signal.aborted)
+          throw new Error(
+            "Saving timed out. The change may have reached the server; check again before retrying",
+          );
+        throw error;
+      })
+      .finally(function () {
+        if (timer !== null) clearTimeout(timer);
       });
-    });
   }
   function mutate(path, method, payload, keepalive) {
-    return request(path, { method: method, body: JSON.stringify(payload || {}), keepalive: Boolean(keepalive) });
+    ++boardSeq;
+    return request(path, {
+      method: method,
+      body: JSON.stringify(payload || {}),
+      keepalive: Boolean(keepalive),
+    }).then(function (response) {
+      ++boardSeq;
+      return response;
+    });
   }
-  function toast(message, isError) {
-    var node = $("toast"); node.textContent = message;
-    node.className = isError ? "show error-toast" : "show";
-    setTimeout(function () { node.className = ""; }, 2800);
+  function toast(message, bad) {
+    var node = $("toast");
+    node.textContent = message;
+    node.className = bad ? "show error-toast" : "show";
+    setTimeout(function () {
+      node.className = "";
+    }, 2800);
   }
-  function announce(message) { $("work-announcer").textContent = ""; setTimeout(function () { $("work-announcer").textContent = message; }, 10); }
-  function emptyMessage(root, message) { root.replaceChildren(element("div", "empty-card", message)); }
-  function debounce(fn, wait) {
-    var timer = null;
-    return function () { var args = arguments; clearTimeout(timer); timer = setTimeout(function () { fn.apply(null, args); }, wait); };
+  function announce(message) {
+    $("work-announcer").textContent = "";
+    setTimeout(function () {
+      $("work-announcer").textContent = message;
+    }, 10);
   }
-  function escapeHtml(value) { return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
-  function inlineFormat(value) { return value.replace(/`([^`\n]+)`/g, "<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>"); }
+  function debounce(fn, delay) {
+    var timer;
+    return function () {
+      var args = arguments;
+      clearTimeout(timer);
+      timer = setTimeout(function () {
+        fn.apply(null, args);
+      }, delay);
+    };
+  }
+  function empty(root, message) {
+    root.replaceChildren(el("div", "empty-card", message));
+  }
+  function providerName(provider) {
+    return provider === "codex" ? "CodeX" : "Claude";
+  }
+  function projectName(project) {
+    return project.display_name || project.name || project.project_key;
+  }
+  function fullAccessEnabled() {
+    return $("full-access").checked;
+  }
+  function escapeHtml(value) {
+    return String(value || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+  function inlineFormat(value) {
+    return value
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  }
   function renderTurnBody(text) {
-    var codeRe = /```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```/g, parts = [], lastIndex = 0, match;
+    var codeRe = /```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```/g,
+      parts = [],
+      lastIndex = 0,
+      match;
+    text = String(text || "");
     while ((match = codeRe.exec(text)) !== null) {
-      if (match.index > lastIndex) parts.push({ type: "prose", text: text.slice(lastIndex, match.index) });
-      parts.push({ type: "code", text: match[2] }); lastIndex = codeRe.lastIndex;
+      if (match.index > lastIndex)
+        parts.push({ type: "prose", text: text.slice(lastIndex, match.index) });
+      parts.push({ type: "code", text: match[2] });
+      lastIndex = codeRe.lastIndex;
     }
-    if (lastIndex < text.length) parts.push({ type: "prose", text: text.slice(lastIndex) });
-    return parts.map(function (part) {
-      if (part.type === "code") return "<pre><code>" + escapeHtml(part.text) + "</code></pre>";
-      return part.text.split(/\n{2,}/).filter(function (paragraph) { return paragraph.trim(); }).map(function (paragraph) { return "<p>" + inlineFormat(escapeHtml(paragraph)) + "</p>"; }).join("");
-    }).join("");
+    if (lastIndex < text.length)
+      parts.push({ type: "prose", text: text.slice(lastIndex) });
+    return parts
+      .map(function (part) {
+        if (part.type === "code")
+          return "<pre><code>" + escapeHtml(part.text) + "</code></pre>";
+        return part.text
+          .split(/\n{2,}/)
+          .filter(function (paragraph) {
+            return paragraph.trim();
+          })
+          .map(function (paragraph) {
+            return "<p>" + inlineFormat(escapeHtml(paragraph)) + "</p>";
+          })
+          .join("");
+      })
+      .join("");
   }
-  function relativeTime(timestamp) {
-    if (!timestamp) return "Unknown";
-    var seconds = Math.max(0, Date.now() / 1000 - Number(timestamp));
+  function relativeTime(value) {
+    if (!value) return "—";
+    var seconds = Math.max(0, Date.now() / 1000 - Number(value));
     if (seconds < 60) return "now";
     if (seconds < 3600) return Math.floor(seconds / 60) + "m ago";
     if (seconds < 86400) return Math.floor(seconds / 3600) + "h ago";
     return Math.floor(seconds / 86400) + "d ago";
   }
-  function dueLabel(value) {
-    if (!value) return "No due date";
-    var today = new Date(); today.setHours(0, 0, 0, 0);
-    var due = new Date(value + "T00:00:00"), days = Math.round((due - today) / 86400000);
-    if (days < 0) return "Overdue: " + value;
-    if (days === 0) return "Due today";
-    if (days === 1) return "Due tomorrow";
-    return "Due " + value;
+  function dueText(value) {
+    if (!value) return "No date";
+    var today = new Date();
+    today.setHours(0, 0, 0, 0);
+    var days = Math.round((new Date(value + "T00:00:00") - today) / 86400000);
+    return days < 0
+      ? "Overdue"
+      : days === 0
+        ? "Today"
+        : days === 1
+          ? "Tomorrow"
+          : value;
   }
-  function providerName(provider) { return provider === "codex" ? "CodeX" : "Claude"; }
-  function fullAccessEnabled() { return $("full-access").checked; }
-
-  function hasProtectedWorkControls() {
-    var active = document.activeElement;
-    var focused = Boolean(active && $("board-view").contains(active) && active.matches(".work-edit, #project-description"));
-    return focused || projectDescriptionDirty() || hasUnsettledWorkEdits();
+  function hasFilters() {
+    return (
+      filters.provider !== "any" ||
+      filters.priority !== "any" ||
+      filters.terminal !== "any" ||
+      filters.due !== "any"
+    );
   }
-  function hasUnsettledWorkEdits() { return editStates.some(function (state) { return Boolean(state.timer || state.inFlight || state.failed); }); }
+  function reorderLockReason() {
+    if ($("work-search").value.trim())
+      return "Manual reordering is disabled while searching.";
+    if (hasFilters())
+      return "Manual reordering is disabled while filters are applied.";
+    if (sortBy !== "manual")
+      return (
+        "Manual reordering is disabled while sorted by " +
+        (sortBy === "updated" ? "Last update" : "Due date") +
+        "."
+      );
+    return "Drag a handle, or use Move up and Move down from the row menu.";
+  }
+  function reorderLocked() {
+    return Boolean(
+      $("work-search").value.trim() || hasFilters() || sortBy !== "manual",
+    );
+  }
+  function updateReorderReason() {
+    $("reorder-reason").textContent = reorderLockReason();
+  }
+  function selectedProjectData() {
+    return (
+      latestBoard &&
+      latestBoard.projects.find(function (p) {
+        return p.project_key === selectedProject;
+      })
+    );
+  }
   function projectDescriptionDirty() {
-    var project = selectedProjectData(), description = $("project-description");
-    return Boolean(project && description && description.value !== (project.description || ""));
+    var project = selectedProjectData();
+    return Boolean(
+      project &&
+        !$("project-description-editor").hidden &&
+        $("project-description").value !== (project.description || ""),
+    );
   }
-  function mergeSavedTask(saved) {
-    if (!latestBoard || !saved) return;
-    latestBoard.tasks = latestBoard.tasks.map(function (task) { return task.task_id === saved.task_id ? Object.assign({}, task, saved) : task; });
-  }
-  function setEditError(state, error) {
-    state.failed = true;
-    state.control.setAttribute("aria-invalid", "true");
-    state.error.hidden = false;
-    state.error.textContent = "Could not save: " + error.message + ". Edit again to retry.";
-    toast(error.message, true);
-  }
-  function clearEditError(state) {
-    state.failed = false; state.control.removeAttribute("aria-invalid");
-    state.error.hidden = true; state.error.textContent = "";
-  }
-  function commitEdit(state, keepalive) {
-    if (state.timer) { clearTimeout(state.timer); state.timer = null; }
-    var revision = state.revision, payload = { _edit_client: editClientId, _edit_revision: revision }; payload[state.field] = state.readValue();
-    state.inFlight = true; state.control.setAttribute("aria-busy", "true");
-    var prior = rowMutationTails[state.taskId] || Promise.resolve();
-    var operation = prior.catch(function () {}).then(function () {
-      return mutate("/api/tasks/" + encodeURIComponent(state.taskId), "PATCH", payload, keepalive);
-    });
-    var settled = operation.then(function (response) {
-      mergeSavedTask(response.task);
-      if (state.revision === revision) {
-        state.dirty = false; clearEditError(state);
-        if (state.field === "status") boardRenderPending = true;
-      }
-    }).catch(function (error) {
-      if (state.revision === revision) setEditError(state, error);
-    }).finally(function () {
-      if (state.revision === revision) { state.inFlight = false; state.control.removeAttribute("aria-busy"); }
-      if (rowMutationTails[state.taskId] === settled) delete rowMutationTails[state.taskId];
-      if (boardRenderPending && !hasUnsettledWorkEdits() && !projectDescriptionDirty()) {
-        boardRenderPending = false; renderBoard(latestBoard);
-      }
-    });
-    rowMutationTails[state.taskId] = settled;
-    return settled;
-  }
-  function scheduleEdit(state, delay) {
-    state.revision = (editRevisionCounters[state.revisionKey] || 0) + 1;
-    editRevisionCounters[state.revisionKey] = state.revision;
-    state.dirty = true; if (state.timer) clearTimeout(state.timer);
-    state.control.setAttribute("aria-busy", "true");
-    state.timer = setTimeout(function () { commitEdit(state, false); }, delay);
-  }
-  function registerEdit(task, field, control, readValue, delay) {
-    var error = element("span", "field-error"), errorId = "edit-error-" + (++editSequence);
-    error.id = errorId; error.hidden = true; error.setAttribute("role", "alert"); error.setAttribute("aria-live", "assertive");
-    control.setAttribute("aria-describedby", errorId);
-    var revisionKey = task.task_id + ":" + field;
-    var state = { taskId: task.task_id, field: field, control: control, error: error, readValue: readValue, timer: null, inFlight: false, failed: false, dirty: false, revisionKey: revisionKey, revision: editRevisionCounters[revisionKey] || 0 };
-    editStates.push(state);
-    control.addEventListener(field === "title" ? "input" : "change", function () { scheduleEdit(state, delay); });
-    control.addEventListener("blur", function () { if (!hasProtectedWorkControls()) fetchBoard(); });
-    return error;
-  }
-  function flushPendingEdits(keepalive) {
-    var pending = editStates.filter(function (state) { return Boolean(state.timer); }).map(function (state) { return commitEdit(state, keepalive); });
-    Object.keys(rowMutationTails).forEach(function (taskId) { pending.push(rowMutationTails[taskId]); });
-    return Promise.all(pending);
-  }
-  function flushDirtyEditsOnPageHide() {
-    editStates.forEach(function (state) {
-      if (!state.dirty) return;
-      var payload = { _edit_client: editClientId, _edit_revision: state.revision }; payload[state.field] = state.readValue();
-      mutate("/api/tasks/" + encodeURIComponent(state.taskId), "PATCH", payload, true).catch(function () {});
-    });
-  }
-  function afterPendingEdits(action) {
-    return flushPendingEdits(false).then(function () {
-      if (editStates.some(function (state) { return state.failed; })) {
-        announce("Fix the highlighted edit before changing views."); return false;
-      }
-      if (projectDescriptionDirty()) {
-        announce("Save or cancel the project description before changing views."); return false;
-      }
-      action(); return true;
-    });
+  function hasProtectedWorkControls() {
+    return (
+      projectDescriptionDirty() ||
+      Object.keys(rowMutationTails).length > 0 ||
+      Boolean(document.querySelector("details[open], dialog[open]"))
+    );
   }
   function queueReorder(key, operation) {
     var prior = reorderMutationTails[key] || Promise.resolve();
     var queued = prior.catch(function () {}).then(operation);
-    var settled = queued.finally(function () { if (reorderMutationTails[key] === settled) delete reorderMutationTails[key]; });
+    var settled = queued.finally(function () {
+      if (reorderMutationTails[key] === settled)
+        delete reorderMutationTails[key];
+    });
     reorderMutationTails[key] = settled;
     return settled;
   }
-
-  function launchChoice(task, provider) {
-    var choice = element("div", "launch-choice"), button = element("button", "launch " + provider);
-    var reason = element("span", "disabled-reason"), action = task.actions[provider], reasonId = "launch-reason-" + (++editSequence);
-    var launchKey = task.session_id + ":" + provider, busy = Boolean(launchesInFlight[launchKey]);
-    reason.id = reasonId; button.type = "button"; button.textContent = action.label; button.disabled = !action.available || busy; button.dataset.launchKey = launchKey; button.dataset.launchAvailable = String(action.available);
-    if (busy) button.setAttribute("aria-busy", "true");
-    if (!action.available) { reason.textContent = action.reason || "Unavailable"; button.setAttribute("aria-describedby", reasonId); }
-    button.addEventListener("click", function () {
-      if (launchesInFlight[launchKey]) return;
-      launchesInFlight[launchKey] = true; setLaunchBusy(launchKey, true);
-      mutate("/api/tasks/" + encodeURIComponent(task.task_id) + "/launch", "POST", { provider: provider, full_access: fullAccessEnabled() }).then(function () {
-        toast("Opened " + providerName(provider) + " in Terminal");
-      }).catch(function (error) { toast(error.message, true); }).finally(function () { delete launchesInFlight[launchKey]; setLaunchBusy(launchKey, false); });
-    });
-    choice.append(button, reason); return choice;
+  function afterPendingEdits(action) {
+    if (projectDescriptionDirty()) {
+      announce("Save or cancel the project description before changing views.");
+      return false;
+    }
+    action();
+    return true;
+  }
+  function mergeTask(saved) {
+    if (latestBoard && saved)
+      latestBoard.tasks = latestBoard.tasks.map(function (task) {
+        return task.task_id === saved.task_id
+          ? Object.assign({}, task, saved)
+          : task;
+      });
+  }
+  function saveTask(task, field, value) {
+    var key = task.task_id,
+      revisionKey = key + ":" + field,
+      revision = (editRevisionCounters[revisionKey] || 0) + 1;
+    editRevisionCounters[revisionKey] = revision;
+    var payload = { _edit_client: editClientId, _edit_revision: revision };
+    payload[field] = value;
+    var prior = rowMutationTails[key] || Promise.resolve();
+    var op = prior
+      .catch(function () {})
+      .then(function () {
+        return mutate(
+          "/api/tasks/" + encodeURIComponent(key),
+          "PATCH",
+          payload,
+        );
+      });
+    var settled = op
+      .then(function (response) {
+        mergeTask(response.task);
+        return response.task;
+      })
+      .finally(function () {
+        if (rowMutationTails[key] === settled) delete rowMutationTails[key];
+      });
+    rowMutationTails[key] = settled;
+    return settled;
   }
   function setLaunchBusy(launchKey, busy) {
-    Array.prototype.forEach.call(document.querySelectorAll("[data-launch-key]"), function (candidate) {
-      if (candidate.dataset.launchKey !== launchKey) return;
-      candidate.disabled = busy || candidate.dataset.launchAvailable !== "true";
-      if (busy) candidate.setAttribute("aria-busy", "true"); else candidate.removeAttribute("aria-busy");
-    });
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-launch-key]"),
+      function (button) {
+        if (button.dataset.launchKey !== launchKey) return;
+        button.disabled = busy || button.dataset.launchAvailable !== "true";
+        if (busy) button.setAttribute("aria-busy", "true");
+        else button.removeAttribute("aria-busy");
+      },
+    );
   }
-  function restoreFocus(token) {
-    if (!token) return;
-    var control = Array.prototype.find.call(document.querySelectorAll("[data-focus-key]"), function (item) { return item.dataset.focusKey === token; });
-    if (control) control.focus();
+  function isDueTodayOrOverdue(task) {
+    var today = new Date();
+    var day =
+      today.getFullYear() +
+      "-" +
+      String(today.getMonth() + 1).padStart(2, "0") +
+      "-" +
+      String(today.getDate()).padStart(2, "0");
+    return Boolean(task.due_date && task.due_date <= day);
   }
-  function reorderLocked() { return Boolean($("work-search").value.trim()); }
-  function updateReorderReason() {
-    var reason = reorderLocked() ? "Reordering is disabled while searching." : "Drag a handle, or use Move up and Move down.";
-    $("reorder-reason").textContent = reason;
+  function taskMatches(task) {
+    if (selectedProject && task.project_key !== selectedProject) return false;
+    if (
+      queueMode === "closed"
+        ? !(task.work_status === "done" || task.work_status === "archived")
+        : task.work_status !== "active"
+    )
+      return false;
+    if (queueMode === "today" && !task.in_today) return false;
+    var query = $("work-search").value.trim().toLowerCase();
+    if (
+      query &&
+      [
+        task.title,
+        task.summary,
+        task.project_name,
+        task.session_provider,
+        task.session_id,
+      ]
+        .join(" ")
+        .toLowerCase()
+        .indexOf(query) < 0
+    )
+      return false;
+    if (
+      filters.provider !== "any" &&
+      task.session_provider !== filters.provider
+    )
+      return false;
+    if (filters.priority !== "any" && task.priority !== filters.priority)
+      return false;
+    if (filters.terminal !== "any" && task.terminal_state !== filters.terminal)
+      return false;
+    if (filters.due === "today" && !isDueTodayOrOverdue(task)) return false;
+    if (filters.due === "none" && task.due_date) return false;
+    return true;
   }
-  function taskGroupKey(task) { return groupBy === "priority" ? task.priority : task.terminal_state; }
   function visibleTasks() {
-    if (!latestBoard) return [];
-    return latestBoard.tasks.filter(function (task) {
-      if (!workSearchMatches(task)) return false;
-      if (selectedProject && task.project_key !== selectedProject) return false;
-      if (queueMode === "closed") return task.work_status === "done" || task.work_status === "archived";
-      if (task.work_status !== "active") return false;
-      return queueMode !== "today" || task.in_today;
+    return latestBoard ? latestBoard.tasks.filter(taskMatches) : [];
+  }
+  function taskGroupKey(task) {
+    return groupBy === "priority"
+      ? task.priority
+      : groupBy === "terminal"
+        ? task.terminal_state
+        : "all";
+  }
+  function taskComparator(a, b) {
+    if (sortBy === "updated")
+      return (
+        Number(b.last_activity_at || 0) - Number(a.last_activity_at || 0) ||
+        String(a.task_id).localeCompare(String(b.task_id))
+      );
+    if (sortBy === "due")
+      return (
+        String(a.due_date || "9999-12-31").localeCompare(
+          String(b.due_date || "9999-12-31"),
+        ) || String(a.task_id).localeCompare(String(b.task_id))
+      );
+    return (
+      Number(a.order !== undefined ? a.order : a.position) -
+        Number(b.order !== undefined ? b.order : b.position) ||
+      String(a.task_id).localeCompare(String(b.task_id))
+    );
+  }
+  function sorted(tasks) {
+    return tasks.slice().sort(taskComparator);
+  }
+  function selectScope(scope) {
+    if (!afterPendingEdits(function () {})) return;
+    queueMode = scope;
+    selectedProject = null;
+    activeSavedView = null;
+    renderBoard(latestBoard);
+  }
+  function renderProjectDetail() {
+    var project = selectedProjectData(),
+      root = $("project-detail");
+    root.hidden = !project;
+    if (!project) return;
+    $("project-name").textContent = projectName(project);
+    $("project-path").textContent = project.path || "";
+    $("project-counts").textContent =
+      (project.counts || {}).active +
+      " active · " +
+      (project.counts || {}).today +
+      " today";
+    $("project-description-preview").textContent =
+      project.description || "No project description yet.";
+    if (
+      !projectDescriptionDirty() &&
+      document.activeElement !== $("project-description")
+    )
+      $("project-description").value = project.description || "";
+    $("description-limit").textContent =
+      $("project-description").value.length + " / 10000";
+    var inherited = project.inherited_descriptions || [],
+      inheritedRoot = $("project-inherited"),
+      inheritedList = $("project-inherited-list");
+    inheritedRoot.hidden = inherited.length === 0;
+    inheritedList.replaceChildren();
+    inherited.forEach(function (note) {
+      inheritedList.append(
+        el(
+          "div",
+          "inherited-note",
+          (note.source_key || "Project") + ": " + note.description,
+        ),
+      );
     });
   }
-  function sortByOrder(tasks) { return tasks.slice().sort(function (a, b) { return Number(a.order) - Number(b.order) || String(a.task_id).localeCompare(String(b.task_id)); }); }
-  function mergeReorderedTasks(tasks) { tasks.forEach(mergeSavedTask); }
-  function refreshAfterMutation(focus, successMessage) {
-    return fetchBoard(true).then(function () { restoreFocus(focus); if (successMessage) announce(successMessage); });
+  function menuButton(label, handler) {
+    var button = el("button", "", label);
+    button.type = "button";
+    button.addEventListener("click", handler);
+    return button;
   }
-  function taskReorderPayload(task, destinationKey, beforeTaskId) {
-    var groupTasks = sortByOrder(visibleTasks().filter(function (item) {
-      return item.task_id !== task.task_id && item.project_key === task.project_key && item.work_status === task.work_status && taskGroupKey(item) === destinationKey;
-    }));
-    var beforeIndex = groupTasks.findIndex(function (item) { return item.task_id === beforeTaskId; });
-    if (beforeIndex < 0) beforeIndex = groupTasks.length;
-    groupTasks.splice(beforeIndex, 0, task);
-    var payload = { project_key: task.project_key, task_ids: groupTasks.map(function (item) { return item.task_id; }) };
-    if (groupBy === "priority" && queueMode !== "closed") payload.priority = destinationKey;
-    return payload;
+  function rowMenu(items, label) {
+    var details = el("details", "row-menu"),
+      summary = el("summary", "icon-button ellipsis", "⋯"),
+      panel = el("div", "row-menu-panel");
+    summary.setAttribute("aria-label", label || "More actions");
+    items.forEach(function (item) {
+      panel.appendChild(
+        menuButton(item[0], function () {
+          details.open = false;
+          item[1]();
+        }),
+      );
+    });
+    details.append(summary, panel);
+    return details;
   }
-  function performTaskReorder(taskId, destinationKey, beforeTaskId, focus) {
-    if (hasUnsettledWorkEdits() || projectDescriptionDirty()) {
-      afterPendingEdits(function () { performTaskReorder(taskId, destinationKey, beforeTaskId, focus); }); return;
+  function openEditor(title, label, initial, action, options) {
+    options = options || {};
+    editorAllowEmpty = Boolean(options.allowEmpty);
+    editorAction = action;
+    $("editor-title").textContent = title;
+    $("editor-label").textContent = label;
+    $("editor-input").type = options.type || "text";
+    $("editor-input").value = initial || "";
+    $("editor-error").hidden = true;
+    $("editor-dialog").showModal();
+    setTimeout(function () {
+      $("editor-input").focus();
+    }, 0);
+  }
+  function projectMenu(project) {
+    var folders = (latestBoard.folders || []).filter(function (folder) {
+      return folder.folder_id !== project.folder_id;
+    });
+    var items = [
+      [
+        "Rename display name",
+        function () {
+          openEditor(
+            "Rename project",
+            "Display name (leave blank to use repository name)",
+            projectName(project),
+            function (name) {
+              return mutate(
+                "/api/projects/" + encodeURIComponent(project.project_key),
+                "PATCH",
+                { display_name: name },
+              );
+            },
+            { allowEmpty: true },
+          );
+        },
+      ],
+      [
+        "Move to workspace",
+        function () {
+          moveProjectToFolder(project, null);
+        },
+      ],
+    ];
+    folders.forEach(function (folder) {
+      items.push([
+        "Move to " + folder.name,
+        function () {
+          moveProjectToFolder(project, folder.folder_id);
+        },
+      ]);
+    });
+    items.push(
+      [
+        "Move up",
+        function () {
+          moveProject(project.project_key, -1);
+        },
+      ],
+      [
+        "Move down",
+        function () {
+          moveProject(project.project_key, 1);
+        },
+      ],
+    );
+    return rowMenu(items, "Project actions for " + projectName(project));
+  }
+  function folderMenu(folder) {
+    return rowMenu(
+      [
+        [
+          "Rename folder",
+          function () {
+            openEditor(
+              "Rename folder",
+              "Folder name",
+              folder.name,
+              function (name) {
+                return mutate(
+                  "/api/folders/" + encodeURIComponent(folder.folder_id),
+                  "PATCH",
+                  { name: name },
+                );
+              },
+            );
+          },
+        ],
+        [
+          "Move up",
+          function () {
+            moveFolder(folder.folder_id, -1);
+          },
+        ],
+        [
+          "Move down",
+          function () {
+            moveFolder(folder.folder_id, 1);
+          },
+        ],
+      ],
+      "Folder actions for " + folder.name,
+    );
+  }
+  function renderProjectNode(project) {
+    var row = el("div", "project-row"),
+      select = el(
+        "button",
+        "project-select" +
+          (selectedProject === project.project_key ? " active" : ""),
+      );
+    select.type = "button";
+    select.draggable = true;
+    select.append(
+      el("span", "project-name", projectName(project)),
+      el("span", "nav-count", String((project.counts || {}).active || 0)),
+    );
+    select.addEventListener("click", function () {
+      if (!afterPendingEdits(function () {})) return;
+      selectedProject = project.project_key;
+      queueMode = "all";
+      activeSavedView = null;
+      renderBoard(latestBoard);
+    });
+    select.addEventListener("dragstart", function (event) {
+      draggedProject = project.project_key;
+      event.dataTransfer.effectAllowed = "move";
+    });
+    select.addEventListener("dragend", function () {
+      draggedProject = null;
+    });
+    row.append(select, projectMenu(project));
+    return row;
+  }
+  function renderSidebar(data) {
+    $("all-count").textContent = data.tasks.filter(function (t) {
+      return t.work_status === "active";
+    }).length;
+    $("today-count").textContent = data.tasks.filter(function (t) {
+      return t.work_status === "active" && t.in_today;
+    }).length;
+    $("closed-count").textContent = data.tasks.filter(function (t) {
+      return t.work_status !== "active";
+    }).length;
+    Array.prototype.forEach.call(
+      document.querySelectorAll(".work-scope,.scope-tab"),
+      function (node) {
+        var active = node.dataset.scope === queueMode && !selectedProject;
+        node.classList.toggle("active", active);
+        node.setAttribute(
+          node.classList.contains("scope-tab")
+            ? "aria-selected"
+            : "aria-pressed",
+          String(active),
+        );
+      },
+    );
+    var root = $("folder-list");
+    root.replaceChildren();
+    var folders = data.folders || [];
+    function appendProjects(parent, folderId) {
+      var holder = el("div", "folder-projects");
+      data.projects
+        .filter(function (project) {
+          return (project.folder_id || null) === folderId;
+        })
+        .forEach(function (project) {
+          holder.appendChild(renderProjectNode(project));
+        });
+      parent.appendChild(holder);
     }
-    if (reorderLocked()) { announce("Reordering is disabled while searching."); restoreFocus(focus); return; }
-    var task = latestBoard.tasks.find(function (item) { return item.task_id === taskId; });
-    if (!task) return;
-    if (taskId === beforeTaskId) { announce("Thread order is unchanged."); restoreFocus(focus); return; }
-    var beforeTask = beforeTaskId && latestBoard.tasks.find(function (item) { return item.task_id === beforeTaskId; });
-    if (beforeTask && beforeTask.project_key !== task.project_key) { announce("Tasks cannot move between projects."); restoreFocus(focus); return; }
-    if (beforeTask && beforeTask.work_status !== task.work_status) { announce("Done and archived rows keep their planning status while reordering."); restoreFocus(focus); return; }
-    if (selectedProject && task.project_key !== selectedProject) { announce("Tasks cannot move between projects."); restoreFocus(focus); return; }
-    if (queueMode === "closed" && task.work_status === "active") { announce("Done and archived work can reorder only in the closed view."); restoreFocus(focus); return; }
-    if (queueMode === "closed" && groupBy === "priority" && destinationKey !== task.priority) { announce("Closed rows cannot change priority by dragging."); restoreFocus(focus); return; }
-    if (groupBy === "terminal" && destinationKey !== task.terminal_state) {
-      announce("Terminal state is runtime truth; tasks cannot move between terminal groups."); restoreFocus(focus); return;
-    }
-    queueReorder("tasks:" + task.project_key, function () {
-      var currentTask = latestBoard.tasks.find(function (item) { return item.task_id === taskId; }) || task;
-      var snapshot = latestBoard, payload = taskReorderPayload(currentTask, destinationKey, beforeTaskId);
-      return mutate("/api/tasks/reorder", "POST", payload).then(function (response) {
-        mergeReorderedTasks(response.tasks || []);
-        return refreshAfterMutation(focus, "Moved " + (currentTask.title || "thread") + ".");
-      }).catch(function (error) {
-        latestBoard = snapshot; renderBoard(snapshot); restoreFocus(focus);
-        announce("Move failed. " + error.message); toast(error.message, true);
+    folders.forEach(function (folder) {
+      var block = el("div", "folder-block"),
+        row = el("div", "folder-row"),
+        select = el("button", "folder-select"),
+        caret = el(
+          "span",
+          "folder-caret",
+          collapsedFolders[folder.folder_id] ? "›" : "⌄",
+        );
+      select.type = "button";
+      select.append(caret, el("span", "project-name", folder.name));
+      select.addEventListener("click", function () {
+        collapsedFolders[folder.folder_id] =
+          !collapsedFolders[folder.folder_id];
+        renderSidebar(data);
       });
+      row.append(select, folderMenu(folder));
+      block.appendChild(row);
+      block.addEventListener("dragover", function (event) {
+        if (draggedProject) event.preventDefault();
+      });
+      block.addEventListener("drop", function (event) {
+        event.preventDefault();
+        var project = data.projects.find(function (p) {
+          return p.project_key === draggedProject;
+        });
+        if (project) moveProjectToFolder(project, folder.folder_id);
+      });
+      if (!collapsedFolders[folder.folder_id])
+        appendProjects(block, folder.folder_id);
+      root.appendChild(block);
+    });
+    var unfiled = el("div", "folder-projects");
+    data.projects
+      .filter(function (project) {
+        return !project.folder_id;
+      })
+      .forEach(function (project) {
+        unfiled.appendChild(renderProjectNode(project));
+      });
+    if (unfiled.children.length) {
+      var label = el("div", "sidebar-section-title", "Workspace projects");
+      label.style.marginTop = "10px";
+      root.append(label, unfiled);
+    }
+    renderSavedViews();
+  }
+  function moveProjectToFolder(project, folderId) {
+    mutate(
+      "/api/projects/" + encodeURIComponent(project.project_key),
+      "PATCH",
+      { folder_id: folderId },
+    )
+      .then(function () {
+        return fetchBoard(true);
+      })
+      .then(function () {
+        toast("Project moved");
+      })
+      .catch(function (error) {
+        toast(error.message, true);
+      });
+  }
+  function moveProject(projectKey, direction) {
+    return queueReorder("projects", function () {
+      var project = latestBoard.projects.find(function (p) {
+        return p.project_key === projectKey;
+      });
+      if (!project) return;
+      var peers = latestBoard.projects.filter(function (p) {
+        return (p.folder_id || null) === (project.folder_id || null);
+      });
+      var index = peers.findIndex(function (p) {
+          return p.project_key === projectKey;
+        }),
+        target = index + direction;
+      if (target < 0 || target >= peers.length)
+        return announce(
+          "Project is already at the " + (direction < 0 ? "top." : "bottom."),
+        );
+      var otherKey = peers[target].project_key;
+      var ids = latestBoard.projects.map(function (p) {
+        return p.project_key === projectKey
+          ? otherKey
+          : p.project_key === otherKey
+            ? projectKey
+            : p.project_key;
+      });
+      return mutate("/api/projects/reorder", "POST", {
+        project_keys: ids,
+      }).then(function (response) {
+        var byKey = Object.fromEntries(
+          latestBoard.projects.map(function (p) {
+            return [p.project_key, p];
+          }),
+        );
+        latestBoard.projects = response.projects.map(function (p) {
+          return Object.assign({}, byKey[p.project_key], p, {
+            counts: (byKey[p.project_key] || p).counts,
+          });
+        });
+        if (!projectDescriptionDirty()) renderBoard(latestBoard);
+      });
+    }).catch(function (error) {
+      toast(error.message, true);
     });
   }
-  function moveTask(task, direction, focus) {
-    if (reorderLocked()) { announce("Reordering is disabled while searching."); return; }
-    var peers = sortByOrder(visibleTasks().filter(function (item) { return item.project_key === task.project_key && item.work_status === task.work_status && taskGroupKey(item) === taskGroupKey(task); }));
-    var index = peers.findIndex(function (item) { return item.task_id === task.task_id; });
-    var swap = index + direction;
-    if (index < 0 || swap < 0 || swap >= peers.length) { announce("Thread is already at the " + (direction < 0 ? "top" : "bottom") + " of its group."); return; }
-    var before = direction < 0 ? peers[swap].task_id : (peers[swap + 1] || {}).task_id;
-    performTaskReorder(task.task_id, taskGroupKey(task), before, focus);
-  }
-  function performPriorityChange(task, next, focus) {
-    if (hasUnsettledWorkEdits() || projectDescriptionDirty()) {
-      afterPendingEdits(function () { performPriorityChange(task, next, focus); }).then(function (changed) {
-        if (!changed) {
-          var control = Array.prototype.find.call(document.querySelectorAll("[data-focus-key]"), function (item) { return item.dataset.focusKey === focus; });
-          if (control) control.value = task.priority;
-          restoreFocus(focus);
-        }
-      }); return;
-    }
-    if (reorderLocked()) { announce("Reordering is disabled while searching."); renderBoard(latestBoard); restoreFocus(focus); return; }
-    queueReorder("tasks:" + task.project_key, function () {
-      var currentTask = latestBoard.tasks.find(function (item) { return item.task_id === task.task_id; }) || task;
-      var snapshot = latestBoard, destination = sortByOrder(visibleTasks().filter(function (item) { return item.task_id !== currentTask.task_id && item.project_key === currentTask.project_key && item.work_status === "active" && item.priority === next; }));
-      destination.push(currentTask);
-      return mutate("/api/tasks/reorder", "POST", { project_key: currentTask.project_key, task_ids: destination.map(function (item) { return item.task_id; }), priority: next }).then(function (response) {
-        mergeReorderedTasks(response.tasks || []); return refreshAfterMutation(focus, "Set priority " + PRIORITY_LABELS[next] + ".");
-      }).catch(function (error) { latestBoard = snapshot; renderBoard(snapshot); restoreFocus(focus); announce("Priority change failed. " + error.message); toast(error.message, true); });
+  function moveFolder(folderId, direction) {
+    return queueReorder("folders", function () {
+      var ids = (latestBoard.folders || []).map(function (f) {
+          return f.folder_id;
+        }),
+        index = ids.indexOf(folderId),
+        target = index + direction;
+      if (target < 0 || target >= ids.length)
+        return announce(
+          "Folder is already at the " + (direction < 0 ? "top." : "bottom."),
+        );
+      var swap = ids[target];
+      ids[index] = swap;
+      ids[target] = folderId;
+      return mutate("/api/folders/reorder", "POST", { folder_ids: ids })
+        .then(function (response) {
+          latestBoard.folders = response.folders;
+          if (!projectDescriptionDirty()) renderBoard(latestBoard);
+        })
+        .catch(function (error) {
+          toast(error.message, true);
+        });
     });
   }
   function prioritySelect(task) {
-    var select = element("select", "priority-select work-edit");
-    select.setAttribute("aria-label", "Set priority for " + task.title); select.dataset.focusKey = "priority-" + task.task_id;
-    select.disabled = reorderLocked() || task.work_status !== "active";
-    PRIORITY_GROUPS.forEach(function (priority) { var option = element("option", "", PRIORITY_LABELS[priority]); option.value = priority; option.selected = task.priority === priority; select.appendChild(option); });
+    var select = el("select", "priority-select priority-" + task.priority);
+    select.disabled = task.work_status !== "active";
+    select.setAttribute("aria-label", "Set priority for " + task.title);
+    PRIORITY_GROUPS.forEach(function (priority) {
+      var option = el("option", "", PRIORITY_LABELS[priority]);
+      option.value = priority;
+      option.selected = task.priority === priority;
+      select.appendChild(option);
+    });
     select.addEventListener("change", function () {
-      var focus = select.dataset.focusKey, next = select.value;
-      if (task.work_status !== "active") {
-        select.value = task.priority; announce("Closed rows cannot change priority."); return;
-      }
-      performPriorityChange(task, next, focus);
+      var next = select.value;
+      saveTask(task, "priority", next)
+        .then(function () {
+          toast("Priority updated");
+          renderBoard(latestBoard);
+        })
+        .catch(function (error) {
+          select.value = task.priority;
+          toast(error.message, true);
+        });
     });
     return select;
   }
-  function headerCell(textValue, className) { var cell = element("th", className, textValue); cell.scope = "col"; return cell; }
-  function renderTaskRow(task) {
-    var row = element("tr", "work-row"); row.dataset.taskId = task.task_id; row.dataset.projectKey = task.project_key; row.dataset.groupKey = taskGroupKey(task);
-    var orderCell = element("td", "work-order"), orderControls = element("div", "order-controls");
-    var handle = element("button", "drag-handle", "⋮⋮"); handle.type = "button"; handle.draggable = !reorderLocked(); handle.disabled = reorderLocked(); handle.setAttribute("aria-label", "Drag " + task.title); handle.dataset.focusKey = "drag-" + task.task_id;
-    var up = element("button", "move-button", "↑"), down = element("button", "move-button", "↓");
-    up.type = down.type = "button"; up.title = "Move up"; down.title = "Move down"; up.setAttribute("aria-label", "Move up " + task.title); down.setAttribute("aria-label", "Move down " + task.title); up.dataset.focusKey = "up-" + task.task_id; down.dataset.focusKey = "down-" + task.task_id; up.disabled = down.disabled = reorderLocked();
-    handle.addEventListener("dragstart", function (event) { draggedTask = task.task_id; event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", task.task_id); });
-    handle.addEventListener("dragend", function () { draggedTask = null; });
-    up.addEventListener("click", function () { moveTask(task, -1, up.dataset.focusKey); }); down.addEventListener("click", function () { moveTask(task, 1, down.dataset.focusKey); });
-    orderControls.append(handle, up, down); orderCell.appendChild(orderControls);
-    var identity = element("td", "work-identity"), title = element("input", "task-title work-edit");
-    title.value = task.title || ""; title.maxLength = 500; title.setAttribute("aria-label", "Name for " + (task.title || task.session_id));
-    identity.append(title, registerEdit(task, "title", title, function () { return title.value; }, 450), element("div", "task-summary", task.summary), element("div", "task-project", task.project_name || "Unknown project"), element("div", "session-id", task.session_id));
-    var priorityCell = element("td", "work-priority"); priorityCell.append(prioritySelect(task), element("span", "sr-only", "Set priority"));
-    var dueCell = element("td", "work-due"), due = element("input", "work-edit");
-    due.type = "date"; due.value = task.due_date || ""; due.title = dueLabel(task.due_date); due.setAttribute("aria-label", "Due date for " + task.title);
-    dueCell.append(due, registerEdit(task, "due_date", due, function () { return due.value || null; }, 0));
-    var statusCell = element("td", "work-status"), status = element("select", "work-edit");
-    [["active", "Active"], ["done", "Done"], ["archived", "Archived"]].forEach(function (choice) {
-      var option = element("option", "", choice[1]); option.value = choice[0]; option.selected = task.work_status === choice[0]; status.appendChild(option);
+  function markDone(task) {
+    var next = task.work_status === "active" ? "done" : "active";
+    saveTask(task, "status", next)
+      .then(function () {
+        fetchBoard(true);
+      })
+      .catch(function (error) {
+        toast(error.message, true);
+      });
+  }
+  function openTaskDialog(task) {
+    $("task-dialog").dataset.taskId = task.task_id;
+    $("task-dialog").dataset.openVersion = String(
+      Number($("task-dialog").dataset.openVersion || 0) + 1,
+    );
+    $("dialog-project").textContent = projectName(
+      latestBoard.projects.find(function (p) {
+        return p.project_key === task.project_key;
+      }) || { name: task.project_name },
+    );
+    $("dialog-task-title").textContent = task.title || "Untitled task";
+    var fields = $("dialog-task-fields");
+    fields.replaceChildren();
+    var title = el("input", "");
+    title.value = task.title || "";
+    title.maxLength = 500;
+    var due = el("input", "");
+    due.type = "date";
+    due.value = task.due_date || "";
+    var status = el("select", "");
+    [
+      ["active", "Active"],
+      ["done", "Done"],
+      ["archived", "Archived"],
+    ].forEach(function (pair) {
+      var opt = el("option", "", pair[1]);
+      opt.value = pair[0];
+      opt.selected = task.work_status === pair[0];
+      status.appendChild(opt);
     });
-    status.setAttribute("aria-label", "Work status for " + task.title);
-    statusCell.append(status, registerEdit(task, "status", status, function () { return status.value; }, 0));
-    var terminalCell = element("td", "work-terminal");
-    terminalCell.appendChild(element("span", "runtime state-" + task.terminal_state, String(task.terminal_state || "gone").replace("-", " ")));
-    var activityCell = element("td", "work-activity");
-    activityCell.append(element("strong", "provider", providerName(task.session_provider)), element("span", "updated", relativeTime(task.last_activity_at)));
-    var actionCell = element("td", "work-actions"), actions = element("div", "task-actions");
-    actions.append(launchChoice(task, "claude"), launchChoice(task, "codex")); actionCell.appendChild(actions);
-    row.append(orderCell, identity, priorityCell, dueCell, statusCell, terminalCell, activityCell, actionCell); return row;
-  }
-  function appendGroup(root, key, name, tasks) {
-    var section = element("section", "project-group"), heading = element("h4", "project-heading"); section.dataset.groupKey = key;
-    heading.append(element("span", "project-name", name), element("span", "count", tasks.length + (tasks.length === 1 ? " thread" : " threads")));
-    var table = element("table", "work-table"), caption = element("caption", "sr-only", name + " terminal threads");
-    var head = document.createElement("thead"), headRow = document.createElement("tr"), body = document.createElement("tbody");
-    headRow.append(headerCell("Order", "column-order"), headerCell("Name / Project", "column-name"), headerCell("Priority", "column-priority"), headerCell("Due date", "column-due"), headerCell("Work status", "column-status"), headerCell("Terminal state", "column-terminal"), headerCell("Agent / activity", "column-activity"), headerCell("Actions", "column-actions"));
-    head.appendChild(headRow); sortByOrder(tasks).forEach(function (task) { var row = renderTaskRow(task); row.addEventListener("dragover", function (event) { if (draggedTask && !reorderLocked()) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }); row.addEventListener("drop", function (event) { event.preventDefault(); var focus = "drag-" + draggedTask; performTaskReorder(draggedTask, key, task.task_id, focus); }); body.appendChild(row); });
-    section.addEventListener("dragover", function (event) { if (draggedTask && !reorderLocked()) event.preventDefault(); }); section.addEventListener("drop", function (event) { if (event.target.closest("tr")) return; event.preventDefault(); performTaskReorder(draggedTask, key, null, "drag-" + draggedTask); });
-    table.append(caption, head, body); section.append(heading, table); root.appendChild(section);
-  }
-  function workSearchMatches(task) {
-    var query = $("work-search").value.trim().toLowerCase(); if (!query) return true;
-    var haystack = [task.title, task.summary, task.project_name, task.session_provider, task.session_id].join(" ").toLowerCase();
-    return haystack.indexOf(query) !== -1;
-  }
-  function renderProjectSidebar(data) {
-    $("all-count").textContent = data.tasks.filter(function (task) { return task.work_status === "active"; }).length;
-    $("today-count").textContent = data.tasks.filter(function (task) { return task.work_status === "active" && task.in_today; }).length;
-    $("closed-count").textContent = data.tasks.filter(function (task) { return task.work_status !== "active"; }).length;
-    var list = $("project-list"); list.replaceChildren();
-    data.projects.forEach(function (project) {
-      var row = element("div", "project-nav-row" + (selectedProject === project.project_key ? " active" : "")); row.dataset.projectKey = project.project_key;
-      var drag = element("button", "project-drag", "⋮⋮"); drag.type = "button"; drag.draggable = !reorderLocked(); drag.disabled = reorderLocked(); drag.setAttribute("aria-label", "Drag project " + project.name); drag.dataset.focusKey = "project-drag-" + project.project_key; drag.addEventListener("dragstart", function (event) { draggedProject = project.project_key; event.dataTransfer.setData("text/plain", project.project_key); }); drag.addEventListener("dragend", function () { draggedProject = null; });
-      var select = element("button", "project-select"); select.type = "button"; select.setAttribute("aria-pressed", String(selectedProject === project.project_key)); select.append(element("span", "project-nav-name", project.name), element("span", "nav-count", String(project.counts.active))); select.addEventListener("click", function () { afterPendingEdits(function () { selectedProject = project.project_key; queueMode = "all"; renderBoard(latestBoard); }); });
-      var projectMoves = element("span", "project-moves"), up = element("button", "project-move", "↑"), down = element("button", "project-move", "↓"); up.type = down.type = "button"; up.title = "Move project up"; down.title = "Move project down"; up.setAttribute("aria-label", "Move project up " + project.name); down.setAttribute("aria-label", "Move project down " + project.name); up.dataset.focusKey = "project-up-" + project.project_key; down.dataset.focusKey = "project-down-" + project.project_key; up.disabled = down.disabled = reorderLocked(); up.addEventListener("click", function () { moveProject(project.project_key, -1, up.dataset.focusKey); }); down.addEventListener("click", function () { moveProject(project.project_key, 1, down.dataset.focusKey); }); projectMoves.append(up, down);
-      row.addEventListener("dragover", function (event) { if (draggedProject && !reorderLocked()) event.preventDefault(); }); row.addEventListener("drop", function (event) { event.preventDefault(); reorderProject(draggedProject, project.project_key, "project-drag-" + draggedProject); });
-      row.append(drag, select, projectMoves); list.appendChild(row);
-    });
-  }
-  function moveProject(projectKey, direction, focus) {
-    var keys = latestBoard.projects.map(function (project) { return project.project_key; }), index = keys.indexOf(projectKey), swap = index + direction;
-    if (swap < 0 || swap >= keys.length) { announce("Project is already at the " + (direction < 0 ? "top." : "bottom.")); return; }
-    var before = direction < 0 ? keys[swap] : keys[swap + 1]; reorderProject(projectKey, before, focus);
-  }
-  function reorderProject(projectKey, beforeKey, focus) {
-    if (hasUnsettledWorkEdits() || projectDescriptionDirty()) {
-      afterPendingEdits(function () { reorderProject(projectKey, beforeKey, focus); }); return;
+    var error = el("p", "field-error");
+    error.hidden = true;
+    function field(label, control) {
+      var wrapper = el("label", "", label);
+      wrapper.appendChild(control);
+      fields.appendChild(wrapper);
     }
-    if (!projectKey || reorderLocked()) { announce("Reordering is disabled while searching."); return; }
-    if (projectKey === beforeKey) { announce("Project order is unchanged."); restoreFocus(focus); return; }
-    queueReorder("projects", function () {
-      var snapshot = latestBoard.projects.slice(), keys = snapshot.map(function (project) { return project.project_key; }).filter(function (key) { return key !== projectKey; });
-      var index = keys.indexOf(beforeKey); keys.splice(index < 0 ? keys.length : index, 0, projectKey);
-      return mutate("/api/projects/reorder", "POST", { project_keys: keys }).then(function () { return fetchBoard(true); }).then(function () { restoreFocus(focus); announce("Project order saved."); }).catch(function (error) { latestBoard.projects = snapshot; renderProjectSidebar(latestBoard); restoreFocus(focus); announce("Project move failed. " + error.message); toast(error.message, true); });
+    field("Name", title);
+    field("Due date", due);
+    field("Work status", status);
+    fields.appendChild(error);
+    function dialogSave(name, value, control) {
+      control.removeAttribute("aria-invalid");
+      error.hidden = true;
+      saveTask(task, name, value)
+        .then(function (saved) {
+          Object.assign(task, saved);
+          $("dialog-task-title").textContent = task.title;
+        })
+        .catch(function (reason) {
+          control.setAttribute("aria-invalid", "true");
+          error.textContent =
+            "Could not save: " +
+            reason.message +
+            ". Your edit is still here; change it to retry.";
+          error.hidden = false;
+        });
+    }
+    title.addEventListener("change", function () {
+      dialogSave("title", title.value, title);
+    });
+    due.addEventListener("change", function () {
+      dialogSave("due_date", due.value || null, due);
+    });
+    status.addEventListener("change", function () {
+      dialogSave("status", status.value, status);
+    });
+    var viewer = $("viewer");
+    $("conversation-host").appendChild(viewer);
+    $("dialog-access").appendChild($("full-access-label"));
+    $("task-dialog").showModal();
+    selectSession(task.session_id);
+  }
+  function taskMenu(task) {
+    return rowMenu(
+      [
+        [
+          "Open details",
+          function () {
+            openTaskDialog(task);
+          },
+        ],
+        [
+          "Rename",
+          function () {
+            openEditor("Rename task", "Task name", task.title, function (name) {
+              return saveTask(task, "title", name);
+            });
+          },
+        ],
+        [
+          "Set due date",
+          function () {
+            openEditor(
+              "Set due date",
+              "YYYY-MM-DD (leave blank to clear)",
+              task.due_date || "",
+              function (date) {
+                return saveTask(task, "due_date", date || null);
+              },
+              { allowEmpty: true, type: "date" },
+            );
+          },
+        ],
+        [
+          task.work_status === "active" ? "Mark done" : "Reopen",
+          function () {
+            markDone(task);
+          },
+        ],
+        [
+          "Move up",
+          function () {
+            moveTask(task, -1);
+          },
+        ],
+        [
+          "Move down",
+          function () {
+            moveTask(task, 1);
+          },
+        ],
+      ],
+      "Task actions for " + task.title,
+    );
+  }
+  function header(text, cls, sort) {
+    var th = el("th", cls + (sort ? " sortable" : ""));
+    th.scope = "col";
+    if (sort) {
+      var button = el("button", "", text);
+      button.type = "button";
+      button.addEventListener("click", function () {
+        sortBy = sort;
+        $("sort-by").value = sort;
+        renderBoard(latestBoard);
+      });
+      th.appendChild(button);
+      if (sortBy === sort)
+        th.setAttribute(
+          "aria-sort",
+          sort === "updated" ? "descending" : "ascending",
+        );
+    } else th.textContent = text;
+    return th;
+  }
+  function renderTaskRow(task) {
+    var row = el("tr", "work-row");
+    row.dataset.taskId = task.task_id;
+    var order = el("td", "work-order"),
+      controls = el("div", "order-controls"),
+      handle = el("button", "drag-handle", "⋮⋮"),
+      done = el(
+        "button",
+        "done-circle" + (task.work_status !== "active" ? " done" : ""),
+        task.work_status !== "active" ? "✓" : "",
+      );
+    handle.type = done.type = "button";
+    handle.draggable = !reorderLocked();
+    handle.disabled = reorderLocked();
+    handle.setAttribute("aria-label", "Drag " + task.title);
+    done.setAttribute(
+      "aria-label",
+      task.work_status === "active"
+        ? "Mark " + task.title + " done"
+        : "Reopen " + task.title,
+    );
+    done.addEventListener("click", function () {
+      markDone(task);
+    });
+    handle.addEventListener("dragstart", function (event) {
+      draggedTask = task.task_id;
+      event.dataTransfer.effectAllowed = "move";
+    });
+    handle.addEventListener("dragend", function () {
+      draggedTask = null;
+    });
+    controls.append(handle, done);
+    order.appendChild(controls);
+    var identity = el("td", "work-identity"),
+      crumb = el(
+        "button",
+        "task-breadcrumb",
+        projectName(
+          latestBoard.projects.find(function (p) {
+            return p.project_key === task.project_key;
+          }) || { name: task.project_name },
+        ),
+      ),
+      title = el("button", "task-link", task.title || "Untitled task");
+    crumb.type = title.type = "button";
+    crumb.addEventListener("click", function () {
+      if (!afterPendingEdits(function () {})) return;
+      selectedProject = task.project_key;
+      queueMode = "all";
+      renderBoard(latestBoard);
+    });
+    title.addEventListener("click", function () {
+      openTaskDialog(task);
+    });
+    identity.append(crumb, title);
+    var due = el("td", "work-due"),
+      dueValue = el(
+        "span",
+        "due-label" +
+          (task.due_date && dueText(task.due_date) === "Overdue"
+            ? " overdue"
+            : ""),
+        dueText(task.due_date),
+      );
+    dueValue.title = task.due_date || "";
+    due.appendChild(dueValue);
+    var updated = el("td", "work-updated"),
+      updateValue = el("span", "updated", relativeTime(task.last_activity_at));
+    updateValue.title = task.last_activity_at
+      ? new Date(Number(task.last_activity_at) * 1000).toLocaleString()
+      : "No update recorded";
+    updated.appendChild(updateValue);
+    var priority = el("td", "work-priority");
+    priority.appendChild(prioritySelect(task));
+    var terminal = el("td", "work-terminal");
+    terminal.appendChild(
+      el(
+        "span",
+        "runtime state-" + task.terminal_state,
+        TERMINAL_LABELS[task.terminal_state] ||
+          task.terminal_state ||
+          "Unknown",
+      ),
+    );
+    var agent = el("td", "work-agent");
+    agent.appendChild(el("span", "agent", providerName(task.session_provider)));
+    var actions = el("td", "work-actions");
+    actions.appendChild(taskMenu(task));
+    row.append(
+      order,
+      identity,
+      due,
+      updated,
+      priority,
+      terminal,
+      agent,
+      actions,
+    );
+    return row;
+  }
+  function reorderTask(task, destinationKey, beforeId) {
+    if (reorderLocked()) return announce(reorderLockReason());
+    if (task.task_id === beforeId) return;
+    return queueReorder("tasks:" + task.project_key, function () {
+      var currentTask = latestBoard.tasks.find(function (item) {
+        return item.task_id === task.task_id;
+      });
+      if (!currentTask) return;
+      var all = visibleTasks().filter(function (item) {
+        return (
+          item.project_key === task.project_key &&
+          item.work_status === currentTask.work_status &&
+          taskGroupKey(item) === destinationKey &&
+          item.task_id !== task.task_id
+        );
+      });
+      all = sorted(all);
+      var at = all.findIndex(function (item) {
+        return item.task_id === beforeId;
+      });
+      all.splice(at < 0 ? all.length : at, 0, currentTask);
+      var previous = sorted(
+        visibleTasks().filter(function (item) {
+          return (
+            item.project_key === currentTask.project_key &&
+            item.work_status === currentTask.work_status &&
+            taskGroupKey(item) === destinationKey
+          );
+        }),
+      );
+      if (
+        previous.length === all.length &&
+        previous.every(function (item, index) {
+          return item.task_id === all[index].task_id;
+        })
+      )
+        return;
+      var payload = {
+        project_key: task.project_key,
+        task_ids: all.map(function (item) {
+          return item.task_id;
+        }),
+      };
+      if (
+        groupBy === "priority" &&
+        currentTask.work_status === "active" &&
+        currentTask.priority !== destinationKey
+      )
+        payload.priority = destinationKey;
+      return mutate("/api/tasks/reorder", "POST", payload).then(
+        function (response) {
+          (response.tasks || []).forEach(mergeTask);
+          if (!hasProtectedWorkControls()) renderBoard(latestBoard);
+        },
+      );
+    }).catch(function (error) {
+      toast(error.message, true);
     });
   }
-  function selectedProjectData() { return latestBoard && latestBoard.projects.find(function (project) { return project.project_key === selectedProject; }); }
-  function renderProjectDetail() {
-    var project = selectedProjectData(), detail = $("project-detail"); detail.hidden = !project; if (!project) return;
-    $("project-name").textContent = project.name; $("project-path").textContent = project.path;
-    $("project-counts").textContent = project.counts.active + " active · " + project.counts.today + " today · " + project.counts.needs_input + " needs input";
-    var description = $("project-description"); if (document.activeElement !== description && !description.getAttribute("aria-invalid")) description.value = project.description || "";
-    $("description-limit").textContent = description.value.length + " / 10000";
-    var inherited = project.inherited_descriptions || [], inheritedRoot = $("project-inherited"), inheritedList = $("project-inherited-list");
-    inheritedRoot.hidden = inherited.length === 0; inheritedList.replaceChildren();
-    inherited.forEach(function (note) { var block = element("div", "inherited-note"); block.append(element("span", "inherited-source", note.source_key), element("p", "", note.description)); inheritedList.appendChild(block); });
+  function moveTask(task, direction) {
+    if (reorderLocked()) return announce(reorderLockReason());
+    var peers = sorted(
+      visibleTasks().filter(function (item) {
+        return (
+          item.project_key === task.project_key &&
+          item.work_status === task.work_status &&
+          taskGroupKey(item) === taskGroupKey(task)
+        );
+      }),
+    );
+    var index = peers.findIndex(function (item) {
+        return item.task_id === task.task_id;
+      }),
+      target = index + direction;
+    if (target < 0 || target >= peers.length)
+      return announce(
+        "Task is already at the " + (direction < 0 ? "top." : "bottom."),
+      );
+    reorderTask(
+      task,
+      taskGroupKey(task),
+      direction < 0 ? peers[target].task_id : (peers[target + 1] || {}).task_id,
+    );
+  }
+  function appendGroup(root, key, label, tasks) {
+    var section = el("section", "project-group"),
+      heading = el("h3", "project-heading");
+    section.dataset.groupKey = key;
+    heading.append(
+      el("span", "", label),
+      el(
+        "span",
+        "count",
+        tasks.length + (tasks.length === 1 ? " task" : " tasks"),
+      ),
+    );
+    var table = el("table", "work-table"),
+      thead = document.createElement("thead"),
+      headRow = document.createElement("tr"),
+      body = document.createElement("tbody");
+    headRow.append(
+      header("", "column-order"),
+      header("Name / Project", "column-name"),
+      header("Due date", "column-due", "due"),
+      header("Last update", "column-updated", "updated"),
+      header("Priority", "column-priority"),
+      header("Terminal state", "column-terminal"),
+      header("Agent", "column-agent"),
+      header("", "column-actions"),
+    );
+    thead.appendChild(headRow);
+    sorted(tasks).forEach(function (task) {
+      var row = renderTaskRow(task);
+      row.addEventListener("dragover", function (event) {
+        if (draggedTask) event.preventDefault();
+      });
+      row.addEventListener("drop", function (event) {
+        event.preventDefault();
+        var dragged = latestBoard.tasks.find(function (item) {
+          return item.task_id === draggedTask;
+        });
+        if (!dragged) return;
+        if (reorderLocked()) return announce(reorderLockReason());
+        if (dragged.project_key !== task.project_key)
+          return announce("Tasks cannot move between projects.");
+        if (dragged.work_status !== task.work_status)
+          return announce(
+            "Done and archived rows keep separate work status while reordering.",
+          );
+        if (groupBy === "priority" && key !== dragged.priority) {
+          if (queueMode === "closed")
+            return announce("Closed rows cannot change priority by dragging.");
+          return reorderTask(dragged, key, task.task_id);
+        }
+        if (key !== taskGroupKey(dragged))
+          return announce(
+            "Terminal state is runtime truth; tasks cannot move between terminal groups.",
+          );
+        reorderTask(dragged, key, task.task_id);
+      });
+      body.appendChild(row);
+    });
+    section.addEventListener("dragover", function (event) {
+      if (draggedTask) event.preventDefault();
+    });
+    section.addEventListener("drop", function (event) {
+      if (event.target.closest("tr")) return;
+      event.preventDefault();
+      var dragged = latestBoard.tasks.find(function (item) {
+        return item.task_id === draggedTask;
+      });
+      if (!dragged) return;
+      if (reorderLocked()) return announce(reorderLockReason());
+      if (groupBy === "priority" && key !== dragged.priority) {
+        if (queueMode === "closed")
+          return announce("Closed rows cannot change priority by dragging.");
+        return reorderTask(dragged, key, null);
+      }
+      if (key === taskGroupKey(dragged)) reorderTask(dragged, key, null);
+    });
+    table.append(thead, body);
+    section.appendChild(heading);
+    if (tasks.length) section.appendChild(table);
+    else section.classList.add("empty-group");
+    root.appendChild(section);
   }
   function renderBoard(data) {
-    latestBoard = data; editStates = [];
-    $("task-count").textContent = data.tasks.length + (data.tasks.length === 1 ? " thread" : " threads");
+    if (!data) return;
+    latestBoard = data;
     if (selectedProject && !selectedProjectData()) selectedProject = null;
-    renderProjectSidebar(data); renderProjectDetail(); updateReorderReason();
-    Array.prototype.forEach.call(document.querySelectorAll(".work-scope"), function (button) { var active = button.dataset.scope === queueMode; button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active)); });
-    var heading = queueMode === "all" ? "All active" : queueMode === "today" ? "Today" : "Done & Archived"; if (selectedProjectData()) heading = selectedProjectData().name;
-    $("work-heading").textContent = heading;
-    var root = $("task-groups"); root.replaceChildren();
-    var visible = visibleTasks(); $("visible-count").textContent = visible.length + (visible.length === 1 ? " thread" : " threads");
-    if (!visible.length) { emptyMessage(root, "No threads match this view."); return; }
-    var keys = groupBy === "priority" ? PRIORITY_GROUPS : TERMINAL_GROUPS, labels = groupBy === "priority" ? PRIORITY_LABELS : TERMINAL_LABELS;
-    keys.forEach(function (key) { var tasks = visible.filter(function (task) { return taskGroupKey(task) === key; }); appendGroup(root, key, labels[key], tasks); });
+    renderSidebar(data);
+    renderProjectDetail();
+    updateReorderReason();
+    var filterCount = Object.values(filters).filter(function (value) {
+      return value !== "any";
+    }).length;
+    $("filter-summary").textContent = filterCount
+      ? filterCount + " Filters"
+      : "Filters";
+    $("today-note").hidden = queueMode !== "today";
+    $("work-heading").textContent = selectedProjectData()
+      ? projectName(selectedProjectData())
+      : queueMode === "today"
+        ? "Today"
+        : queueMode === "closed"
+          ? "Done"
+          : "All active";
+    var root = $("task-groups"),
+      tasks = visibleTasks();
+    root.replaceChildren();
+    if (!tasks.length) return empty(root, "No tasks match this view.");
+    if (groupBy === "none") return appendGroup(root, "all", "Tasks", tasks);
+    var keys = groupBy === "priority" ? PRIORITY_GROUPS : TERMINAL_GROUPS,
+      labels = groupBy === "priority" ? PRIORITY_LABELS : TERMINAL_LABELS;
+    keys.forEach(function (key) {
+      var matches = tasks.filter(function (task) {
+        return taskGroupKey(task) === key;
+      });
+      if (matches.length || groupBy === "priority") {
+        appendGroup(root, key, labels[key], matches);
+      }
+    });
   }
   function fetchBoard(force) {
     if (!force && hasProtectedWorkControls()) return Promise.resolve();
     var seq = ++boardSeq;
-    return request("/api/board").then(function (data) {
-      if (seq !== boardSeq || hasProtectedWorkControls()) return;
-      $("board-error").hidden = true; renderBoard(data);
-    }).catch(function (error) {
-      if (seq !== boardSeq) return;
-      $("board-error").hidden = false; $("board-error").textContent = error.message;
-    });
+    return request("/api/board")
+      .then(function (data) {
+        if (seq === boardSeq && !hasProtectedWorkControls()) {
+          $("board-error").hidden = true;
+          renderBoard(data);
+        }
+      })
+      .catch(function (error) {
+        if (seq === boardSeq) {
+          $("board-error").textContent = error.message;
+          $("board-error").hidden = false;
+        }
+      });
   }
   function scheduleBoardPoll() {
-    boardTimer = setTimeout(function () { fetchBoard().finally(scheduleBoardPoll); }, 10000);
+    boardTimer = setTimeout(function () {
+      fetchBoard().finally(scheduleBoardPoll);
+    }, 10000);
   }
-
+  function validSavedViews(value) {
+    return Array.isArray(value)
+      ? value
+          .filter(function (item) {
+            return (
+              item &&
+              typeof item.name === "string" &&
+              item.name.trim() &&
+              item.snapshot &&
+              typeof item.snapshot === "object"
+            );
+          })
+          .map(function (item) {
+            return { name: item.name.slice(0, 80), snapshot: item.snapshot };
+          })
+      : [];
+  }
+  function savedViews() {
+    try {
+      return validSavedViews(
+        JSON.parse(localStorage.getItem(SAVED_VIEWS_KEY) || "[]"),
+      );
+    } catch (_error) {
+      return [];
+    }
+  }
+  function storeSavedViews(views) {
+    try {
+      localStorage.setItem(
+        SAVED_VIEWS_KEY,
+        JSON.stringify(validSavedViews(views)),
+      );
+      return true;
+    } catch (_error) {
+      toast("Saved views are unavailable in this browser.", true);
+      return false;
+    }
+  }
+  function snapshotView() {
+    return {
+      scope: queueMode,
+      project: selectedProject,
+      group: groupBy,
+      sort: sortBy,
+      filters: Object.assign({}, filters),
+    };
+  }
+  function applySnapshot(snapshot) {
+    if (projectDescriptionDirty())
+      return announce(
+        "Save or cancel the project description before changing views.",
+      );
+    queueMode =
+      ["all", "today", "closed"].indexOf(snapshot.scope) >= 0
+        ? snapshot.scope
+        : "all";
+    selectedProject =
+      typeof snapshot.project === "string" ? snapshot.project : null;
+    groupBy =
+      ["priority", "terminal", "none"].indexOf(snapshot.group) >= 0
+        ? snapshot.group
+        : "priority";
+    sortBy =
+      ["manual", "updated", "due"].indexOf(snapshot.sort) >= 0
+        ? snapshot.sort
+        : "manual";
+    var savedFilters = snapshot.filters || {};
+    filters = {
+      provider:
+        ["any", "claude", "codex"].indexOf(savedFilters.provider) >= 0
+          ? savedFilters.provider
+          : "any",
+      priority:
+        ["any", "urgent", "high", "normal", "low"].indexOf(
+          savedFilters.priority,
+        ) >= 0
+          ? savedFilters.priority
+          : "any",
+      terminal:
+        ["any"].concat(TERMINAL_GROUPS).indexOf(savedFilters.terminal) >= 0
+          ? savedFilters.terminal
+          : "any",
+      due:
+        ["any", "today", "none"].indexOf(savedFilters.due) >= 0
+          ? savedFilters.due
+          : "any",
+    };
+    $("group-by").value = groupBy;
+    $("sort-by").value = sortBy;
+    $("filter-provider").value = filters.provider;
+    $("filter-priority").value = filters.priority;
+    $("filter-terminal").value = filters.terminal;
+    $("filter-due").value = filters.due;
+    renderBoard(latestBoard);
+  }
+  function renderSavedViews() {
+    var root = $("saved-view-list");
+    root.replaceChildren();
+    savedViews().forEach(function (view, index) {
+      var row = el("div", "project-row"),
+        button = el(
+          "button",
+          "saved-view" + (activeSavedView === index ? " active" : ""),
+          view.name,
+        );
+      button.type = "button";
+      button.addEventListener("click", function () {
+        activeSavedView = index;
+        applySnapshot(view.snapshot);
+      });
+      row.append(
+        button,
+        rowMenu([
+          [
+            "Rename",
+            function () {
+              openEditor(
+                "Rename saved view",
+                "View name",
+                view.name,
+                function (name) {
+                  var views = savedViews();
+                  views[index].name = name;
+                  storeSavedViews(views);
+                },
+              );
+            },
+          ],
+          [
+            "Delete",
+            function () {
+              var views = savedViews();
+              views.splice(index, 1);
+              activeSavedView = null;
+              storeSavedViews(views);
+              renderSavedViews();
+            },
+          ],
+        ]),
+      );
+      root.appendChild(row);
+    });
+  }
   function fetchSessions() {
-    var params = new URLSearchParams(), query = $("search-input").value.trim();
+    var params = new URLSearchParams(),
+      query = $("search-input").value.trim();
     if (query) params.set("q", query);
     if ($("here-toggle").checked) params.set("here", "1");
     var seq = ++sessionsSeq;
-    request("/api/sessions?" + params.toString()).then(function (data) {
-      if (seq === sessionsSeq) renderSessionList(data.sessions || []);
-    }).catch(function (error) { if (seq === sessionsSeq) emptyMessage($("session-list"), error.message); });
+    request("/api/sessions?" + params)
+      .then(function (data) {
+        if (seq === sessionsSeq) renderSessionList(data.sessions || []);
+      })
+      .catch(function (error) {
+        if (seq === sessionsSeq) empty($("session-list"), error.message);
+      });
   }
   function renderSessionList(sessions) {
-    var list = $("session-list"); list.replaceChildren();
-    if (!sessions.length) { emptyMessage(list, "No sessions found."); return; }
+    var list = $("session-list");
+    list.replaceChildren();
+    if (!sessions.length) return empty(list, "No sessions found.");
     sessions.forEach(function (session) {
-      var row = element("button", "session-row" + (session.session_id === activeSid ? " active" : ""));
-      var top = element("span", "session-row-top");
-      top.append(element("strong", "", session.folder || "?"), element("span", "", (session.when || "") + " · " + session.provider_name));
-      row.append(top, element("span", "session-row-title", session.title)); row.dataset.sid = session.session_id;
-      row.addEventListener("click", function () { selectSession(session.session_id); }); list.appendChild(row);
+      var row = el(
+          "button",
+          "session-row" + (session.session_id === activeSid ? " active" : ""),
+        ),
+        top = el("span", "session-row-top");
+      row.type = "button";
+      top.append(
+        el("strong", "", session.folder || "?"),
+        el("span", "", (session.when || "") + " · " + session.provider_name),
+      );
+      row.append(top, el("span", "session-row-title", session.title));
+      row.addEventListener("click", function () {
+        selectSession(session.session_id);
+      });
+      list.appendChild(row);
     });
   }
   function updateHistoryActions(meta) {
     ["claude", "codex"].forEach(function (provider) {
-      var action = meta.actions[provider], button = $("thread-" + provider), reason = $("thread-" + provider + "-reason");
-      var busy = Boolean(launchesInFlight[meta.session_id + ":" + provider]);
-      button.textContent = action.label; button.disabled = !action.available || busy;
-      button.dataset.launchKey = meta.session_id + ":" + provider; button.dataset.launchAvailable = String(action.available);
-      if (busy) button.setAttribute("aria-busy", "true"); else button.removeAttribute("aria-busy");
-      reason.textContent = action.available ? "" : (action.reason || "Unavailable");
-      if (action.available) button.removeAttribute("aria-describedby"); else button.setAttribute("aria-describedby", reason.id);
+      var action = (meta.actions || {})[provider] || {
+          label: providerName(provider),
+          available: false,
+          reason: "Unavailable",
+        },
+        button = $("thread-" + provider),
+        reason = $("thread-" + provider + "-reason"),
+        key = meta.session_id + ":" + provider;
+      button.textContent = action.label;
+      button.dataset.launchKey = key;
+      button.dataset.launchAvailable = String(Boolean(action.available));
+      button.disabled = !action.available || Boolean(launchesInFlight[key]);
+      reason.textContent = action.available
+        ? ""
+        : action.reason || "Unavailable";
     });
   }
   function selectSession(sid) {
-    activeSid = sid; activeSessionMeta = null;
-    Array.prototype.forEach.call($("session-list").querySelectorAll(".session-row"), function (row) { row.classList.toggle("active", row.dataset.sid === sid); });
-    $("thread-search").value = ""; $("thread-search").hidden = true; document.querySelector(".thread-search-label").hidden = true;
-    $("thread-actions").hidden = true; $("viewer-title").textContent = "Loading…"; $("viewer-meta").textContent = ""; $("transcript").replaceChildren();
-    request("/api/session/" + encodeURIComponent(sid)).then(function (data) {
-      if (sid !== activeSid) return;
-      activeSessionMeta = data.meta; currentTurns = data.turns || [];
-      $("viewer-title").textContent = data.meta.title;
-      $("viewer-meta").textContent = data.meta.folder + " · " + data.meta.cwd + " · " + data.meta.provider_name + " · " + data.meta.msg_count + " messages";
-      updateHistoryActions(data.meta); $("thread-actions").hidden = false; $("thread-search").hidden = false;
-      document.querySelector(".thread-search-label").hidden = false; renderTranscript("");
-    }).catch(function (error) {
-      if (sid === activeSid) { $("viewer-title").textContent = "Could not load session"; $("viewer-meta").textContent = error.message; }
-    });
+    activeSid = sid;
+    activeSessionMeta = null;
+    $("thread-search").value = "";
+    $("thread-actions").hidden = true;
+    $("thread-error").hidden = true;
+    $("viewer-title").textContent = "Loading…";
+    $("viewer-meta").textContent = "";
+    $("transcript").replaceChildren();
+    request("/api/session/" + encodeURIComponent(sid))
+      .then(function (data) {
+        if (sid !== activeSid) return;
+        activeSessionMeta = data.meta;
+        currentTurns = data.turns || [];
+        $("viewer-title").textContent = data.meta.title;
+        $("viewer-meta").textContent = [
+          data.meta.folder,
+          data.meta.cwd,
+          data.meta.provider_name,
+          data.meta.msg_count + " messages",
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        $("thread-error").textContent = data.transcript_error || "";
+        $("thread-error").hidden = !data.transcript_error;
+        updateHistoryActions(data.meta);
+        $("thread-actions").hidden = false;
+        $("thread-search").hidden = false;
+        document.querySelector(".thread-search-label").hidden = false;
+        renderTranscript("");
+      })
+      .catch(function (error) {
+        if (sid === activeSid) {
+          $("viewer-title").textContent = "Could not load session";
+          $("viewer-meta").textContent = error.message;
+        }
+      });
   }
   function renderTranscript(query) {
-    var transcript = $("transcript"); transcript.replaceChildren();
-    if (!currentTurns || !currentTurns.length) { emptyMessage(transcript, "No messages in this session."); return; }
-    var lower = query.trim().toLowerCase(), count = 0, first = null;
+    var transcript = $("transcript");
+    transcript.replaceChildren();
+    if (!currentTurns || !currentTurns.length)
+      return empty(transcript, "No messages in this session.");
+    var lower = query.trim().toLowerCase(),
+      count = 0;
     currentTurns.forEach(function (turn) {
-      var matches = !lower || turn.text.toLowerCase().indexOf(lower) !== -1;
-      if (matches) count += 1;
-      var wrapper = element("div", "turn role-" + (turn.role === "user" ? "user" : "assistant") + (matches ? "" : " thread-search-hidden"));
-      var body = element("div", "turn-body"); body.innerHTML = renderTurnBody(turn.text);
-      wrapper.append(element("div", "turn-role", turn.role === "user" ? "User" : "Assistant"), body); transcript.appendChild(wrapper);
-      if (matches && lower && !first) first = wrapper;
+      var match = !lower || String(turn.text).toLowerCase().indexOf(lower) >= 0;
+      if (match) count += 1;
+      var wrapper = el(
+          "div",
+          "turn role-" +
+            (turn.role === "user" ? "user" : "assistant") +
+            (match ? "" : " thread-search-hidden"),
+        ),
+        body = el("div", "turn-body");
+      body.innerHTML = renderTurnBody(turn.text);
+      wrapper.append(
+        el("div", "turn-role", turn.role === "user" ? "User" : "Assistant"),
+        body,
+      );
+      transcript.appendChild(wrapper);
     });
-    $("thread-search-count").textContent = lower ? count + " matching turn" + (count === 1 ? "" : "s") : "";
-    if (first) first.scrollIntoView({ block: "center" }); else if (!lower) transcript.scrollTop = transcript.scrollHeight;
+    $("thread-search-count").textContent = lower
+      ? count + " matching turn" + (count === 1 ? "" : "s")
+      : "";
+  }
+  function launchActiveThread(provider) {
+    if (!activeSessionMeta) return;
+    var key = activeSessionMeta.session_id + ":" + provider;
+    if (launchesInFlight[key]) return;
+    launchesInFlight[key] = true;
+    setLaunchBusy(key, true);
+    mutate(
+      "/api/sessions/" +
+        encodeURIComponent(activeSessionMeta.session_id) +
+        "/launch",
+      "POST",
+      { provider: provider, full_access: fullAccessEnabled() },
+    )
+      .then(function () {
+        toast("Opened " + providerName(provider) + " in Terminal");
+      })
+      .catch(function (error) {
+        toast(error.message, true);
+      })
+      .finally(function () {
+        delete launchesInFlight[key];
+        setLaunchBusy(key, false);
+      });
   }
   function activateTab(tab) {
-    var board = tab.dataset.view === "board"; $("board-view").hidden = !board; $("history-view").hidden = board;
-    Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (item) {
-      var selected = item === tab; item.classList.toggle("active", selected); item.setAttribute("aria-pressed", String(selected));
-    });
-    if (board) fetchBoard(); else fetchSessions();
+    var board = tab.dataset.view === "board";
+    $("board-view").hidden = !board;
+    $("history-view").hidden = board;
+    Array.prototype.forEach.call(
+      document.querySelectorAll(".tab"),
+      function (item) {
+        var active = item === tab;
+        item.classList.toggle("active", active);
+        item.setAttribute("aria-pressed", String(active));
+      },
+    );
+    if (board) fetchBoard();
+    else fetchSessions();
   }
-  Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (tab) {
-    tab.addEventListener("click", function () { afterPendingEdits(function () { activateTab(tab); }); });
-  });
-  Array.prototype.forEach.call(document.querySelectorAll(".work-scope"), function (button) {
-    button.addEventListener("click", function () {
-      afterPendingEdits(function () {
-        queueMode = button.dataset.scope; selectedProject = null;
-        if (latestBoard) renderBoard(latestBoard);
+  Array.prototype.forEach.call(
+    document.querySelectorAll(".tab"),
+    function (tab) {
+      tab.addEventListener("click", function () {
+        activateTab(tab);
       });
-    });
-  });
+    },
+  );
+  Array.prototype.forEach.call(
+    document.querySelectorAll(".work-scope,.scope-tab"),
+    function (button) {
+      button.addEventListener("click", function () {
+        selectScope(button.dataset.scope);
+      });
+    },
+  );
   $("group-by").addEventListener("change", function () {
-    var next = $("group-by").value, previous = groupBy;
-    afterPendingEdits(function () { groupBy = next; if (latestBoard) renderBoard(latestBoard); }).then(function (changed) {
-      if (!changed) $("group-by").value = previous;
+    groupBy = this.value;
+    activeSavedView = null;
+    renderBoard(latestBoard);
+  });
+  $("sort-by").addEventListener("change", function () {
+    sortBy = this.value;
+    activeSavedView = null;
+    renderBoard(latestBoard);
+  });
+  ["provider", "priority", "terminal", "due"].forEach(function (name) {
+    $("filter-" + name).addEventListener("change", function () {
+      filters[name] = this.value;
+      activeSavedView = null;
+      renderBoard(latestBoard);
     });
   });
-  $("work-search").addEventListener("input", debounce(function () { if (latestBoard && !hasProtectedWorkControls()) renderBoard(latestBoard); }, 120));
-  $("project-description").addEventListener("input", function () { $("description-limit").textContent = $("project-description").value.length + " / 10000"; });
-  $("cancel-description").addEventListener("click", function () { var project = selectedProjectData(); if (!project || $("cancel-description").disabled) return; $("project-description").value = project.description || ""; $("project-description").removeAttribute("aria-invalid"); $("description-error").hidden = true; renderProjectDetail(); });
+  $("clear-filters").addEventListener("click", function () {
+    filters = { provider: "any", priority: "any", terminal: "any", due: "any" };
+    ["provider", "priority", "terminal", "due"].forEach(function (name) {
+      $("filter-" + name).value = "any";
+    });
+    renderBoard(latestBoard);
+  });
+  $("work-search").addEventListener(
+    "input",
+    debounce(function () {
+      renderBoard(latestBoard);
+    }, 100),
+  );
+  $("edit-project-description").addEventListener("click", function () {
+    $("project-description-editor").hidden = false;
+    $("project-description").focus();
+  });
+  $("project-description").addEventListener("input", function () {
+    $("description-limit").textContent = this.value.length + " / 10000";
+  });
+  $("cancel-description").addEventListener("click", function () {
+    var project = selectedProjectData();
+    $("project-description").value = project ? project.description || "" : "";
+    $("project-description-editor").hidden = true;
+    $("description-error").hidden = true;
+  });
   $("save-description").addEventListener("click", function () {
-    var project = selectedProjectData(), description = $("project-description"), value = description.value; if (!project) return;
-    var button = $("save-description"), cancel = $("cancel-description"); button.disabled = true; cancel.disabled = true; description.disabled = true; description.setAttribute("aria-busy", "true");
-    mutate("/api/projects/" + encodeURIComponent(project.project_key), "PATCH", { description: value }).then(function (response) {
-      project.description = response.project.description; description.removeAttribute("aria-invalid"); $("description-error").hidden = true; announce("Project description saved."); toast("Project description saved");
-    }).catch(function (error) { description.setAttribute("aria-invalid", "true"); $("description-error").textContent = "Could not save: " + error.message; $("description-error").hidden = false; announce("Description save failed. Your text is retained."); toast(error.message, true); }).finally(function () { button.disabled = false; cancel.disabled = false; description.disabled = false; description.removeAttribute("aria-busy"); if (description.getAttribute("aria-invalid")) description.focus(); });
+    var project = selectedProjectData();
+    if (!project || this.disabled) return;
+    var description = $("project-description");
+    $("save-description").disabled =
+      $("cancel-description").disabled =
+      description.disabled =
+        true;
+    mutate(
+      "/api/projects/" + encodeURIComponent(project.project_key),
+      "PATCH",
+      { description: description.value },
+    )
+      .then(function (response) {
+        project.description = response.project.description;
+        $("project-description-editor").hidden = true;
+        $("description-error").hidden = true;
+        renderProjectDetail();
+        toast("Project description saved");
+      })
+      .catch(function (error) {
+        $("description-error").textContent = error.message;
+        $("description-error").hidden = false;
+      })
+      .finally(function () {
+        $("save-description").disabled =
+          $("cancel-description").disabled =
+          description.disabled =
+            false;
+      });
+  });
+  $("new-folder").addEventListener("click", function () {
+    openEditor("New folder", "Folder name", "", function (name) {
+      return mutate("/api/folders", "POST", { name: name });
+    });
+  });
+  $("save-view").addEventListener("click", function () {
+    openEditor("Save view", "View name", "", function (name) {
+      var views = savedViews();
+      views.push({ name: name, snapshot: snapshotView() });
+      storeSavedViews(views);
+    });
+  });
+  $("editor-form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    if (!editorAction) return;
+    var name = $("editor-input").value.trim();
+    if (!name && !editorAllowEmpty) {
+      $("editor-error").textContent = "A name is required.";
+      $("editor-error").hidden = false;
+      return;
+    }
+    $("editor-submit").disabled = true;
+    Promise.resolve(editorAction(name))
+      .then(function () {
+        $("editor-dialog").close();
+        editorAction = null;
+        return fetchBoard(true);
+      })
+      .catch(function (error) {
+        $("editor-error").textContent = error.message;
+        $("editor-error").hidden = false;
+      })
+      .finally(function () {
+        $("editor-submit").disabled = false;
+      });
+  });
+  $("editor-cancel").addEventListener("click", function () {
+    if ($("editor-submit").disabled) return;
+    editorAction = null;
+    $("editor-dialog").close();
+  });
+  $("close-task-dialog").addEventListener("click", function () {
+    closeTaskDialog();
+  });
+  function closeTaskDialog() {
+    if (document.activeElement && document.activeElement.blur)
+      document.activeElement.blur();
+    var dialog = $("task-dialog"),
+      version = dialog.dataset.openVersion,
+      pending = rowMutationTails[dialog.dataset.taskId];
+    Promise.allSettled(pending ? [pending] : []).then(function () {
+      if (!dialog.open || dialog.dataset.openVersion !== version) return;
+      if ($("dialog-task-fields").querySelector('[aria-invalid="true"]')) {
+        toast(
+          "An edit did not save. Correct it before closing, or use Discard unsaved edits.",
+          true,
+        );
+        $("discard-task-edits").hidden = false;
+        return;
+      }
+      $("task-dialog").close();
+    });
+  }
+  $("task-dialog").addEventListener("cancel", function (event) {
+    event.preventDefault();
+    closeTaskDialog();
+  });
+  $("discard-task-edits").addEventListener("click", function () {
+    $("task-dialog").close();
+  });
+  $("task-dialog").addEventListener("close", function () {
+    $("history-view").appendChild($("viewer"));
+    $("topbar").appendChild($("full-access-label"));
+    $("discard-task-edits").hidden = true;
+    renderBoard(latestBoard);
+    fetchBoard();
   });
   $("search-input").addEventListener("input", debounce(fetchSessions, 250));
   $("here-toggle").addEventListener("change", fetchSessions);
-  $("thread-search").addEventListener("input", debounce(function () { renderTranscript($("thread-search").value); }, 150));
-  function launchActiveThread(provider) {
-    if (!activeSessionMeta) return;
-    var launchKey = activeSessionMeta.session_id + ":" + provider, button = $("thread-" + provider);
-    if (launchesInFlight[launchKey]) return;
-    launchesInFlight[launchKey] = true; setLaunchBusy(launchKey, true);
-    mutate("/api/sessions/" + encodeURIComponent(activeSessionMeta.session_id) + "/launch", "POST", { provider: provider, full_access: fullAccessEnabled() }).then(function () {
-      toast("Opened " + providerName(provider) + " in Terminal");
-    }).catch(function (error) { toast(error.message, true); }).finally(function () { delete launchesInFlight[launchKey]; setLaunchBusy(launchKey, false); if (activeSessionMeta) updateHistoryActions(activeSessionMeta); });
-  }
-  $("thread-claude").addEventListener("click", function () { launchActiveThread("claude"); });
-  $("thread-codex").addEventListener("click", function () { launchActiveThread("codex"); });
-  request("/api/meta").then(function (meta) {
-    csrfToken = meta.csrf_token;
-    if (meta.here_only_forced) { $("here-toggle").checked = true; $("here-toggle").disabled = true; }
-    return fetchBoard();
-  }).then(scheduleBoardPoll).catch(function (error) { toast(error.message, true); });
-  window.addEventListener("pagehide", function () { if (boardTimer) clearTimeout(boardTimer); flushDirtyEditsOnPageHide(); });
+  $("thread-search").addEventListener(
+    "input",
+    debounce(function () {
+      renderTranscript($("thread-search").value);
+    }, 120),
+  );
+  $("thread-claude").addEventListener("click", function () {
+    launchActiveThread("claude");
+  });
+  $("thread-codex").addEventListener("click", function () {
+    launchActiveThread("codex");
+  });
+  request("/api/meta")
+    .then(function (meta) {
+      csrfToken = meta.csrf_token;
+      if (meta.here_only_forced) {
+        $("here-toggle").checked = true;
+        $("here-toggle").disabled = true;
+      }
+      return fetchBoard();
+    })
+    .then(scheduleBoardPoll)
+    .catch(function (error) {
+      toast(error.message, true);
+    });
+  window.addEventListener("pagehide", function () {
+    if (boardTimer) clearTimeout(boardTimer);
+  });
+  window.addEventListener("beforeunload", function (event) {
+    if (
+      projectDescriptionDirty() ||
+      Object.keys(rowMutationTails).length ||
+      document.querySelector("dialog[open]")
+    ) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+  });
 })();

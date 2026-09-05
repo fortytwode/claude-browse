@@ -49,7 +49,18 @@ CREATE TABLE IF NOT EXISTS project_settings (
     project_key TEXT PRIMARY KEY,
     description TEXT NOT NULL DEFAULT '',
     position    INTEGER NOT NULL,
-    updated_at  REAL NOT NULL
+    updated_at  REAL NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    folder_id    TEXT
+)
+"""
+
+_FOLDERS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS folders (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    position   INTEGER NOT NULL,
+    updated_at REAL NOT NULL
 )
 """
 
@@ -74,6 +85,10 @@ def planning_migration_backup_path() -> Path:
 
 def project_resolution_migration_backup_path() -> Path:
     return Path(f"{store._DB_PATH}.pre-project-resolution.bak")
+
+
+def sidebar_migration_backup_path() -> Path:
+    return Path(f"{store._DB_PATH}.pre-sidebar-organization.bak")
 
 
 def _backup_database_to(conn: sqlite3.Connection, backup_path: Path) -> None:
@@ -173,6 +188,7 @@ def _migrate_planning(conn: sqlite3.Connection) -> None:
                 "NOT NULL DEFAULT 0"
             )
         conn.execute(_PROJECT_SETTINGS_SCHEMA)
+        conn.execute(_FOLDERS_SCHEMA)
         now = time.time()
         project_rows = conn.execute(
             """SELECT project_key, MIN(position) AS first_position
@@ -192,8 +208,39 @@ def _migrate_planning(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_sidebar(conn: sqlite3.Connection) -> None:
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(project_settings)").fetchall()
+    }
+    has_folders = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'folders'"
+    ).fetchone()
+    if {"display_name", "folder_id"} <= columns and has_folders:
+        return
+    _backup_database_to(conn, sidebar_migration_backup_path())
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if "display_name" not in columns:
+            conn.execute(
+                "ALTER TABLE project_settings ADD COLUMN display_name "
+                "TEXT NOT NULL DEFAULT ''"
+            )
+        if "folder_id" not in columns:
+            conn.execute("ALTER TABLE project_settings ADD COLUMN folder_id TEXT")
+        conn.execute(_FOLDERS_SCHEMA)
+        conn.execute(
+            "UPDATE project_settings SET folder_id = NULL "
+            "WHERE folder_id IS NOT NULL AND folder_id NOT IN (SELECT id FROM folders)"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def _ensure_planning_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_PROJECT_SETTINGS_SCHEMA)
+    conn.execute(_FOLDERS_SCHEMA)
     conn.execute(_PROJECT_DESCRIPTION_FRAGMENTS_SCHEMA)
     conn.execute(
         """CREATE INDEX IF NOT EXISTS idx_work_items_project_priority_position
@@ -211,6 +258,7 @@ def _conn():
         conn.execute(_SCHEMA)
         _migrate_overlay(conn)
         _migrate_planning(conn)
+        _migrate_sidebar(conn)
         _ensure_planning_schema(conn)
     return conn
 
@@ -222,6 +270,22 @@ def _text(value: object, field: str, *, limit: int, required: bool = False) -> s
     if len(result) > limit:
         raise ValueError(f"{field} must be at most {limit} characters")
     return result
+
+
+def _strict_text(value: object, field: str, *, limit: int, required: bool = False) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    return _text(value, field, limit=limit, required=required)
+
+
+def _project_key(value: object) -> str:
+    return _strict_text(value, "project_key", limit=1000, required=True)
+
+
+def _folder_id(value: object) -> str | None:
+    if value is None:
+        return None
+    return _strict_text(value, "folder_id", limit=200, required=True)
 
 
 def _due(value: object) -> str | None:
@@ -636,18 +700,24 @@ def _ensure_project_setting(
 ) -> None:
     if previous_key and previous_key != project_key:
         previous = conn.execute(
-            "SELECT description, position FROM project_settings WHERE project_key = ?",
+            """SELECT description, position, display_name, folder_id
+               FROM project_settings WHERE project_key = ?""",
             (previous_key,),
         ).fetchone()
         conn.execute(
             """INSERT OR IGNORE INTO project_settings
-               (project_key, description, position, updated_at)
-               SELECT ?, description, position, ? FROM project_settings
+               (project_key, description, position, updated_at, display_name, folder_id)
+               SELECT ?, description, position, ?, display_name,
+                      CASE WHEN folder_id IS NULL
+                                 OR folder_id IN (SELECT id FROM folders)
+                           THEN folder_id ELSE NULL END
+               FROM project_settings
                WHERE project_key = ?""",
             (project_key, time.time(), previous_key),
         )
         current = conn.execute(
-            "SELECT description, position FROM project_settings WHERE project_key = ?",
+            """SELECT description, position, display_name, folder_id
+               FROM project_settings WHERE project_key = ?""",
             (project_key,),
         ).fetchone()
         if previous is not None and current is not None:
@@ -679,6 +749,28 @@ def _ensure_project_setting(
                              description = excluded.description""",
                         (project_key, previous_key, old_description, time.time()),
                     )
+            old_display_name = str(previous["display_name"] or "").strip()
+            current_display_name = str(current["display_name"] or "").strip()
+            old_folder_id = previous["folder_id"]
+            current_folder_id = current["folder_id"]
+            fields: dict[str, object] = {}
+            if old_display_name and not current_display_name:
+                fields["display_name"] = old_display_name
+            if (
+                old_folder_id is not None
+                and current_folder_id is None
+                and conn.execute(
+                    "SELECT 1 FROM folders WHERE id = ?", (old_folder_id,)
+                ).fetchone()
+            ):
+                fields["folder_id"] = old_folder_id
+            if fields:
+                fields["updated_at"] = time.time()
+                assignments = ", ".join(f"{field} = ?" for field in fields)
+                conn.execute(
+                    f"UPDATE project_settings SET {assignments} WHERE project_key = ?",
+                    (*fields.values(), project_key),
+                )
     if conn.execute(
         "SELECT 1 FROM project_settings WHERE project_key = ?", (project_key,)
     ).fetchone():
@@ -688,8 +780,8 @@ def _ensure_project_setting(
     ).fetchone()[0]
     conn.execute(
         """INSERT OR IGNORE INTO project_settings
-           (project_key, description, position, updated_at)
-           VALUES (?, '', ?, ?)""",
+           (project_key, description, position, updated_at, display_name, folder_id)
+           VALUES (?, '', ?, ?, '', NULL)""",
         (project_key, max(int(existing_max) + 1, time.time_ns()), time.time()),
     )
 
@@ -698,10 +790,13 @@ def list_projects() -> list[dict]:
     with _conn() as conn:
         rows = conn.execute(
             """SELECT work_items.project_key,
-                      MIN(work_items.project_name) AS name,
+                      COALESCE(NULLIF(project_settings.display_name, ''),
+                               MIN(work_items.project_name)) AS name,
                       MIN(work_items.project_path) AS path,
                       project_settings.description,
-                      project_settings.position
+                      project_settings.position,
+                      project_settings.display_name,
+                      project_settings.folder_id
                FROM work_items
                JOIN project_settings USING (project_key)
                WHERE work_items.session_id IS NOT NULL
@@ -726,11 +821,24 @@ def list_projects() -> list[dict]:
     return projects
 
 
-def set_project_description(project_key: object, description: object) -> dict:
-    key = _text(project_key, "project_key", limit=1000, required=True)
-    value = _text(description, "description", limit=10_000)
+def update_project(project_key: object, **changes: object) -> dict:
+    allowed = {"description", "display_name", "folder_id"}
+    unknown = set(changes) - allowed
+    if unknown:
+        raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
+    key = _project_key(project_key)
+    values: dict[str, object] = {}
+    if "description" in changes:
+        values["description"] = _text(changes["description"], "description", limit=10_000)
+    if "display_name" in changes:
+        values["display_name"] = _strict_text(
+            changes["display_name"], "display_name", limit=120
+        )
+    if "folder_id" in changes:
+        values["folder_id"] = _folder_id(changes["folder_id"])
     conn = _conn()
     with conn:
+        conn.execute("BEGIN IMMEDIATE")
         exists = conn.execute(
             """SELECT 1 FROM work_items
                WHERE project_key = ? AND session_id IS NOT NULL LIMIT 1""",
@@ -739,12 +847,96 @@ def set_project_description(project_key: object, description: object) -> dict:
         if not exists:
             raise ValueError("project not found")
         _ensure_project_setting(conn, key)
+        if values.get("folder_id") is not None and not conn.execute(
+            "SELECT 1 FROM folders WHERE id = ?", (values["folder_id"],)
+        ).fetchone():
+            raise ValueError("folder not found")
+        if values:
+            values["updated_at"] = time.time()
+            assignments = ", ".join(f"{field} = ?" for field in values)
+            conn.execute(
+                f"UPDATE project_settings SET {assignments} WHERE project_key = ?",
+                (*values.values(), key),
+            )
+    return next(project for project in list_projects() if project["project_key"] == key)
+
+
+def set_project_description(project_key: object, description: object) -> dict:
+    return update_project(project_key, description=description)
+
+
+def list_folders() -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT id AS folder_id, name, position FROM folders ORDER BY position, id"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def create_folder(name: object) -> dict:
+    value = _strict_text(name, "name", limit=120, required=True)
+    conn = _conn()
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing_max = conn.execute(
+            "SELECT COALESCE(MAX(position), 0) FROM folders"
+        ).fetchone()[0]
+        folder_id = str(uuid.uuid4())
+        position = max(int(existing_max) + 1, time.time_ns())
+        now = time.time()
         conn.execute(
-            "UPDATE project_settings SET description = ?, updated_at = ? "
-            "WHERE project_key = ?",
+            "INSERT INTO folders (id, name, position, updated_at) VALUES (?, ?, ?, ?)",
+            (folder_id, value, position, now),
+        )
+    return {"folder_id": folder_id, "name": value, "position": position}
+
+
+def update_folder(folder_id: object, name: object) -> dict:
+    key = _folder_id(folder_id)
+    if key is None:
+        raise ValueError("folder_id must be a non-empty string")
+    value = _strict_text(name, "name", limit=120, required=True)
+    conn = _conn()
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            "UPDATE folders SET name = ?, updated_at = ? WHERE id = ?",
             (value, time.time(), key),
         )
-    return next(project for project in list_projects() if project["project_key"] == key)
+        if not cursor.rowcount:
+            raise ValueError("folder not found")
+        row = conn.execute(
+            "SELECT id AS folder_id, name, position FROM folders WHERE id = ?", (key,)
+        ).fetchone()
+    return dict(row)
+
+
+def reorder_folders(folder_ids: object) -> list[dict]:
+    if not isinstance(folder_ids, list):
+        raise ValueError("folder_ids must be a list")
+    if len(folder_ids) > _REORDER_LIMIT:
+        raise ValueError(f"folder_ids may contain at most {_REORDER_LIMIT} items")
+    ids = [
+        _strict_text(folder_id, "folder_ids", limit=200, required=True)
+        for folder_id in folder_ids
+    ]
+    if len(set(ids)) != len(ids):
+        raise ValueError("folder_ids must be unique")
+    conn = _conn()
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute("SELECT id, position FROM folders").fetchall()
+        existing = {row["id"] for row in rows}
+        if set(ids) != existing:
+            raise ValueError("folder_ids must contain every existing folder exactly once")
+        slots = sorted(int(row["position"]) for row in rows)
+        now = time.time()
+        for folder_id, slot in zip(ids, slots, strict=True):
+            conn.execute(
+                "UPDATE folders SET position = ?, updated_at = ? WHERE id = ?",
+                (slot, now, folder_id),
+            )
+    return list_folders()
 
 
 def reorder_projects(project_keys: object) -> list[dict]:

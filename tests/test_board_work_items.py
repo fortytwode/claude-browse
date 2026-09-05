@@ -305,7 +305,9 @@ def test_reconciliation_merges_distinct_transient_and_repository_descriptions(
             (repo_key, existing_item["task_id"]),
         )
         conn.execute(
-            "INSERT INTO project_settings VALUES (?, ?, ?, ?)",
+            """INSERT INTO project_settings
+               (project_key, description, position, updated_at)
+               VALUES (?, ?, ?, ?)""",
             (repo_key, repository_notes, 1, time.time()),
         )
     monkeypatch.setattr(
