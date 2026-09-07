@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import plistlib
+import subprocess
 import sys
 from pathlib import Path
 
@@ -80,6 +81,62 @@ def test_missing_compiler_reports_fallback(notifier_installer, monkeypatch):
     ok, status = notifier_installer.install()
     assert not ok
     assert "Script Editor" in status
+
+
+def test_install_builds_signs_and_atomically_replaces_bundle(notifier_installer, monkeypatch):
+    monkeypatch.setattr(notifier_installer.sys, "platform", "darwin")
+    monkeypatch.setattr(notifier_installer, "_swiftc", lambda: "/usr/bin/swiftc")
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        if command[0] == "/usr/bin/swiftc":
+            target = Path(command[command.index("-o") + 1])
+            target.write_text("binary")
+            target.chmod(0o755)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(notifier_installer.subprocess, "run", run)
+
+    ok, status = notifier_installer.install()
+
+    assert ok
+    assert "installed dedicated notifier" in status
+    assert notifier_installer.is_current()
+    assert any(command[0] == "codesign" for command in commands)
+    assert any(command[0] == "open" for command in commands)
+
+
+def test_failed_bundle_swap_restores_previous_install(notifier_installer, monkeypatch):
+    monkeypatch.setattr(notifier_installer.sys, "platform", "darwin")
+    monkeypatch.setattr(notifier_installer, "_swiftc", lambda: "/usr/bin/swiftc")
+    destination = notifier_installer.app_path()
+    destination.mkdir(parents=True)
+    marker = destination / "old-install"
+    marker.write_text("preserve me")
+
+    def run(command, **_kwargs):
+        if command[0] == "/usr/bin/swiftc":
+            target = Path(command[command.index("-o") + 1])
+            target.write_text("binary")
+            target.chmod(0o755)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    original_rename = Path.rename
+
+    def fail_staged_swap(path, target):
+        if path.name == notifier_installer.APP_NAME and ".agent-board-notifier-" in str(path.parent):
+            raise OSError("swap failed")
+        return original_rename(path, target)
+
+    monkeypatch.setattr(notifier_installer.subprocess, "run", run)
+    monkeypatch.setattr(Path, "rename", fail_staged_swap)
+
+    ok, status = notifier_installer.install()
+
+    assert not ok
+    assert "swap failed" in status
+    assert marker.read_text() == "preserve me"
 
 
 def test_install_sh_runs_dedicated_notifier_installer():

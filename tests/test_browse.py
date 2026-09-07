@@ -1899,6 +1899,8 @@ def test_native_resume_uses_compact_continuation_for_oversized_codex(monkeypatch
 
 def test_native_resume_no_fork_flag_skips_collision_check(monkeypatch):
     """--no-fork restores the old attach-anyway behavior."""
+    from claude_browse.board import commands as board_commands
+
     monkeypatch.setattr(browse, "_require_binary", lambda p: None)
     called: list[str] = []
     monkeypatch.setattr(
@@ -1908,11 +1910,47 @@ def test_native_resume_no_fork_flag_skips_collision_check(monkeypatch):
     )
     execd: list[list[str]] = []
     monkeypatch.setattr(browse.os, "execvp", lambda f, c: execd.append(c))
+    monkeypatch.setattr(
+        board_commands,
+        "_reserve_native_launch",
+        lambda *_args: pytest.fail("--no-fork must bypass launch arbitration"),
+    )
 
     browse._native_resume({}, "codex", "abc-123", "/proj", (), True, fork=False)
 
     assert not called
     assert execd and execd[0][:3] == ["codex", "resume", "abc-123"]
+
+
+def test_native_resume_forks_when_an_attach_launch_is_already_reserved(monkeypatch):
+    from claude_browse.board import commands as board_commands
+
+    monkeypatch.setattr(browse, "_require_binary", lambda p: None)
+    monkeypatch.setattr(browse, "_session_holder", lambda sid, binary: None)
+    monkeypatch.setattr(
+        board_commands, "_reserve_native_launch", lambda *_args: (None, False)
+    )
+    execd: list[list[str]] = []
+    monkeypatch.setattr(browse.os, "execvp", lambda f, c: execd.append(c))
+
+    browse._native_resume({}, "codex", "abc-123", "/proj", (), True, fork=None)
+
+    assert execd and execd[0][:3] == ["codex", "fork", "abc-123"]
+
+
+def test_native_fork_does_not_acquire_attach_reservation(monkeypatch):
+    from claude_browse.board import commands as board_commands
+
+    monkeypatch.setattr(browse, "_require_binary", lambda p: None)
+    monkeypatch.setattr(browse, "_session_holder", lambda sid, binary: None)
+    monkeypatch.setattr(
+        board_commands,
+        "_reserve_native_launch",
+        lambda *_args: pytest.fail("fork must not reserve the original attach"),
+    )
+    monkeypatch.setattr(browse.os, "execvp", lambda _f, _c: None)
+
+    browse._native_resume({}, "codex", "abc-123", "/proj", (), True, fork=True)
 
 
 def test_native_resume_fork_flag_forces_fork(monkeypatch):

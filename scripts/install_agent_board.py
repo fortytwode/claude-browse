@@ -23,6 +23,7 @@ import os
 import shlex
 import shutil
 import sys
+import tempfile
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -171,6 +172,30 @@ def _load_json(path: Path) -> dict:
         return {}
     text = path.read_text().strip()
     return json.loads(text) if text else {}
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    """Replace a live hook config only after a complete durable write."""
+    data = json.dumps(payload, indent=2) + "\n"
+    json.loads(data)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.exists():
+            os.chmod(temp_path, path.stat().st_mode & 0o777)
+        os.replace(temp_path, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +440,7 @@ def run(*, check_only: bool = False, include_codex: bool = True) -> int:
             _backup(settings_path)
         settings, changed = wire_claude(settings)
         if changed:
-            settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+            _write_json_atomic(settings_path, settings)
             print(f"  Wired agent-board hooks + statusLine into {settings_path}")
 
     # --- Codex ---
@@ -430,7 +455,7 @@ def run(*, check_only: bool = False, include_codex: bool = True) -> int:
                 _backup(codex_path)
             codex_file, changed = wire_codex(codex_file)
             if changed:
-                codex_path.write_text(json.dumps(codex_file, indent=2) + "\n")
+                _write_json_atomic(codex_path, codex_file)
                 print(f"  Wired agent-board hooks into {codex_path}")
                 codex_changed = True
         if feature_problem:

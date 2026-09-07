@@ -43,6 +43,9 @@ board-sync = [
     "requests>=2.31",
     "anthropic>=0.40",
 ]
+board-relay = [
+    "websockets>=13,<16",
+]
 
 [project.urls]
 Homepage = "https://github.com/fortytwode/claude-browse"

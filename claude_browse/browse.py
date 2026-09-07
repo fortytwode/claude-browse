@@ -1285,8 +1285,35 @@ def _native_resume(
 
     cmd = spec.native_resume_cmd(session_id, yolo)
     mode = " (yolo)" if yolo else ""
+    from claude_browse.board import commands as board_commands
+
+    reservation_fd = None
+    reserved = True
+    if fork is not False:
+        reservation_fd, reserved = board_commands._reserve_native_launch(
+            session_id, provider
+        )
+    if not reserved:
+        fork_cmd = spec.native_fork_cmd(session_id, yolo)
+        if fork_cmd is None:
+            print(
+                f"Thread launch is already in progress, and {spec.display_name} "
+                "cannot fork it. Wait a moment and try again.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(
+            f"Thread launch is already in progress; forking{mode} in "
+            f"{spec.display_name} ({folder_name(cwd, prefixes)})..."
+        )
+        os.execvp(fork_cmd[0], fork_cmd)
+        return
     print(f"Resuming{mode} in {spec.display_name} ({folder_name(cwd, prefixes)})...")
-    os.execvp(spec.binary, cmd)
+    try:
+        os.execvp(spec.binary, cmd)
+    finally:
+        if reservation_fd is not None:
+            os.close(reservation_fd)
 
 
 def _continue_in_provider(
