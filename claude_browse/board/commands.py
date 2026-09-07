@@ -271,18 +271,32 @@ def launch_direct_session(
     # Import lazily to keep hooks and simple board commands cheap.
     from claude_browse import browse
 
-    browse._open_in_target_provider(
-        session,
-        source_provider,
-        target_provider,
-        session_id,
-        cwd,
-        (),
-        full_access,
-        # Dormant sessions attach; _native_resume owns the reservation at the
-        # exact point where it knows an attach (rather than a fork) will occur.
-        fork=None,
-    )
+    previous = os.environ.get("AGENT_BOARD_MANAGED_TERMINAL_TITLE")
+    previous_claude_title = os.environ.get("CLAUDE_CODE_DISABLE_TERMINAL_TITLE")
+    os.environ["AGENT_BOARD_MANAGED_TERMINAL_TITLE"] = "1"
+    os.environ["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] = "1"
+    try:
+        browse._open_in_target_provider(
+            session,
+            source_provider,
+            target_provider,
+            session_id,
+            cwd,
+            (),
+            full_access,
+            # Dormant sessions attach; _native_resume owns the reservation at the
+            # exact point where it knows an attach (rather than a fork) will occur.
+            fork=None,
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("AGENT_BOARD_MANAGED_TERMINAL_TITLE", None)
+        else:
+            os.environ["AGENT_BOARD_MANAGED_TERMINAL_TITLE"] = previous
+        if previous_claude_title is None:
+            os.environ.pop("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", None)
+        else:
+            os.environ["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] = previous_claude_title
 
 
 def open_in_terminal(command: str) -> None:

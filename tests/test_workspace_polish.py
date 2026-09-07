@@ -50,6 +50,8 @@ def test_task_new_ignores_missing_transcript_and_executes_fresh_argv(tmp_path, m
 
     spec = get_provider(provider)
     expected = [spec.binary]
+    if provider == "codex":
+        expected.extend(["-c", "tui.terminal_title=[]"])
     if spec.handoff_yolo_flag:
         expected.append(spec.handoff_yolo_flag)
     assert calls == [("cwd", str(cwd)), (spec.binary, expected)]

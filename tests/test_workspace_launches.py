@@ -127,13 +127,29 @@ def test_cli_uses_effective_cwd_and_existing_provider_policy(tmp_path, monkeypat
     token = prepare_task(task, provider, full_access=True)
     calls = []
     monkeypatch.setattr(os, "chdir", lambda cwd: calls.append(("cwd", cwd)))
-    monkeypatch.setattr(browse, "_open_in_target_provider", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(
+        browse,
+        "_open_in_target_provider",
+        lambda *args, **kwargs: calls.append(
+            (
+                args,
+                kwargs,
+                os.environ.get(launches.TOKEN_ENV),
+                os.environ.get("AGENT_BOARD_MANAGED_TERMINAL_TITLE"),
+                os.environ.get("CLAUDE_CODE_DISABLE_TERMINAL_TITLE"),
+            )
+        ),
+    )
     launches.execute(token)
     assert calls[0] == ("cwd", expected_cwd)
-    args, kwargs = calls[1]
+    args, kwargs, launch_token, title_marker, claude_title_disabled = calls[1]
     assert args[2] == provider and args[4] == expected_cwd and args[6] is True
     assert kwargs == {"fork": None, "relocate": expected_relocate}
-    assert os.environ[launches.TOKEN_ENV] == token
+    assert launch_token == token
+    assert title_marker == claude_title_disabled == "1"
+    assert launches.TOKEN_ENV not in os.environ
+    assert "AGENT_BOARD_MANAGED_TERMINAL_TITLE" not in os.environ
+    assert "CLAUDE_CODE_DISABLE_TERMINAL_TITLE" not in os.environ
 
 
 def test_exec_failure_keeps_original_task_and_records_failure(tmp_path, monkeypatch):

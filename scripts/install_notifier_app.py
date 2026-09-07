@@ -17,7 +17,7 @@ SOURCE = REPO_DIR / "claude_browse/board/macos/AgentBoardNotifier.swift"
 APP_NAME = "Agent Board Notifier.app"
 EXECUTABLE_NAME = "AgentBoardNotifier"
 BUNDLE_ID = "com.fortytwode.agent-board-notifier"
-BUILD_SCHEMA = "2"
+BUILD_SCHEMA = "3"
 SIGNING_REQUIREMENT = f'=designated => identifier "{BUNDLE_ID}"'
 
 
@@ -38,12 +38,14 @@ def _build_hash() -> str:
     digest = hashlib.sha256()
     digest.update(SOURCE.read_bytes())
     digest.update(BUILD_SCHEMA.encode())
+    digest.update(str(REPO_DIR / "agent-board").encode())
     return digest.hexdigest()
 
 
 def _info_plist(build_hash: str) -> dict:
     return {
         "AgentBoardBuildHash": build_hash,
+        "AgentBoardFocusCommand": str(REPO_DIR / "agent-board"),
         "CFBundleDisplayName": "Agent Board",
         "CFBundleExecutable": EXECUTABLE_NAME,
         "CFBundleIdentifier": BUNDLE_ID,
@@ -53,7 +55,7 @@ def _info_plist(build_hash: str) -> dict:
         "CFBundleShortVersionString": "1.0",
         "CFBundleVersion": "1",
         "LSMinimumSystemVersion": "12.0",
-        "LSUIElement": True,
+        "LSUIElement": False,
     }
 
 
@@ -109,6 +111,19 @@ def _swiftc() -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def _stop_running_helper() -> None:
+    """Release the singleton lock before activating a freshly built helper."""
+    try:
+        subprocess.run(
+            ["/usr/bin/pkill", "-x", EXECUTABLE_NAME],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def install() -> tuple[bool, str]:
     """Return ``(dedicated_app_available, human-readable status)``."""
     if sys.platform != "darwin":
@@ -147,6 +162,7 @@ def install() -> tuple[bool, str]:
             timeout=30,
             check=True,
         )
+        _stop_running_helper()
 
         backup = destination.with_name(destination.name + ".previous")
         if backup.exists():

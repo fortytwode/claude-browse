@@ -3538,6 +3538,55 @@ def search(
     return trimmed
 
 
+def matching_session_ids(conn: sqlite3.Connection, query: str) -> list[str]:
+    """Return every indexed session ID matching a non-empty Work query.
+
+    Work search needs set membership, not snippets or ranking. Keeping this
+    ID-only path separate avoids capping task visibility at the Thread History
+    result limit or materializing full transcript result rows.
+    """
+    if not query.strip():
+        return []
+    strict_plan = build_query_plan(query)
+    exact = _exact_identifier_results(conn, query, 200)
+    exact_ids = [str(row["session_id"]) for row in exact]
+    if strict_plan.low_confidence:
+        return exact_ids
+
+    plan = _discriminative_query_plan(conn, strict_plan)
+    candidates: list[QueryPlan | None] = []
+    if _has_unclosed_quote(query):
+        candidates.append(_prefix_fallback_plan(plan))
+    candidates.extend(
+        [
+            plan,
+            _phrase_fallback_plan(plan),
+            _prefix_fallback_plan(plan),
+            _retokenize_fallback_plan(strict_plan, query),
+            _suffix_trim_fallback_plan(conn, plan),
+        ]
+    )
+    seen_queries: set[str] = set()
+    for candidate in candidates:
+        if candidate is None or candidate.low_confidence:
+            continue
+        fts_query = _terms_to_fts_query(list(candidate.fts_terms))
+        if not fts_query or fts_query in seen_queries:
+            continue
+        seen_queries.add(fts_query)
+        try:
+            rows = conn.execute(
+                "SELECT sid FROM sessions_fts WHERE sessions_fts MATCH ?",
+                (fts_query,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        if rows:
+            matched = [str(row[0]) for row in rows]
+            return list(dict.fromkeys([*exact_ids, *matched]))
+    return exact_ids
+
+
 # --- ranker_v1 -----------------------------------------------------------
 
 # Per-column BM25 weights, in sessions_fts column order (sid, cwd, title,

@@ -401,6 +401,55 @@ def test_automatic_thread_update_and_board_roundtrip(web_server):
     assert [item["title"] for item in board["tasks"]] == ["Ship it"]
 
 
+def test_board_search_matches_full_history_from_an_earlier_continuation(web_server):
+    base, _server = web_server
+    conn = fts.open_db(fts.DB_PATH)
+    _seed(conn, "search-old", cwd="/w/search", first_msg="design the launcher")
+    _seed(conn, "search-current", cwd="/w/search", first_msg="unrelated follow-up")
+    conn.execute(
+        "UPDATE sessions_fts SET user_text = ? WHERE sid = ?",
+        ("design the launcher", "search-old"),
+    )
+    conn.commit()
+    conn.close()
+    task = _board_thread("search-old", cwd="/w/search", name="Current task name")
+    continued = work_items.attach_continuation(
+        task["task_id"],
+        {"session_id": "search-current", "provider": "claude", "cwd": "/w/search"},
+        "search-old",
+    )
+
+    _status, board = _get_json(base + "/api/board?q=launcher")
+
+    assert board["search_query"] == "launcher"
+    assert board["search_task_ids"] == [continued["task_id"]]
+    assert next(item for item in board["tasks"] if item["task_id"] == continued["task_id"])[
+        "session_id"
+    ] == "search-current"
+
+
+def test_board_search_membership_is_not_capped_by_history_display_limit(web_server):
+    base, server = web_server
+    conn = fts.open_db(fts.DB_PATH)
+    for sid in ("match-one", "match-two"):
+        _seed(conn, sid, cwd="/w/search")
+        conn.execute(
+            "UPDATE sessions_fts SET user_text = ? WHERE sid = ?",
+            (f"launcher notes for {sid}", sid),
+        )
+        _board_thread(sid, cwd="/w/search")
+    conn.commit()
+    conn.close()
+    server.session_limit = 1
+
+    _status, board = _get_json(base + "/api/board?q=launcher")
+
+    matching_tasks = {
+        item["task_id"] for item in board["tasks"] if item["session_id"] in {"match-one", "match-two"}
+    }
+    assert set(board["search_task_ids"]) == matching_tasks
+
+
 def test_automatic_due_date_defaults_to_last_pause_until_overridden(web_server):
     base, _server = web_server
     task = _board_thread("paused", provider="codex", name="Paused work")
@@ -582,7 +631,12 @@ def test_board_normalizes_today_states_actions_and_order(web_server, monkeypatch
     work_items.mutate(overdue["task_id"], due_date=(today - timedelta(days=1)).isoformat())
     work_items.mutate(future["task_id"], due_date=(today + timedelta(days=1)).isoformat())
     work_items.mutate(closed["task_id"], status="done")
-    store.upsert("attention", state="needs-input")
+    store.upsert(
+        "attention",
+        state="needs-input",
+        model_label="Opus",
+        model_id="claude-opus-4-8",
+    )
     store.heartbeat("attention")
 
     _status, board = _get_json(base + "/api/board")
@@ -590,6 +644,7 @@ def test_board_normalizes_today_states_actions_and_order(web_server, monkeypatch
 
     assert [task["session_id"] for task in board["tasks"]][:2] == ["attention", "overdue"]
     assert tasks["attention"]["terminal_state"] == "needs-input"
+    assert tasks["attention"]["model"] == "claude-opus-4-8"
     assert tasks["attention"]["work_status"] == "active"
     assert tasks["attention"]["in_today"] is True
     assert tasks["overdue"]["in_today"] is True
@@ -829,6 +884,7 @@ def test_history_launch_uses_canonical_task_intent_and_preserves_history(
     listing = workspace.create_list("Destination", space["space_id"], working_directory=str(destination))
     workspace.move_task(task["task_id"], listing["list_key"], task["project_key"])
     monkeypatch.setattr(web, "_provider_available", lambda _provider: True)
+    monkeypatch.setattr(web.launches, "_available", lambda _provider: True)
     opened = []
     monkeypatch.setattr(web.commands, "open_in_terminal", opened.append)
 

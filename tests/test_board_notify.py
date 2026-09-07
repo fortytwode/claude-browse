@@ -97,6 +97,36 @@ def test_notify_prefers_dedicated_app_and_preserves_argument_boundaries(
     assert calls[0][1]["start_new_session"] is True
 
 
+def test_notify_passes_a_scoped_terminal_focus_target_to_the_dedicated_app(
+    tmp_path, monkeypatch
+):
+    executable = tmp_path / "AgentBoardNotifier"
+    executable.write_text("")
+    executable.chmod(0o755)
+    monkeypatch.setenv("AGENT_BOARD_NOTIFIER_EXECUTABLE", str(executable))
+    monkeypatch.delenv("AGENT_BOARD_DISABLE_NOTIFICATIONS", raising=False)
+    calls = []
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda command, **kwargs: calls.append(command) or object(),
+    )
+
+    notify.notify(
+        "[MaxRewards] done",
+        "creative review",
+        session_id="session-123",
+        provider="codex",
+    )
+
+    assert calls[0][-4:] == [
+        "--session-id",
+        "session-123",
+        "--provider",
+        "codex",
+    ]
+
+
 def test_notify_falls_back_when_dedicated_app_launch_fails(tmp_path, monkeypatch):
     executable = tmp_path / "AgentBoardNotifier"
     executable.write_text("")

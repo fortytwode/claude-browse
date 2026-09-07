@@ -19,6 +19,19 @@ def fresh_store(tmp_path, monkeypatch):
     projects.resolve_project.cache_clear()
 
 
+@pytest.fixture
+def installed_launch_provider(monkeypatch):
+    """Keep launch-policy tests independent of binaries on the test host."""
+    real_action_status = commands.action_status
+    monkeypatch.setattr(
+        commands,
+        "action_status",
+        lambda session, provider: real_action_status(
+            session, provider, availability_check=lambda _provider: True
+        ),
+    )
+
+
 def test_session_work_item_mutation_and_done_filter(tmp_path):
     store.upsert("crud-session", cwd=str(tmp_path), name="Plan release", provider="claude")
     task = work_items.ensure_for_session(store.get("crud-session"))
@@ -34,6 +47,23 @@ def test_session_work_item_mutation_and_done_filter(tmp_path):
     assert done["completed_at"] is not None
     assert work_items.list_items() == []
     assert work_items.list_items(include_done=True)[0]["task_id"] == task["task_id"]
+
+
+def test_task_ids_for_sessions_chunks_broad_history_lookups(tmp_path):
+    store.upsert("current", cwd=str(tmp_path), name="Current", provider="claude")
+    task = work_items.ensure_for_session(store.get("current"))
+    historical_ids = [f"history-{index}" for index in range(501)]
+    with store.get_conn() as conn:
+        conn.executemany(
+            """INSERT INTO task_session_links
+               (session_id, task_id, provider, cwd, created_at)
+               VALUES (?, ?, 'claude', ?, 1)""",
+            [(session_id, task["task_id"], str(tmp_path)) for session_id in historical_ids],
+        )
+        if hasattr(conn, "setlimit"):
+            conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+    assert work_items.task_ids_for_sessions(historical_ids) == {task["task_id"]}
 
 
 def test_work_item_mutation_validation_and_one_task_per_session(tmp_path):
@@ -376,7 +406,7 @@ def test_direct_session_commands_have_one_fixed_argv_safe_shape(monkeypatch):
 
 
 def test_direct_session_launch_reuses_browse_policy_with_hook_transcript(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, installed_launch_provider
 ):
     import claude_browse.browse as browse
 
@@ -397,24 +427,32 @@ def test_direct_session_launch_reuses_browse_policy_with_hook_transcript(
     monkeypatch.setattr(
         browse,
         "_open_in_target_provider",
-        lambda *args, **kwargs: opened.append((args, kwargs)),
+        lambda *args, **kwargs: opened.append(
+            (args, kwargs, os.environ.get("AGENT_BOARD_MANAGED_TERMINAL_TITLE"),
+             os.environ.get("CLAUDE_CODE_DISABLE_TERMINAL_TITLE"))
+        ),
     )
 
     original_cwd = os.getcwd()
     commands.launch_direct_session("hook-only", "codex", full_access=False)
 
-    args, kwargs = opened[0]
+    args, kwargs, title_marker, claude_title_disabled = opened[0]
     session = args[0]
     assert session["path"] == str(transcript)
     assert session["source_size"] == 37
     assert args[1:5] == ("codex", "codex", "hook-only", str(tmp_path))
     assert args[6] is False
     assert kwargs["fork"] is None
+    assert title_marker == claude_title_disabled == "1"
+    assert "AGENT_BOARD_MANAGED_TERMINAL_TITLE" not in os.environ
+    assert "CLAUDE_CODE_DISABLE_TERMINAL_TITLE" not in os.environ
     assert os.getcwd() == str(tmp_path)
     os.chdir(original_cwd)
 
 
-def test_direct_session_cross_provider_requires_transcript(tmp_path, monkeypatch):
+def test_direct_session_cross_provider_requires_transcript(
+    tmp_path, monkeypatch, installed_launch_provider
+):
     store.upsert("hook-only", cwd=str(tmp_path), provider="claude")
     monkeypatch.setattr(
         commands.fts,
@@ -426,7 +464,9 @@ def test_direct_session_cross_provider_requires_transcript(tmp_path, monkeypatch
         commands.launch_direct_session("hook-only", "codex", full_access=True)
 
 
-def test_cross_provider_continuation_preserves_recent_context(tmp_path, monkeypatch):
+def test_cross_provider_continuation_preserves_recent_context(
+    tmp_path, monkeypatch, installed_launch_provider
+):
     import claude_browse.browse as browse
 
     transcript = tmp_path / "thread.jsonl"
