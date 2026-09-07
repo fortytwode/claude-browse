@@ -884,6 +884,7 @@ def test_history_launch_uses_canonical_task_intent_and_preserves_history(
     listing = workspace.create_list("Destination", space["space_id"], working_directory=str(destination))
     workspace.move_task(task["task_id"], listing["list_key"], task["project_key"])
     monkeypatch.setattr(web, "_provider_available", lambda _provider: True)
+    monkeypatch.setattr(web.launches, "_available", lambda _provider: True)
     opened = []
     monkeypatch.setattr(web.commands, "open_in_terminal", opened.append)
 

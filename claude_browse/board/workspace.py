@@ -715,7 +715,9 @@ def reorder_tasks(list_key: str, task_ids: list[str], priority: str | None = Non
             for item in ordered
         ]
         now = time.time()
-        for item, slot in zip(ordered, sorted(slots), strict=True):
+        # ``ordered`` and ``slots`` are both built from the validated IDs.
+        # Avoid ``strict=`` so this supported Python 3.9 path remains usable.
+        for item, slot in zip(ordered, sorted(slots)):
             if item["placement_position"] is not None:
                 conn.execute("UPDATE task_placements SET position = ?, updated_at = ? WHERE task_id = ?", (slot, now, item["task_id"]))
             else:

@@ -891,7 +891,9 @@ def reorder_tasks(
 
         slots = sorted(int(row["position"]) for row in ordered)
         now = time.time()
-        for task_id, slot in zip(ids, slots, strict=True):
+        # Length equality follows from the validated IDs and one selected row
+        # per ID; plain zip keeps the declared Python 3.9 support.
+        for task_id, slot in zip(ids, slots):
             if destination_priority is None:
                 conn.execute(
                     "UPDATE work_items SET position = ?, updated_at = ? WHERE task_id = ?",
@@ -1146,7 +1148,8 @@ def reorder_folders(folder_ids: object) -> list[dict]:
             raise ValueError("folder_ids must contain every existing folder exactly once")
         slots = sorted(int(row["position"]) for row in rows)
         now = time.time()
-        for folder_id, slot in zip(ids, slots, strict=True):
+        # The exact-set check above guarantees one slot per supplied folder.
+        for folder_id, slot in zip(ids, slots):
             conn.execute(
                 "UPDATE folders SET position = ?, updated_at = ? WHERE id = ?",
                 (slot, now, folder_id),
@@ -1178,7 +1181,8 @@ def reorder_projects(project_keys: object) -> list[dict]:
             ).fetchall()
         )
         now = time.time()
-        for key, slot in zip(keys, slots, strict=True):
+        # The exact-set check above guarantees one slot per supplied project.
+        for key, slot in zip(keys, slots):
             conn.execute(
                 "UPDATE project_settings SET position = ?, updated_at = ? "
                 "WHERE project_key = ?",
