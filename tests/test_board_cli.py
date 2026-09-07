@@ -94,3 +94,27 @@ def test_render_board_no_unattended_section_when_none(tmp_path, monkeypatch):
     store.upsert("n-1", host="air", cwd="/tmp/a", state="idle", name="plain")
     output = cli.render_board()
     assert "not picked up" not in output
+
+
+def test_render_board_keeps_stale_ended_completion_until_ack(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert(
+        "u-old",
+        host="air",
+        cwd="/tmp/a",
+        state="idle",
+        name="month-old completion",
+    )
+    store.mark_done("u-old", 900)
+    store.set_state("u-old", "ended")
+    old_ts = time.time() - (30 * 24 * 3600)
+    store._raw_set_updated_at("u-old", old_ts)
+
+    output = cli.render_board(max_age_hours=24)
+    assert "finished, not picked up (1)" in output
+    assert "month-old completion" in output
+
+    store.ack("u-old")
+    store._raw_set_updated_at("u-old", old_ts)
+
+    assert cli.render_board(max_age_hours=24) == "no active sessions"

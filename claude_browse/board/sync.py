@@ -1,9 +1,9 @@
 """Cross-laptop sync: mirrors local session state to Firestore, and (U7)
 renders the Slack #agent-status board from it.
 
-Invoked out-of-band as an async hook sibling on Stop/Notification/SessionEnd
-(see settings.json) -- never from the hot hook path in board/hook.py, so a
-slow or failing network call can never block a turn.
+Invoked out-of-band by a detached worker launched only after board/hook.py
+commits the local transition. Workers serialize before reading SQLite, so a
+late-starting process always publishes the newest committed local state.
 
 Firestore auth: Application Default Credentials (already verified to
 resolve to the team-projects-480520 project on this machine via
@@ -18,6 +18,8 @@ import json
 import os
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from claude_browse.board import naming, store
@@ -37,6 +39,7 @@ META_DOC = "slack"
 SLACK_CHANNEL = "C0BFW39EXBJ"
 
 _LOG_PATH = Path.home() / ".claude" / "agent-board" / "sync.log"
+_PUBLICATION_LOCK_PATH = _LOG_PATH.with_name("publication.lock")
 _DEFAULT_ENV_FILE = Path.home() / "team-operations" / ".env"
 
 
@@ -188,39 +191,102 @@ def session_doc(row: dict) -> dict:
     }
 
 
-def push(session_id: str) -> None:
-    """Mirror this session's local state to Firestore. Best-effort, never raises."""
-    try:
-        row = store.get(session_id)
-        if row is None:
+@contextmanager
+def _publication_lock(*, coalesce: bool = False) -> Iterator[str | None]:
+    """Serialize publication, optionally bounding detached worker backlog.
+
+    Direct callers wait for the publisher lock. Detached hook workers first
+    try that lock, then reserve a single waiter slot. If both are occupied,
+    their transition is already covered by the waiter, which will reread the
+    newest SQLite snapshot when it gets its turn.
+    """
+    import fcntl
+
+    _PUBLICATION_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_PUBLICATION_LOCK_PATH, "a+") as lock_file:
+        if not coalesce:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield "publish"
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
             return
 
-        naming.maybe_name(session_id)
-        row = store.get(session_id) or row  # re-read in case the name just upgraded
+        publication_mode = "publish"
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            waiter_path = _PUBLICATION_LOCK_PATH.with_name(
+                f"{_PUBLICATION_LOCK_PATH.stem}.waiter{_PUBLICATION_LOCK_PATH.suffix}"
+            )
+            with open(waiter_path, "a+") as waiter_file:
+                try:
+                    fcntl.flock(
+                        waiter_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+                    )
+                except BlockingIOError:
+                    yield None
+                    return
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                finally:
+                    fcntl.flock(waiter_file.fileno(), fcntl.LOCK_UN)
+            publication_mode = "drain"
 
-        host = row.get("host") or "unknown-host"
-        doc_id = f"{host}:{session_id}"
+        try:
+            yield publication_mode
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
-        client = _firestore_client()
-        # merge=True: the team-operations sweep owns its own fields on this
-        # doc (alert_count, last_alert_at, alert_ts). A plain set() would
-        # wipe them on every turn and the sweep would re-alert forever.
-        client.collection(COLLECTION).document(doc_id).set(session_doc(row), merge=True)
-    except Exception as exc:
-        _log(f"push failed for session_id={session_id}: {exc}")
-        return
+
+def _publish_session(session_id: str) -> bool:
+    """Publish one session while the caller owns the publication lock."""
+    row = store.get(session_id)
+    if row is None:
+        return False
+
+    naming.maybe_name(session_id)
+    row = store.get(session_id) or row  # re-read in case the name just upgraded
+    observed_revision = int(row.get("sync_revision") or 0)
+
+    host = row.get("host") or "unknown-host"
+    doc_id = f"{host}:{session_id}"
+
+    client = _firestore_client()
+    # merge=True: the team-operations sweep owns its own fields on this
+    # doc (alert_count, last_alert_at, alert_ts). A plain set() would
+    # wipe them on every turn and the sweep would re-alert forever.
+    client.collection(COLLECTION).document(doc_id).set(session_doc(row), merge=True)
 
     pending_alert = row.get("pending_alert")
     if pending_alert:
+        # Firestore I/O above may have taken seconds. Consume only the exact
+        # marker in the snapshot we wrote; if a newer transition replaced it
+        # (even with the same kind), leave that marker for the next worker.
+        alert_row = store.consume_pending_alert(
+            session_id, pending_alert, row.get("pending_alert_revision")
+        )
+        if alert_row is None:
+            store.mark_sync_published(session_id, observed_revision)
+            return True
         try:
-            if pending_alert == "needs-input" or _immediate_done_alert_enabled():
+            is_current = (
+                pending_alert == "needs-input"
+                and alert_row.get("state") == "needs-input"
+            ) or (pending_alert == "done" and store.is_unattended(alert_row))
+            if not is_current:
+                _log(
+                    f"skipped superseded {pending_alert} alert "
+                    f"for session_id={session_id}"
+                )
+            elif pending_alert == "needs-input" or _immediate_done_alert_enabled():
                 post_alert(
                     session_id,
                     pending_alert,
-                    row.get("name") or session_id,
-                    folder=os.path.basename(row.get("cwd") or "") or None,
-                    model_label=row.get("model_label") or None,
-                    provider=store.provider_of(row),
+                    alert_row.get("name") or session_id,
+                    folder=os.path.basename(alert_row.get("cwd") or "") or None,
+                    model_label=alert_row.get("model_label") or None,
+                    provider=store.provider_of(alert_row),
                 )
             else:
                 _log(
@@ -229,28 +295,64 @@ def push(session_id: str) -> None:
                 )
         except Exception as exc:
             _log(f"post_alert failed for session_id={session_id}: {exc}")
-        finally:
-            store.clear_pending_alert(session_id)
+    store.mark_sync_published(session_id, observed_revision)
+    return True
 
+
+def push(session_id: str, *, coalesce: bool = False) -> bool:
+    """Publish the newest local state. Best-effort, never raises.
+
+    True means the Firestore document was merged. Slack alerts and the board
+    remain independently best-effort, preserving the offline hook contract.
+    """
     try:
-        post_or_update_slack(render_slack_body())
+        with _publication_lock(coalesce=coalesce) as publication_mode:
+            if publication_mode is None:
+                return False
+
+            session_ids = [session_id]
+            if coalesce:
+                # Every detached worker is also a retry opportunity. Put its
+                # requested session first even when that row predates revision
+                # tracking, then drain only durable dirty revisions. This
+                # recovers transient failures without republishing historical
+                # clean rows, including when the worker acquired the lock
+                # immediately rather than waiting behind another publisher.
+                session_ids.extend(
+                    str(row["session_id"])
+                    for row in store.pending_sync()
+                    if row["session_id"] != session_id
+                )
+
+            requested_published = False
+            published_any = False
+            for queued_session_id in session_ids:
+                try:
+                    published = _publish_session(queued_session_id)
+                except Exception as exc:
+                    _log(
+                        "session publish failed for "
+                        f"session_id={queued_session_id}: {exc}"
+                    )
+                    continue
+                published_any = published_any or published
+                if queued_session_id == session_id:
+                    requested_published = published
+
+            if published_any:
+                try:
+                    post_or_update_slack(render_slack_body())
+                except Exception as exc:
+                    _log(f"slack board update failed for session_id={session_id}: {exc}")
+            return requested_published
     except Exception as exc:
-        _log(f"slack board update failed for session_id={session_id}: {exc}")
+        _log(f"push failed for session_id={session_id}: {exc}")
+        return False
 
 
-def push_ack(session_id: str) -> None:
-    """Mirror an explicit ack to Firestore (acked_at only). Best-effort."""
-    try:
-        row = store.get(session_id)
-        if row is None:
-            return
-        host = row.get("host") or "unknown-host"
-        client = _firestore_client()
-        client.collection(COLLECTION).document(f"{host}:{session_id}").set(
-            {"acked_at": row.get("acked_at")}, merge=True
-        )
-    except Exception as exc:
-        _log(f"push_ack failed for session_id={session_id}: {exc}")
+def push_ack(session_id: str) -> bool:
+    """Backward-compatible explicit-ack entry point; publish the full board."""
+    return push(session_id)
 
 
 def _fetch_all_session_docs():
@@ -412,7 +514,7 @@ def check() -> str:
 def ack_main(argv: list[str]) -> int:
     """`agent-board ack <session-id-prefix | name-substring>`: mark a finished
     session as seen so no surface keeps re-surfacing it. Local first (so the
-    statusline/aj reflect it instantly), then mirrored to Firestore."""
+    statusline/aj reflect it instantly), then publish the full board."""
     if not argv:
         print("usage: agent-board ack <session-id-prefix | name-substring>", file=sys.stderr)
         return 1
@@ -429,7 +531,8 @@ def ack_main(argv: list[str]) -> int:
     row = matches[0]
     session_id = str(row["session_id"])
     store.ack(session_id)
-    push_ack(session_id)
+    store.mark_sync_pending(session_id)
+    push(session_id)
     print(f"acked {row.get('name') or session_id}")
     return 0
 
@@ -444,11 +547,20 @@ def main(argv: list[str]) -> None:
 
     if subcommand == "push":
         try:
-            raw = sys.stdin.read()
-            payload = json.loads(raw)
-            session_id = payload.get("session_id")
+            push_args = argv[1:]
+            coalesce = "--coalesce" in push_args
+            push_args = [arg for arg in push_args if arg != "--coalesce"]
+            if push_args:
+                session_id = push_args[0]
+            else:
+                raw = sys.stdin.read()
+                payload = json.loads(raw)
+                session_id = payload.get("session_id")
             if session_id:
-                push(session_id)
+                if coalesce:
+                    push(session_id, coalesce=True)
+                else:
+                    push(session_id)
         except Exception as exc:
             _log(f"sync push main() failed: {exc}")
         sys.exit(0)

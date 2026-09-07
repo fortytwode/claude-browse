@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -34,7 +35,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     provider           TEXT,
     done_at            REAL,
     done_turn_s        REAL,
-    acked_at           REAL
+    acked_at           REAL,
+    sync_revision      INTEGER NOT NULL DEFAULT 0,
+    published_revision INTEGER NOT NULL DEFAULT 0,
+    pending_alert_revision INTEGER
 )
 """
 
@@ -56,6 +60,9 @@ _COLUMNS = (
     "done_at",
     "done_turn_s",
     "acked_at",
+    "sync_revision",
+    "published_revision",
+    "pending_alert_revision",
 )
 
 _COLUMN_TYPES = {
@@ -86,6 +93,14 @@ _COLUMN_TYPES = {
     "done_at": "REAL",
     "done_turn_s": "REAL",
     "acked_at": "REAL",
+    # A durable, per-session publication outbox. Hooks increment
+    # sync_revision after committing a transition; sync workers advance
+    # published_revision only through the snapshot they actually wrote.
+    "sync_revision": "INTEGER NOT NULL DEFAULT 0",
+    "published_revision": "INTEGER NOT NULL DEFAULT 0",
+    # Couples an alert to the transition that created it, so an old worker
+    # cannot post or clear a newer alert of the same kind.
+    "pending_alert_revision": "INTEGER",
 }
 
 
@@ -105,10 +120,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 _conn_cache: sqlite3.Connection | None = None
 _conn_cache_path: Path | None = None
+_conn_cache_owner: tuple[int, int] | None = None
 
 
 def get_conn() -> sqlite3.Connection:
-    """Return a connection, cached per-process (keyed by _DB_PATH).
+    """Return a connection, cached per process/thread and keyed by _DB_PATH.
 
     A hook invocation is a short-lived process, but several of its own
     calls often open a connection each (e.g. hook.py's Stop handler does
@@ -118,8 +134,13 @@ def get_conn() -> sqlite3.Connection:
     so tests that monkeypatch _DB_PATH to a fresh tmp_path per test still
     get an isolated connection rather than reusing a stale one.
     """
-    global _conn_cache, _conn_cache_path
-    if _conn_cache is not None and _conn_cache_path == _DB_PATH:
+    global _conn_cache, _conn_cache_owner, _conn_cache_path
+    owner = (os.getpid(), threading.get_ident())
+    if (
+        _conn_cache is not None
+        and _conn_cache_path == _DB_PATH
+        and _conn_cache_owner == owner
+    ):
         return _conn_cache
 
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -131,6 +152,7 @@ def get_conn() -> sqlite3.Connection:
     _migrate(conn)
     _conn_cache = conn
     _conn_cache_path = _DB_PATH
+    _conn_cache_owner = owner
     return conn
 
 
@@ -164,12 +186,13 @@ def get(session_id: str) -> dict | None:
 
 
 def active(max_age_hours: float = 24) -> list[dict]:
-    """Rows not ended, or ended but updated within the window. Newest first."""
+    """Rows still active, recent, or awaiting completion acknowledgement."""
     cutoff = time.time() - (max_age_hours * 3600)
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM sessions "
             "WHERE state != 'ended' OR updated_at >= ? "
+            "OR (done_at IS NOT NULL AND (acked_at IS NULL OR acked_at < done_at)) "
             "ORDER BY updated_at DESC",
             (cutoff,),
         ).fetchall()
@@ -197,6 +220,51 @@ def set_state(
     upsert(session_id, **fields)
 
 
+def finish_turn(
+    session_id: str,
+    working_since: float,
+    turn_s: float,
+    *,
+    cwd: str | None,
+    host: str,
+    model_label: str | None = None,
+    mark_unattended: bool = True,
+) -> bool:
+    """Atomically commit the exact in-flight turn and its alert marker.
+
+    The compare-and-swap makes duplicate or stale Stop events harmless. If a
+    newer prompt replaced ``working_since``, its working state is preserved.
+    """
+    now = time.time()
+    with get_conn() as conn:
+        cursor = conn.execute(
+            "UPDATE sessions SET state = 'idle', working_since = NULL, "
+            "cwd = COALESCE(?, cwd), host = ?, "
+            "model_label = COALESCE(?, model_label), heartbeat_at = ?, updated_at = ?, "
+            "done_at = CASE WHEN ? THEN ? ELSE done_at END, "
+            "done_turn_s = CASE WHEN ? THEN ? ELSE done_turn_s END, "
+            "acked_at = CASE WHEN ? THEN NULL ELSE acked_at END, "
+            "pending_alert = 'done', "
+            "pending_alert_revision = COALESCE(sync_revision, 0) + 1 "
+            "WHERE session_id = ? AND working_since IS ?",
+            (
+                cwd,
+                host,
+                model_label,
+                now,
+                now,
+                mark_unattended,
+                now,
+                mark_unattended,
+                float(turn_s),
+                mark_unattended,
+                session_id,
+                working_since,
+            ),
+        )
+    return cursor.rowcount == 1
+
+
 def heartbeat(session_id: str) -> None:
     with get_conn() as conn:
         conn.execute(
@@ -210,11 +278,95 @@ def set_pending_alert(session_id: str, kind: str) -> None:
     ("done" or "needs-input") -- the single source of truth for "this
     transition matters enough to alert on", read by sync.py to decide
     whether to post a fresh Slack message (not just update the board)."""
-    upsert(session_id, pending_alert=kind)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE sessions SET pending_alert = ?, "
+            "pending_alert_revision = COALESCE(sync_revision, 0) + 1, "
+            "updated_at = ? WHERE session_id = ?",
+            (kind, time.time(), session_id),
+        )
 
 
 def clear_pending_alert(session_id: str) -> None:
-    upsert(session_id, pending_alert=None)
+    upsert(session_id, pending_alert=None, pending_alert_revision=None)
+
+
+def mark_sync_pending(session_id: str) -> int:
+    """Atomically mark the session's latest transition for publication.
+
+    If that transition carries an alert, stamp the alert with the same
+    revision. This is intentionally called only after dispatch commits all
+    local state, so a worker can never observe a half-written transition.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE sessions SET "
+            "sync_revision = COALESCE(sync_revision, 0) + 1, "
+            "pending_alert_revision = CASE "
+            "WHEN pending_alert IS NOT NULL THEN COALESCE(sync_revision, 0) + 1 "
+            "ELSE NULL END "
+            "WHERE session_id = ?",
+            (session_id,),
+        )
+        row = conn.execute(
+            "SELECT sync_revision FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+    if row is None:
+        raise KeyError(f"Unknown session_id: {session_id}")
+    return int(row[0])
+
+
+def pending_sync() -> list[dict]:
+    """Return only sessions with a committed transition not yet published."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM sessions "
+            "WHERE COALESCE(sync_revision, 0) > COALESCE(published_revision, 0) "
+            "ORDER BY sync_revision, session_id"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def mark_sync_published(session_id: str, revision: int) -> bool:
+    """Advance the published watermark without hiding concurrent updates."""
+    with get_conn() as conn:
+        cursor = conn.execute(
+            "UPDATE sessions SET published_revision = MAX("
+            "COALESCE(published_revision, 0), ?) WHERE session_id = ?",
+            (revision, session_id),
+        )
+    return cursor.rowcount == 1
+
+
+def consume_pending_alert(
+    session_id: str, kind: str, revision: int | None
+) -> dict | None:
+    """Clear and return an alert only when its exact version is still live.
+
+    The select and compare-and-swap update share one SQLite transaction, so
+    a publisher that spent time in network I/O cannot consume a marker that
+    a newer local transition replaced in the meantime.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if (
+            row is None
+            or row["pending_alert"] != kind
+            or row["pending_alert_revision"] != revision
+        ):
+            return None
+        cursor = conn.execute(
+            "UPDATE sessions SET pending_alert = NULL, "
+            "pending_alert_revision = NULL "
+            "WHERE session_id = ? AND pending_alert = ? "
+            "AND pending_alert_revision IS ?",
+            (session_id, kind, revision),
+        )
+        if cursor.rowcount != 1:
+            return None
+    return dict(row)
 
 
 DEFAULT_PROVIDER = "claude"
@@ -226,7 +378,7 @@ def provider_of(row: dict | None) -> str:
 
 
 def mark_done(session_id: str, turn_s: float) -> None:
-    """Record that a long turn just finished and nobody has come back yet."""
+    """Record that a turn just finished and nobody has come back yet."""
     upsert(session_id, done_at=time.time(), done_turn_s=float(turn_s), acked_at=None)
 
 
@@ -241,7 +393,7 @@ def ack(session_id: str) -> None:
 
 
 def is_unattended(row: dict | None, *, now: float | None = None) -> bool:
-    """True when a long turn finished and the user has neither prompted
+    """True when a turn finished and the user has neither prompted
     again nor acknowledged it. Ended sessions still count: a run that
     finished and whose terminal was closed is exactly the thread the user
     is most likely to forget. 'working' never counts (a new turn is in
