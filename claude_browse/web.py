@@ -170,7 +170,7 @@ class _Handler(BaseHTTPRequestHandler):
                     }
                 )
             elif path == "/api/board":
-                self._serve_board()
+                self._serve_board(parse_qs(parsed.query))
             elif path.startswith("/api/tasks/") and path.endswith("/history"):
                 task_id = unquote(path[len("/api/tasks/") : -len("/history")])
                 self._serve_task_history(task_id)
@@ -313,11 +313,26 @@ class _Handler(BaseHTTPRequestHandler):
                 if not task:
                     self._send_json({"error": "task not found"}, status=404)
                     return
+                terminal_title_result: dict[str, object] | None = None
+                if "title" in body and task.get("session_id"):
+                    terminal_title_result = terminal_focus.set_session_title(
+                        str(task["session_id"]),
+                        str(task.get("session_provider") or store.DEFAULT_PROVIDER),
+                        str(task.get("title") or ""),
+                    )
                 if publish_session:
                     from .board.hook import _spawn_sync
 
                     _spawn_sync(publish_session)
-                self._send_json({"task": self._task_to_json(task)})
+                public_task = self._task_to_json(task)
+                if terminal_title_result is not None:
+                    public_task["terminal_title_updated"] = bool(
+                        terminal_title_result["updated"]
+                    )
+                    public_task["terminal_title_reason"] = str(
+                        terminal_title_result["reason"]
+                    )
+                self._send_json({"task": public_task})
             else:
                 self._send_json({"error": "not found"}, status=404)
         except ValueError as exc:
@@ -553,6 +568,7 @@ class _Handler(BaseHTTPRequestHandler):
             "terminal_presence": presence_state,
             "terminal_open": presence_state == "open",
             "runtime_host": (runtime or {}).get("host") or "",
+            "model": (runtime or {}).get("model_id") or (runtime or {}).get("model_label") or "",
             "unattended": unattended,
             "in_today": in_today,
             "last_activity_at": last_activity,
@@ -563,7 +579,8 @@ class _Handler(BaseHTTPRequestHandler):
             **context,
         }
 
-    def _serve_board(self) -> None:
+    def _serve_board(self, qs: dict[str, list[str]] | None = None) -> None:
+        query = ((qs or {}).get("q") or [""])[0].strip()
         availability = _provider_availability()
         availability_check = _availability_check(availability)
         workspace_snapshot = workspace.snapshot()
@@ -581,6 +598,7 @@ class _Handler(BaseHTTPRequestHandler):
         ]
         presence_states = presence.snapshot([row for row in runtime_rows if row])
         indexed: dict[str, dict] = {}
+        search_task_ids: set[str] = set()
         try:
             conn = fts.open_db(read_only=True)
             try:
@@ -589,6 +607,10 @@ class _Handler(BaseHTTPRequestHandler):
                     row = fts.get_by_sid(conn, session_id)
                     if row:
                         indexed[session_id] = row
+                if query:
+                    search_task_ids = work_items.task_ids_for_sessions(
+                        fts.matching_session_ids(conn, query)
+                    )
             finally:
                 conn.close()
         except (OSError, sqlite3.Error):
@@ -631,6 +653,8 @@ class _Handler(BaseHTTPRequestHandler):
             "folders": work_items.list_folders(),
             "workspace": workspace_snapshot,
             "counts": _thread_counts(tasks),
+            "search_query": query,
+            "search_task_ids": sorted(search_task_ids),
         })
 
     def _serve_task_history(self, task_id: str) -> None:

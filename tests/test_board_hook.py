@@ -24,7 +24,7 @@ def _fresh_store(tmp_path, monkeypatch):
 def test_stop_after_long_run_sets_idle_and_notifies(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: calls.append((title, msg)))
 
     store.upsert("s1", host="air", cwd="/tmp/proj", state="working",
                  working_since=time.time() - 90, name="my-thread")
@@ -43,7 +43,7 @@ def test_stop_records_completion_before_exposing_done_alert(tmp_path, monkeypatc
     monkeypatch.setattr(
         hook.notify,
         "notify",
-        lambda title, msg: row_when_notified.append(store.get("s-ordered")),
+        lambda title, msg, **_context: row_when_notified.append(store.get("s-ordered")),
     )
     store.upsert(
         "s-ordered",
@@ -69,7 +69,7 @@ def test_stop_refreshes_heartbeat(tmp_path, monkeypatch):
     build's own session showed 'gone' on the real board mid-session, purely
     from statusline gaps, even though it was actively being worked on)."""
     _fresh_store(tmp_path, monkeypatch)
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: None)
 
     store.upsert("s-hb", host="air", cwd="/tmp/proj", state="working",
                  working_since=time.time() - 5, heartbeat_at=time.time() - 700)
@@ -84,7 +84,7 @@ def test_stop_refreshes_heartbeat(tmp_path, monkeypatch):
 def test_stop_after_short_run_sets_idle_and_notifies(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: calls.append((title, msg)))
 
     store.upsert("s2", host="air", cwd="/tmp/proj", state="working",
                  working_since=time.time() - 8, name="my-thread")
@@ -99,7 +99,7 @@ def test_stop_after_short_run_sets_idle_and_notifies(tmp_path, monkeypatch):
 def test_duplicate_stop_notifies_only_once(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: calls.append((title, msg)))
 
     store.upsert(
         "s-duplicate-stop",
@@ -128,7 +128,7 @@ def test_duplicate_stop_notifies_only_once(tmp_path, monkeypatch):
 def test_stale_stop_does_not_overwrite_a_newer_prompt(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: calls.append((title, msg)))
     original_finish_turn = work_items.finish_turn
     old_start = time.time() - 8
     new_start = time.time()
@@ -214,7 +214,7 @@ def test_new_prompt_after_stop_commit_clears_completion_metadata(tmp_path, monke
         name="my-thread",
     )
 
-    def prompt_arrives_while_banner_is_delivered(title, message):
+    def prompt_arrives_while_banner_is_delivered(title, message, **_context):
         hook.dispatch(
             {
                 "hook_event_name": "UserPromptSubmit",
@@ -247,7 +247,7 @@ def test_new_prompt_after_stop_commit_clears_completion_metadata(tmp_path, monke
 def test_notification_needs_input_types_set_state_and_notify(tmp_path, monkeypatch, notification_type):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: calls.append((title, msg)))
 
     store.upsert("s3", host="air", cwd="/tmp/proj", state="working", name="blocked-thread")
     hook.dispatch({
@@ -267,7 +267,7 @@ def test_notification_backfills_host_on_a_pre_existing_row_with_no_host(tmp_path
     with host=None by whichever event touched it first. Every state-changing
     event must backfill host, not just SessionStart/UserPromptSubmit."""
     _fresh_store(tmp_path, monkeypatch)
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: None)
     monkeypatch.setattr(hook, "_hostname", lambda: "real-hostname")
 
     # Row created by a bare set_state call with no host, mirroring how the
@@ -289,7 +289,7 @@ def test_notification_backfills_host_on_a_pre_existing_row_with_no_host(tmp_path
 def test_notification_ignored_types_do_not_change_state_or_notify(tmp_path, monkeypatch, notification_type):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: calls.append((title, msg)))
 
     store.upsert("s4", host="air", cwd="/tmp/proj", state="working", name="quiet-thread")
     hook.dispatch({
@@ -308,7 +308,7 @@ def test_quota_auto_resume_notification_does_not_claim_user_input_is_needed(
 ):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: calls.append((title, msg)))
     store.upsert("quota-resumed", host="air", cwd="/tmp/proj", state="working")
 
     mutated = hook.dispatch(
@@ -332,7 +332,7 @@ def test_notification_unrecognized_future_type_fails_safe_to_needs_input(tmp_pat
     needs-input, not silently no-op -- an allowlist would miss it."""
     _fresh_store(tmp_path, monkeypatch)
     calls = []
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: calls.append((title, msg)))
 
     store.upsert("s11", host="air", cwd="/tmp/proj", state="working", name="future-thread")
     hook.dispatch({
@@ -652,13 +652,26 @@ def test_model_label_reads_latest_assistant_model_from_transcript(tmp_path):
         + "\n"
     )
 
-    assert hook._model_label({"transcript_path": str(transcript)}, None) == "Opus"
+    assert hook._compact_model_label(
+        hook._model_id({"transcript_path": str(transcript)}, None)
+    ) == "Opus"
+
+
+def test_model_id_keeps_the_exact_reported_identifier():
+    assert hook._model_id({"model": "claude-opus-4-8"}, None) == "claude-opus-4-8"
+    assert hook._model_id(
+        {"model": {"display_name": "Opus", "id": "claude-opus-4-8"}}, None
+    ) == "claude-opus-4-8"
 
 
 def test_stop_notification_banner_carries_folder(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(
+        hook.notify,
+        "notify",
+        lambda title, msg, **context: calls.append((title, msg, context)),
+    )
 
     store.upsert("s-folder", host="air", cwd="/Users/me/claude-browse", state="working",
                  working_since=time.time() - 90, name="agent board build")
@@ -666,13 +679,17 @@ def test_stop_notification_banner_carries_folder(tmp_path, monkeypatch):
                    "cwd": "/Users/me/claude-browse",
                    "model": {"display_name": "Codex"}})
 
-    assert calls == [("[claude-browse] Codex done", "agent board build")]
+    assert calls == [(
+        "[claude-browse] Codex done",
+        "agent board build",
+        {"session_id": "s-folder", "provider": "claude"},
+    )]
 
 
 def test_stop_notification_uses_stored_model_when_payload_omits_it(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: calls.append((title, msg)))
 
     store.upsert("s-stored-model", host="air", cwd="/Users/me/claude-browse",
                  state="working", working_since=time.time() - 90,
@@ -686,7 +703,7 @@ def test_stop_notification_uses_stored_model_when_payload_omits_it(tmp_path, mon
 def test_needs_input_notification_title_carries_folder(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: calls.append((title, msg)))
 
     store.upsert("s-folder-input", host="air", cwd="/Users/me/claude-browse",
                  state="working", name="agent board build")
@@ -715,7 +732,7 @@ def test_parse_provider_defaults_to_claude_and_accepts_both_forms():
 
 def test_session_start_records_provider_and_later_events_keep_it(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: None)
 
     hook.dispatch({"hook_event_name": "SessionStart", "session_id": "c1", "cwd": "/tmp/proj",
                    "model": "gpt-5-codex"}, provider="codex")
@@ -732,7 +749,7 @@ def test_session_start_records_provider_and_later_events_keep_it(tmp_path, monke
 def test_codex_permission_request_maps_to_needs_input(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: calls.append((title, msg)))
     store.upsert("c2", host="air", cwd="/Users/me/team-operations", state="working",
                  name="deploy sweep", provider="codex", model_label="Codex")
 
@@ -749,7 +766,7 @@ def test_codex_permission_request_maps_to_needs_input(tmp_path, monkeypatch):
 def test_codex_interrupt_returns_to_idle_without_marking_done(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     calls = []
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: calls.append((title, msg)))
     store.upsert(
         "c-interrupt",
         host="air",
@@ -799,7 +816,7 @@ def test_every_completed_turn_marks_done_regardless_of_length(tmp_path, monkeypa
     """Duration is not the signal; whether you came back is. A 10-second
     turn that ends with a question is still a thread waiting on you."""
     _fresh_store(tmp_path, monkeypatch)
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: None)
     monkeypatch.delenv("AGENT_BOARD_UNATTENDED_MIN_TURN_S", raising=False)
 
     store.upsert("long", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 400)
@@ -823,7 +840,7 @@ def test_every_completed_turn_marks_done_regardless_of_length(tmp_path, monkeypa
 
 def test_unattended_threshold_is_env_tunable(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: None)
     monkeypatch.setenv("AGENT_BOARD_UNATTENDED_MIN_TURN_S", "30")
 
     store.upsert("t", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 45)
@@ -840,7 +857,7 @@ def test_unattended_threshold_is_env_tunable(tmp_path, monkeypatch):
 
 def test_new_prompt_is_the_implicit_ack(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: None)
     store.upsert("p", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 900)
     hook.dispatch({"hook_event_name": "Stop", "session_id": "p", "cwd": "/tmp/p"})
     assert store.is_unattended(store.get("p")) is True
@@ -858,7 +875,7 @@ def test_session_end_always_preserves_done_at(tmp_path, monkeypatch, reason):
     turn you have not come back to stays on the list: you can always resume
     the thread, and the board's job is to keep it visible until you do."""
     _fresh_store(tmp_path, monkeypatch)
-    monkeypatch.setattr(hook.notify, "notify", lambda title, msg: None)
+    monkeypatch.setattr(hook.notify, "notify", lambda title, msg, **_context: None)
     store.upsert("z", host="air", cwd="/tmp/p", state="working", working_since=time.time() - 10)
     hook.dispatch({"hook_event_name": "Stop", "session_id": "z", "cwd": "/tmp/p"})
     payload = {"hook_event_name": "SessionEnd", "session_id": "z", "cwd": "/tmp/p"}

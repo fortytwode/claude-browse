@@ -64,7 +64,7 @@ Use the toolbar to group, sort, search, and filter tasks. You can sort by name, 
 
 Click a colored priority flag to choose Urgent (red), High (amber), Normal (blue), or Low (gray). The chevron beside each group collapses or expands it.
 
-Click a task title to read it, or its pencil to rename it. Enter saves and Escape cancels. The saved name also appears in the Agent Board terminal status line on its next update; existing operating-system tab titles and original provider transcripts are not rewritten.
+Click a task title to read it, or its pencil to rename it. Enter saves and Escape cancels. The saved name also appears in the Agent Board terminal status line on its next update. When the exact local Terminal tab is still open and can be verified, its tab/window title is updated immediately as well. Original provider transcript files are not rewritten.
 
 Drag column headers to change their order, or use their left/right arrows. Drag a column's resize edge to adjust its width; focused resize controls also accept keyboard arrows. Task rows and sidebar items offer **Move up** and **Move down** alternatives to drag-and-drop.
 

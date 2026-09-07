@@ -63,6 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   restores the old behaviour.
 
 ### Fixed
+- **Agent Board context and desktop alerts now stay connected to their thread.**
+  Rows show the deepest working folder and exact model, Work search includes
+  full historical transcripts, and renames update a verified live Terminal
+  title. Native notifications keep a Dock badge until review and focus the
+  matching terminal when opened.
 - **Every Slack alert posted twice, and session names flip-flopped.** The
   sync hook command embeds the interpreter path, which changes from system
   python to `.venv/bin/python` once the board-sync venv exists; the

@@ -19,7 +19,7 @@ if _HERE not in sys.path:
 def main() -> None:
     if len(sys.argv) < 2:
         print(
-            "usage: agent-board <hook|statusline|board|sync|ack|direct-session|launch-intent>",
+            "usage: agent-board <hook|statusline|board|sync|ack|direct-session|focus-session|launch-intent>",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -72,6 +72,10 @@ def main() -> None:
         except (OSError, ValueError) as exc:
             print(f"agent-board: {exc}", file=sys.stderr)
             sys.exit(1)
+    elif subcommand == "focus-session":
+        from claude_browse.board.terminal_focus import main as focus_main
+
+        sys.exit(focus_main(sys.argv[2:]))
     else:
         print(f"unknown subcommand: {subcommand}", file=sys.stderr)
         sys.exit(1)

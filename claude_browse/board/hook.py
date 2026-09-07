@@ -89,9 +89,17 @@ def _set_state(
     *,
     cwd: str | None,
     model_label: str | None = None,
+    model_id: str | None = None,
 ) -> None:
     """Refresh host and heartbeat whenever a hook updates runtime state."""
-    store.set_state(session_id, state, cwd=cwd, host=_hostname(), model_label=model_label)
+    store.set_state(
+        session_id,
+        state,
+        cwd=cwd,
+        host=_hostname(),
+        model_label=model_label,
+        model_id=model_id,
+    )
     store.heartbeat(session_id)
 
 
@@ -110,7 +118,7 @@ def _folder_name(cwd: str | None) -> str:
 def _raw_model_from_payload(payload: dict) -> str:
     model = payload.get("model")
     if isinstance(model, dict):
-        for key in ("display_name", "name", "id", "model"):
+        for key in ("id", "model", "name", "display_name"):
             value = model.get(key)
             if value:
                 return str(value)
@@ -166,13 +174,13 @@ def _compact_model_label(raw: str) -> str:
     return " ".join(part.capitalize() for part in cleaned.replace("-", " ").split()[:2])
 
 
-def _model_label(payload: dict, row: dict | None = None) -> str:
-    raw = (
+def _model_id(payload: dict, row: dict | None = None) -> str:
+    return (
         _raw_model_from_payload(payload)
         or _model_from_transcript(payload.get("transcript_path"))
+        or str((row or {}).get("model_id") or "")
         or str((row or {}).get("model_label") or "")
     )
-    return _compact_model_label(raw)
 
 
 def _notify_title(action: str, cwd: str | None, model_label: str = "") -> str:
@@ -236,7 +244,8 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
         return False
     cwd = payload.get("cwd")
     row = store.get(session_id)
-    model_label = _model_label(payload, row)
+    model_id = _model_id(payload, row)
+    model_label = _compact_model_label(model_id)
     transcript_path = payload.get("transcript_path")
     transcript_fields = (
         {"transcript_path": transcript_path}
@@ -265,6 +274,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 provider=provider,
                 **transcript_fields,
                 **({"model_label": model_label} if model_label else {}),
+                **({"model_id": model_id} if model_id else {}),
             )
         else:
             fields: dict[str, object] = {"provider": provider}
@@ -273,6 +283,8 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 fields["cwd"] = cwd
             if model_label:
                 fields["model_label"] = model_label
+            if model_id:
+                fields["model_id"] = model_id
             store.upsert(session_id, **fields)
         store.heartbeat(session_id)
         # An explicitly launched continuation adopts its canonical task before
@@ -306,6 +318,8 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
         }
         if model_label:
             fields["model_label"] = model_label
+        if model_id:
+            fields["model_id"] = model_id
         if row is None or row.get("name_source") not in {"haiku", "manual"}:
             prompt = payload.get("prompt", "")
             name = _name_from_prompt(prompt)
@@ -319,7 +333,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
 
     elif event == "Stop":
         if row is None:
-            _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
+            _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None, model_id=model_id or None)
             row = store.get(session_id)
         working_since = row.get("working_since") if row else None
         turn_s = (time.time() - working_since) if working_since else 0.0
@@ -335,6 +349,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 cwd=cwd,
                 host=_hostname(),
                 model_label=model_label or None,
+                model_id=model_id or None,
                 mark_unattended=turn_s >= _unattended_min_turn_s(),
             )
             if not finished:
@@ -342,21 +357,31 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 # replay the banner or overwrite a newer prompt's state.
                 return False
         else:
-            _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None)
+            _set_state(session_id, "idle", cwd=cwd, model_label=model_label or None, model_id=model_id or None)
             # Even without a matching start event, Stop is the last observed
             # pause (for example after a helper restart).
             store.upsert(session_id, paused_at=time.time())
         if working_since and should_notify:
             name = (row or {}).get("name") or _placeholder_name(cwd)
-            notify.notify(_notify_title("done", cwd, model_label), _notify_body(name))
+            notify.notify(
+                _notify_title("done", cwd, model_label),
+                _notify_body(name),
+                session_id=session_id,
+                provider=provider,
+            )
         return True
 
     elif event == "Notification" or event in _NEEDS_INPUT_EVENTS:
         notification_type = payload.get("notification_type")
         if event in _NEEDS_INPUT_EVENTS or notification_type not in _IGNORED_NOTIFICATION_TYPES:
-            _set_state(session_id, "needs-input", cwd=cwd, model_label=model_label or None)
+            _set_state(session_id, "needs-input", cwd=cwd, model_label=model_label or None, model_id=model_id or None)
             name = (row or {}).get("name") or _placeholder_name(cwd)
-            notify.notify(_notify_title("needs input", cwd, model_label), _notify_body(name))
+            notify.notify(
+                _notify_title("needs input", cwd, model_label),
+                _notify_body(name),
+                session_id=session_id,
+                provider=provider,
+            )
             store.set_pending_alert(session_id, "needs-input")
             _capture_work(session_id)
             return True
@@ -381,6 +406,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             pending_alert=None,
             **transcript_fields,
             **({"model_label": model_label} if model_label else {}),
+            **({"model_id": model_id} if model_id else {}),
         )
         store.heartbeat(session_id)
         _capture_work(session_id)
@@ -391,7 +417,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
         # (/exit, /clear, a killed window): a finished turn you have not come
         # back to is still a thread you can resume, and the board's job is
         # to keep it visible until you do, or ack it.
-        _set_state(session_id, "ended", cwd=cwd, model_label=model_label or None)
+        _set_state(session_id, "ended", cwd=cwd, model_label=model_label or None, model_id=model_id or None)
         store.upsert(session_id, paused_at=time.time())
         _capture_work(session_id)
         return True

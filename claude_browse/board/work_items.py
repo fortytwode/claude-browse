@@ -14,6 +14,7 @@ from claude_browse.board import projects, store
 
 STATUSES = ("active", "done", "archived")
 PROVIDERS = ("claude", "codex")
+_SESSION_LOOKUP_CHUNK = 400
 PRIORITIES = ("urgent", "high", "normal", "low")
 _PROTOTYPE_TASK_ID = "0b001368-52a5-4368-8638-bf7b79670851"
 _MIGRATION_LOCK = threading.Lock()
@@ -705,6 +706,27 @@ def get_session_history(task_id: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def task_ids_for_sessions(session_ids: list[str]) -> set[str]:
+    """Resolve current and historical session IDs to their visible tasks."""
+    ids = list(dict.fromkeys(sid for sid in session_ids if isinstance(sid, str) and sid))
+    if not ids:
+        return set()
+    task_ids: set[str] = set()
+    with _conn() as conn:
+        for offset in range(0, len(ids), _SESSION_LOOKUP_CHUNK):
+            chunk = ids[offset : offset + _SESSION_LOOKUP_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""SELECT task_id FROM work_items WHERE session_id IN ({placeholders})
+                    UNION
+                    SELECT task_id FROM task_session_links
+                    WHERE session_id IN ({placeholders})""",
+                (*chunk, *chunk),
+            ).fetchall()
+            task_ids.update(str(row["task_id"]) for row in rows)
+    return task_ids
+
+
 def list_items(*, include_done: bool = False) -> list[dict]:
     clauses = ["session_id IS NOT NULL"]
     if not include_done:
@@ -812,6 +834,7 @@ def finish_turn(
     cwd: str | None,
     host: str,
     model_label: str | None = None,
+    model_id: str | None = None,
     mark_unattended: bool = True,
 ) -> tuple[bool, bool]:
     """Finish one turn and decide alerts against the serialized work status."""
@@ -829,6 +852,7 @@ def finish_turn(
         cwd=cwd,
         host=host,
         model_label=model_label,
+        model_id=model_id,
         mark_unattended=mark_unattended,
         alert_allowed=alert_allowed,
     )

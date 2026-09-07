@@ -36,6 +36,22 @@ def test_session_work_item_mutation_and_done_filter(tmp_path):
     assert work_items.list_items(include_done=True)[0]["task_id"] == task["task_id"]
 
 
+def test_task_ids_for_sessions_chunks_broad_history_lookups(tmp_path):
+    store.upsert("current", cwd=str(tmp_path), name="Current", provider="claude")
+    task = work_items.ensure_for_session(store.get("current"))
+    historical_ids = [f"history-{index}" for index in range(501)]
+    with store.get_conn() as conn:
+        conn.executemany(
+            """INSERT INTO task_session_links
+               (session_id, task_id, provider, cwd, created_at)
+               VALUES (?, ?, 'claude', ?, 1)""",
+            [(session_id, task["task_id"], str(tmp_path)) for session_id in historical_ids],
+        )
+        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+    assert work_items.task_ids_for_sessions(historical_ids) == {task["task_id"]}
+
+
 def test_work_item_mutation_validation_and_one_task_per_session(tmp_path):
     store.upsert("validation", cwd=str(tmp_path), name="Validate", provider="claude")
     task = work_items.ensure_for_session(store.get("validation"))
