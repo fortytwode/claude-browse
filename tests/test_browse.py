@@ -647,6 +647,17 @@ def test_native_resume_keeps_codex_native_when_mobile_disabled(monkeypatch):
     ]
 
 
+def test_board_managed_codex_launch_disables_dynamic_terminal_titles(monkeypatch):
+    monkeypatch.setenv("AGENT_BOARD_MANAGED_TERMINAL_TITLE", "1")
+
+    assert browse._board_managed_title_cmd(
+        ["codex", "resume", "abc-123"], "codex"
+    ) == ["codex", "-c", "tui.terminal_title=[]", "resume", "abc-123"]
+    assert browse._board_managed_title_cmd(["claude", "--resume", "abc-123"], "claude") == [
+        "claude", "--resume", "abc-123"
+    ]
+
+
 def test_open_in_target_provider_default_uses_native_resume(monkeypatch):
     # Same source/target, no relocate: must take the native --resume path,
     # which is bound to the thread's original project directory.

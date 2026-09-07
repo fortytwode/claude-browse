@@ -427,19 +427,25 @@ def test_direct_session_launch_reuses_browse_policy_with_hook_transcript(
     monkeypatch.setattr(
         browse,
         "_open_in_target_provider",
-        lambda *args, **kwargs: opened.append((args, kwargs)),
+        lambda *args, **kwargs: opened.append(
+            (args, kwargs, os.environ.get("AGENT_BOARD_MANAGED_TERMINAL_TITLE"),
+             os.environ.get("CLAUDE_CODE_DISABLE_TERMINAL_TITLE"))
+        ),
     )
 
     original_cwd = os.getcwd()
     commands.launch_direct_session("hook-only", "codex", full_access=False)
 
-    args, kwargs = opened[0]
+    args, kwargs, title_marker, claude_title_disabled = opened[0]
     session = args[0]
     assert session["path"] == str(transcript)
     assert session["source_size"] == 37
     assert args[1:5] == ("codex", "codex", "hook-only", str(tmp_path))
     assert args[6] is False
     assert kwargs["fork"] is None
+    assert title_marker == claude_title_disabled == "1"
+    assert "AGENT_BOARD_MANAGED_TERMINAL_TITLE" not in os.environ
+    assert "CLAUDE_CODE_DISABLE_TERMINAL_TITLE" not in os.environ
     assert os.getcwd() == str(tmp_path)
     os.chdir(original_cwd)
 

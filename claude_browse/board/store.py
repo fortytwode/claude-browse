@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     published_revision INTEGER NOT NULL DEFAULT 0,
     pending_alert_revision INTEGER,
     paused_at           REAL,
-    transcript_path    TEXT
+    transcript_path    TEXT,
+    terminal_title_managed INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -73,6 +74,7 @@ _COLUMNS = (
     # to use as the default calendar due date.
     "paused_at",
     "transcript_path",
+    "terminal_title_managed",
 )
 
 _COLUMN_TYPES = {
@@ -116,6 +118,10 @@ _COLUMN_TYPES = {
     # Local-only path used to guard launches before FTS indexes a session.
     # session_doc() deliberately excludes it from remote publication.
     "transcript_path": "TEXT",
+    # Both built-in providers emit OSC titles. This records that the process
+    # was launched with the Board's no-dynamic-title override, so a later
+    # rename never falsely claims it can persist an unmanaged title.
+    "terminal_title_managed": "INTEGER NOT NULL DEFAULT 0",
 }
 
 

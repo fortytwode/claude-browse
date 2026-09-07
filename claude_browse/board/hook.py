@@ -236,6 +236,21 @@ def _capture_work(session_id: str, *, reactivate_done: bool = False) -> dict | N
         return None
 
 
+def _apply_managed_terminal_title(session_id: str, provider: str) -> None:
+    """Best-effort title application; later hooks retry a startup race."""
+    try:
+        current = store.get(session_id)
+        if not current or not current.get("terminal_title_managed"):
+            return
+        from claude_browse.board import terminal_focus
+
+        terminal_focus.set_session_title(
+            session_id, provider, str(current.get("name") or "")
+        )
+    except Exception:
+        pass
+
+
 def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
     """Apply one recognized state transition and report whether it mutated."""
     event = payload.get("hook_event_name")
@@ -263,6 +278,10 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
         row = store.get(session_id)
 
     if event == "SessionStart":
+        title_managed = (
+            provider in {"claude", "codex"}
+            and os.environ.get("AGENT_BOARD_MANAGED_TERMINAL_TITLE") == "1"
+        )
         if row is None:
             store.upsert(
                 session_id,
@@ -272,12 +291,18 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
                 name=_placeholder_name(cwd),
                 name_source="provisional",
                 provider=provider,
+                terminal_title_managed=int(title_managed),
                 **transcript_fields,
                 **({"model_label": model_label} if model_label else {}),
                 **({"model_id": model_id} if model_id else {}),
             )
         else:
             fields: dict[str, object] = {"provider": provider}
+            # Once a session is known to have started with title producers
+            # disabled, a duplicate/late hook without inherited launch env
+            # must not downgrade that durable fact.
+            if title_managed:
+                fields["terminal_title_managed"] = 1
             fields.update(transcript_fields)
             if cwd is not None:
                 fields["cwd"] = cwd
@@ -298,6 +323,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
             except Exception:
                 pass
         _capture_work(session_id)
+        _apply_managed_terminal_title(session_id, provider)
         return True
 
     elif event == "UserPromptSubmit":
@@ -329,6 +355,7 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
         store.upsert(session_id, **fields)
         store.heartbeat(session_id)
         _capture_work(session_id, reactivate_done=True)
+        _apply_managed_terminal_title(session_id, provider)
         return True
 
     elif event == "Stop":

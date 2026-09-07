@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import threading
 
@@ -10,6 +9,7 @@ from . import presence, store, work_items
 
 _title_locks: dict[str, threading.Lock] = {}
 _title_locks_guard = threading.Lock()
+MANAGED_TITLE_ENV = "AGENT_BOARD_MANAGED_TERMINAL_TITLE"
 
 _FOCUS_SCRIPT = """on run argv
 set wantedTTY to \"/dev/\" & item 1 of argv
@@ -28,6 +28,24 @@ end tell
 return \"not-found\"
 end run"""
 
+_TITLE_SCRIPT = """on run argv
+set wantedTTY to \"/dev/\" & item 1 of argv
+set wantedTitle to item 2 of argv
+tell application \"Terminal\"
+    repeat with terminalWindow in windows
+        repeat with terminalTab in tabs of terminalWindow
+            if (tty of terminalTab as text) is wantedTTY then
+                set custom title of terminalTab to wantedTitle
+                set title displays custom title of terminalTab to true
+                if (custom title of terminalTab as text) is wantedTitle and (title displays custom title of terminalTab as boolean) then return \"updated\"
+                return \"not-updated\"
+            end if
+        end repeat
+    end repeat
+end tell
+return \"not-found\"
+end run"""
+
 
 def _terminal_title(value: str) -> str:
     """Return one bounded OSC-safe line for a Terminal tab title."""
@@ -35,14 +53,42 @@ def _terminal_title(value: str) -> str:
     return " ".join(printable.split())[:200]
 
 
+def _set_terminal_custom_title(tty: str, title: str) -> str:
+    """Set and read back Terminal's persistent custom title for one exact TTY."""
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed native Terminal script
+            ["osascript", "-e", _TITLE_SCRIPT, "--", tty, title],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "error"
+    if result.returncode != 0:
+        return "error"
+    return result.stdout.strip()
+
+
 def set_session_title(session_id: str, provider: str, title: str) -> dict[str, object]:
-    """Update the exact live Terminal tab title without writing shell input."""
+    """Persist a title on the exact live Terminal tab, without shell input."""
     clean = _terminal_title(title)
     if not clean:
         return {"updated": False, "reason": "The title is empty after sanitization."}
     with _title_locks_guard:
         title_lock = _title_locks.setdefault(session_id, threading.Lock())
     with title_lock:
+        current = store.get(session_id)
+        if provider in {"claude", "codex"} and not bool(
+            (current or {}).get("terminal_title_managed")
+        ):
+            return {
+                "updated": False,
+                "reason": (
+                    "This terminal was opened before managed titles were enabled. "
+                    "Reopen it through Agent Board to use its saved title."
+                ),
+            }
         tty, reason = presence.verified_terminal_tty(session_id, provider)
         if not tty:
             return {"updated": False, "reason": reason}
@@ -50,23 +96,14 @@ def set_session_title(session_id: str, provider: str, title: str) -> dict[str, o
         for _attempt in range(3):
             current = store.get(session_id)
             desired = _terminal_title(str((current or {}).get("name") or requested))
-            descriptor: int | None = None
-            failure = ""
-            try:
-                descriptor = os.open(
-                    f"/dev/{tty}", os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK
-                )
-                os.write(descriptor, f"\033]0;{desired}\007".encode())
-            except OSError:
-                failure = "The verified Terminal tab could not be retitled."
-            finally:
-                if descriptor is not None:
-                    try:
-                        os.close(descriptor)
-                    except OSError:
-                        failure = "The verified Terminal tab could not be retitled."
-            if failure:
-                return {"updated": False, "reason": failure}
+            result = _set_terminal_custom_title(tty, desired)
+            if result == "not-found":
+                return {
+                    "updated": False,
+                    "reason": "The verified Terminal tab disappeared before it could be retitled.",
+                }
+            if result != "updated":
+                return {"updated": False, "reason": "The verified Terminal tab could not be retitled."}
             latest = store.get(session_id)
             latest_title = _terminal_title(str((latest or {}).get("name") or desired))
             if latest_title == desired:

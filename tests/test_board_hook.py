@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_browse.board import hook, store, work_items
+from claude_browse.board import hook, store, terminal_focus, work_items
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENTRY_SCRIPT = REPO_ROOT / "agent-board"
@@ -355,6 +355,107 @@ def test_session_start_creates_row_with_placeholder_name_no_crash(tmp_path, monk
     assert row is not None
     assert row["state"] == "idle"
     assert row["name"]
+
+
+def test_board_managed_codex_session_start_applies_the_stored_terminal_title(
+    tmp_path, monkeypatch
+):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setenv(terminal_focus.MANAGED_TITLE_ENV, "1")
+    monkeypatch.setattr(
+        terminal_focus,
+        "set_session_title",
+        lambda session_id, provider, title: calls.append((session_id, provider, title))
+        or {"updated": True, "reason": ""},
+    )
+    store.upsert("managed", name="Board task", name_source="manual", provider="codex")
+
+    assert hook.dispatch(
+        {"hook_event_name": "SessionStart", "session_id": "managed", "cwd": "/tmp/proj"},
+        provider="codex",
+    )
+
+    assert store.get("managed")["terminal_title_managed"] == 1
+    assert calls == [("managed", "codex", "Board task")]
+
+
+def test_board_managed_claude_session_start_applies_the_stored_terminal_title(
+    tmp_path, monkeypatch
+):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setenv(terminal_focus.MANAGED_TITLE_ENV, "1")
+    monkeypatch.setattr(
+        terminal_focus,
+        "set_session_title",
+        lambda session_id, provider, title: calls.append((session_id, provider, title))
+        or {"updated": True, "reason": ""},
+    )
+    store.upsert("managed-claude", name="Claude task", name_source="manual", provider="claude")
+
+    assert hook.dispatch(
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": "managed-claude",
+            "cwd": "/tmp/proj",
+        },
+        provider="claude",
+    )
+
+    assert store.get("managed-claude")["terminal_title_managed"] == 1
+    assert calls == [("managed-claude", "claude", "Claude task")]
+
+
+def test_board_managed_title_retries_after_startup_terminal_proof_race(
+    tmp_path, monkeypatch
+):
+    _fresh_store(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setenv(terminal_focus.MANAGED_TITLE_ENV, "1")
+    monkeypatch.setattr(
+        terminal_focus,
+        "set_session_title",
+        lambda session_id, provider, title: calls.append((session_id, provider, title))
+        or {"updated": len(calls) > 1, "reason": "not ready" if len(calls) == 1 else ""},
+    )
+    store.upsert("retry", name="Saved task", name_source="manual", provider="codex")
+
+    hook.dispatch(
+        {"hook_event_name": "SessionStart", "session_id": "retry", "cwd": "/tmp/proj"},
+        provider="codex",
+    )
+    hook.dispatch(
+        {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "retry",
+            "cwd": "/tmp/proj",
+            "prompt": "continue",
+        },
+        provider="codex",
+    )
+
+    assert calls == [("retry", "codex", "Saved task"), ("retry", "codex", "Saved task")]
+
+
+def test_duplicate_unmanaged_session_start_does_not_downgrade_managed_title(
+    tmp_path, monkeypatch
+):
+    _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setenv(terminal_focus.MANAGED_TITLE_ENV, "1")
+    monkeypatch.setattr(terminal_focus, "set_session_title", lambda *_args: {})
+
+    hook.dispatch(
+        {"hook_event_name": "SessionStart", "session_id": "durable", "cwd": "/tmp/proj"},
+        provider="codex",
+    )
+    monkeypatch.delenv(terminal_focus.MANAGED_TITLE_ENV)
+    hook.dispatch(
+        {"hook_event_name": "SessionStart", "session_id": "durable", "cwd": "/tmp/proj"},
+        provider="codex",
+    )
+
+    assert store.get("durable")["terminal_title_managed"] == 1
 
 
 def test_user_prompt_submit_sets_working_and_captures_provisional_name(tmp_path, monkeypatch):

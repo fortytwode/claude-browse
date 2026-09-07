@@ -75,35 +75,46 @@ def test_main_focuses_only_a_valid_session_provider_pair(monkeypatch):
     assert terminal_focus.main(["session-id", "unknown"]) == 2
 
 
-def test_set_session_title_writes_only_to_the_verified_terminal(monkeypatch):
-    writes = []
+def test_set_session_title_persists_and_reads_back_only_the_verified_terminal(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        terminal_focus.store, "get", lambda _session_id: {"terminal_title_managed": 1}
+    )
     monkeypatch.setattr(
         terminal_focus.presence, "verified_terminal_tty", lambda *_args: ("ttys004", "")
     )
-    monkeypatch.setattr(terminal_focus.os, "open", lambda path, flags: writes.append((path, flags)) or 42)
-    monkeypatch.setattr(terminal_focus.os, "write", lambda fd, payload: writes.append((fd, payload)) or len(payload))
-    monkeypatch.setattr(terminal_focus.os, "close", lambda fd: writes.append(("close", fd)))
+    monkeypatch.setattr(
+        terminal_focus.subprocess,
+        "run",
+        lambda argv, **kwargs: calls.append((argv, kwargs)) or SimpleNamespace(
+            returncode=0, stdout="updated\n"
+        ),
+    )
 
     result = terminal_focus.set_session_title(
         "session-id", "codex", "Plan\nrelease\x1b\u009b\u009c\u009d"
     )
 
     assert result == {"updated": True, "reason": ""}
-    assert writes[0][0] == "/dev/ttys004"
-    assert writes[1] == (42, b"\x1b]0;Plan release\x07")
-    assert writes[2] == ("close", 42)
+    argv, kwargs = calls[0]
+    assert argv[:3] == ["osascript", "-e", terminal_focus._TITLE_SCRIPT]
+    assert argv[-3:] == ["--", "ttys004", "Plan release"]
+    assert kwargs["timeout"] == 3
 
 
 def test_set_session_title_is_a_safe_noop_without_terminal_proof(monkeypatch):
+    monkeypatch.setattr(
+        terminal_focus.store, "get", lambda _session_id: {"terminal_title_managed": 1}
+    )
     monkeypatch.setattr(
         terminal_focus.presence,
         "verified_terminal_tty",
         lambda *_args: (None, "No verified terminal."),
     )
     monkeypatch.setattr(
-        terminal_focus.os,
-        "open",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("must not open a tty")),
+        terminal_focus.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not call Terminal")),
     )
 
     assert terminal_focus.set_session_title("session-id", "claude", "Renamed") == {
@@ -113,22 +124,24 @@ def test_set_session_title_is_a_safe_noop_without_terminal_proof(monkeypatch):
 
 
 def test_set_session_title_discards_an_older_rename_after_verification(monkeypatch):
-    writes = []
+    calls = []
     monkeypatch.setattr(
         terminal_focus.presence, "verified_terminal_tty", lambda *_args: ("ttys004", "")
     )
     monkeypatch.setattr(
         terminal_focus.store,
         "get",
-        lambda _session_id: {"name": "Newer title", "name_source": "manual"},
+        lambda _session_id: {
+            "name": "Newer title",
+            "name_source": "manual",
+            "terminal_title_managed": 1,
+        },
     )
-    monkeypatch.setattr(terminal_focus.os, "open", lambda *_args: 42)
     monkeypatch.setattr(
-        terminal_focus.os,
-        "write",
-        lambda _fd, payload: writes.append(payload) or len(payload),
+        terminal_focus.subprocess,
+        "run",
+        lambda argv, **_kwargs: calls.append(argv) or SimpleNamespace(returncode=0, stdout="updated\n"),
     )
-    monkeypatch.setattr(terminal_focus.os, "close", lambda _fd: None)
 
     result = terminal_focus.set_session_title("session-id", "codex", "Older title")
 
@@ -136,4 +149,42 @@ def test_set_session_title_discards_an_older_rename_after_verification(monkeypat
         "updated": False,
         "reason": "A newer session title replaced this rename.",
     }
-    assert writes == [b"\x1b]0;Newer title\x07"]
+    assert calls[0][-1] == "Newer title"
+
+
+def test_set_session_title_reports_a_disappearing_verified_tab(monkeypatch):
+    monkeypatch.setattr(
+        terminal_focus.store, "get", lambda _session_id: {"terminal_title_managed": 1}
+    )
+    monkeypatch.setattr(
+        terminal_focus.presence, "verified_terminal_tty", lambda *_args: ("ttys004", "")
+    )
+    monkeypatch.setattr(
+        terminal_focus.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="not-found\n"),
+    )
+
+    assert terminal_focus.set_session_title("session-id", "codex", "Renamed") == {
+        "updated": False,
+        "reason": "The verified Terminal tab disappeared before it could be retitled.",
+    }
+
+
+def test_set_session_title_warns_for_an_existing_unmanaged_codex_terminal(monkeypatch):
+    monkeypatch.setattr(
+        terminal_focus.store, "get", lambda _session_id: {"terminal_title_managed": 0}
+    )
+    monkeypatch.setattr(
+        terminal_focus.presence,
+        "verified_terminal_tty",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not inspect Terminal")),
+    )
+
+    assert terminal_focus.set_session_title("session-id", "codex", "Renamed") == {
+        "updated": False,
+        "reason": (
+            "This terminal was opened before managed titles were enabled. "
+            "Reopen it through Agent Board to use its saved title."
+        ),
+    }
