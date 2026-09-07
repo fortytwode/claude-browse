@@ -519,7 +519,9 @@ Firestore uses Application Default Credentials (`gcloud auth
 application-default login`). Point it at YOUR project via
 `CLAUDE_BROWSE_BOARD_PROJECT`, `CLAUDE_BROWSE_BOARD_DATABASE`, and
 `CLAUDE_BROWSE_BOARD_COLLECTION` (defaults preserve existing installs). Slack
-needs `SLACK_BOT_TOKEN` -- set in your environment, or in
+delivery is disabled by default. To opt into the `#agent-status` board and
+needs-input alerts, set `AGENT_BOARD_SLACK_ENABLED=1`; it also needs
+`SLACK_BOT_TOKEN` set in your environment, or in
 `~/team-operations/.env` (auto-detected as a fallback, since hooks run
 with a minimal inherited environment that usually won't have it exported).
 

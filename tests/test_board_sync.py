@@ -403,6 +403,7 @@ def test_push_calls_post_alert_when_pending_alert_set_and_clears_it(tmp_path, mo
     board itself uses) doesn't re-notify Slack channel members, so a
     transition that warrants attention needs a genuinely NEW message too."""
     _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENT_BOARD_SLACK_ENABLED", "1")
     store.upsert("s-alert", host="air", cwd="/tmp/proj", state="needs-input",
                  name="blocked-thread", pending_alert="needs-input", model_label="Sonnet")
     monkeypatch.setattr(sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)}))
@@ -421,6 +422,37 @@ def test_push_calls_post_alert_when_pending_alert_set_and_clears_it(tmp_path, mo
 
     assert calls == [("s-alert", "needs-input", "blocked-thread", "Sonnet")]
     assert store.get("s-alert")["pending_alert"] is None  # cleared after posting
+
+
+def test_push_keeps_firestore_sync_but_skips_all_slack_when_delivery_disabled(
+    tmp_path, monkeypatch
+):
+    _fresh_store(tmp_path, monkeypatch)
+    store.upsert(
+        "s-slack-off",
+        host="air",
+        cwd="/tmp/proj",
+        state="needs-input",
+        name="blocked-thread",
+        pending_alert="needs-input",
+    )
+    monkeypatch.delenv("AGENT_BOARD_SLACK_ENABLED", raising=False)
+    monkeypatch.setattr(
+        sync, "naming", type("N", (), {"maybe_name": staticmethod(lambda sid: None)})
+    )
+    client = _FakeClient()
+    monkeypatch.setattr(sync, "_firestore_client", lambda: client)
+    alerts = []
+    boards = []
+    monkeypatch.setattr(sync, "post_alert", lambda *a, **k: alerts.append((a, k)))
+    monkeypatch.setattr(sync, "post_or_update_slack", boards.append)
+
+    assert sync.push("s-slack-off") is True
+
+    assert "air:s-slack-off" in client.sink
+    assert alerts == []
+    assert boards == []
+    assert store.get("s-slack-off")["pending_alert"] is None
 
 
 def test_push_does_not_call_post_alert_when_none_pending(tmp_path, monkeypatch):
@@ -592,6 +624,7 @@ def test_push_immediate_done_alert_opt_in(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     _quiet(monkeypatch)
     monkeypatch.setenv("AGENT_BOARD_IMMEDIATE_DONE_ALERT", "1")
+    monkeypatch.setenv("AGENT_BOARD_SLACK_ENABLED", "1")
     store.upsert("s-d2", host="air", cwd="/tmp/p", state="idle", name="t", pending_alert="done")
     store.mark_done("s-d2", 90)
     monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
@@ -635,6 +668,7 @@ def test_push_needs_input_alert_is_always_immediate(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     _quiet(monkeypatch)
     monkeypatch.delenv("AGENT_BOARD_IMMEDIATE_DONE_ALERT", raising=False)
+    monkeypatch.setenv("AGENT_BOARD_SLACK_ENABLED", "1")
     store.upsert("s-n", host="air", cwd="/tmp/p", state="needs-input", name="t",
                  pending_alert="needs-input", provider="codex")
     monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
@@ -717,6 +751,7 @@ def test_ack_main_marks_local_and_pushes(tmp_path, monkeypatch, capsys):
 
 def test_ack_full_push_refreshes_slack_with_rendered_body(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENT_BOARD_SLACK_ENABLED", "1")
     monkeypatch.setattr(sync, "_PUBLICATION_LOCK_PATH", tmp_path / "publication.lock")
     store.upsert("abc-2", host="air", cwd="/tmp/p", state="idle", name="review launch")
     store.mark_done("abc-2", 600)
