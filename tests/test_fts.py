@@ -172,9 +172,14 @@ def test_normalize_single_word_is_token_match():
     assert fts.normalize_query("runna") == '"runna"'
 
 
-def test_normalize_two_words_is_AND():
-    """'runna sca2' should become AND of two quoted tokens (FTS5 default)."""
-    assert fts.normalize_query("runna sca2") == '"runna" "sca2"'
+def test_normalize_two_words_is_phrase():
+    """'runna sca2' typed bare is one FTS5 phrase clause, not two AND tokens."""
+    assert fts.normalize_query("runna sca2") == '"runna sca2"'
+
+
+def test_normalize_wildcard_words_stay_AND():
+    """A prefix wildcard cannot live inside a phrase, so the terms stay AND."""
+    assert fts.normalize_query("runna sca*") == '"runna" "sca"*'
 
 
 def test_normalize_quoted_is_phrase():
@@ -224,13 +229,36 @@ def test_search_single_word_exact_token(db):
     assert sids == ["s1"]
 
 
-def test_search_two_words_is_AND(db):
+def test_search_two_words_is_phrase(db):
     _seed(db, "s1", "the runna sca2 deck is ready")
-    _seed(db, "s2", "only runna mentioned here")
+    _seed(db, "s2", "runna and sca2 mentioned with gap")
     _seed(db, "s3", "only sca2 mentioned here")
 
-    sids = sorted(r["session_id"] for r in fts.search(db, "runna sca2"))
-    assert sids == ["s1"]
+    results = fts.search(db, "runna sca2")
+    # Bare words typed together are a phrase: s2 mentions both words but not
+    # adjacent, so it must not surface as a broad AND match.
+    assert [r["session_id"] for r in results] == ["s1"]
+    assert "phrase_fallback" not in results[0]
+
+
+def test_matching_session_ids_two_words_is_phrase_then_relaxes(db):
+    _seed(db, "s1", "the runna sca2 deck is ready")
+    _seed(db, "s2", "runna and sca2 mentioned with gap")
+
+    # Work search follows the picker: the phrase wins while it has hits...
+    assert fts.matching_session_ids(db, "runna sca2") == ["s1"]
+    # ...and relaxes to AND over the same words only when nothing has it.
+    assert sorted(fts.matching_session_ids(db, "sca2 runna")) == ["s1", "s2"]
+
+
+def test_search_two_words_relax_to_AND_only_without_phrase_hit(db):
+    _seed(db, "s2", "runna and sca2 mentioned with gap")
+    _seed(db, "s3", "only sca2 mentioned here")
+
+    results = fts.search(db, "runna sca2")
+    assert [r["session_id"] for r in results] == ["s2"]
+    assert results[0]["phrase_fallback"] is True
+    assert results[0]["phrase_fallback_from"] == "runna sca2"
 
 
 def test_search_phrase_requires_adjacency(db):
@@ -614,11 +642,30 @@ def test_search_ranked_unquoted_short_phrase_prefers_exact_phrase(db):
     )
 
     results = fts.search_ranked(db, "cfo update")
-    assert [r["session_id"] for r in results][:2] == [
-        "exact_phrase",
-        "separate_words",
-    ]
+    # Bare words are a phrase: the thread with "CFO planning and update"
+    # mentions both words but never the phrase, so it does not surface.
+    assert [r["session_id"] for r in results] == ["exact_phrase"]
+    assert "phrase_fallback" not in results[0]
     assert "CFO update" in results[0]["context"]
+
+
+def test_search_ranked_unquoted_words_relax_to_AND_only_without_phrase_hit(db):
+    _seed(
+        db,
+        "separate_words",
+        "CFO planning and update notes",
+        timestamp="2026-05-12T00:00:00Z",
+        last_timestamp="2026-05-12T01:00:00Z",
+        segments=[
+            ("user", "Can you review CFO planning?", "2026-05-12T00:00:00Z"),
+            ("assistant", "The update notes are later in the file.", "2026-05-12T01:00:00Z"),
+        ],
+    )
+
+    results = fts.search_ranked(db, "cfo update")
+    assert [r["session_id"] for r in results] == ["separate_words"]
+    assert results[0]["phrase_fallback"] is True
+    assert results[0]["phrase_fallback_terms"] == "cfo, update"
 
 
 def test_search_ranked_short_anchor_search_sorts_phrase_hits_by_match_recency(db):

@@ -56,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   without writing (exit 1 on drift).
 
 ### Changed
+- **Bare words typed together now search as one phrase.** `runna sca2` means
+  the phrase `runna sca2`, not every thread that mentions both words
+  somewhere. Only when nothing contains the phrase does the picker relax to
+  all-words-anywhere and label those rows `near phrase`. Quoted phrases,
+  `prefix*` wildcards, and sentence-style queries keep their previous
+  behavior.
 - A plain "done" no longer posts an immediate Slack message (it could not
   distinguish a run you walked away from and a turn you watched; an
   interactive evening produced ~15 alerts from 3 threads). Local banner and

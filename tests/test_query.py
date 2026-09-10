@@ -31,14 +31,49 @@ def test_query_plan_keeps_specific_people_and_topic_words():
     assert plan.descriptive is True
 
 
-def test_query_plan_tracks_implicit_phrase_for_short_anchor_search():
+def test_query_plan_collapses_short_anchor_search_into_phrase():
     plan = build_query_plan("cfo update")
 
+    assert plan.fts_terms == ("cfo", "update")
     assert plan.anchor_terms == ("cfo", "update")
     assert plan.exact_phrase_terms == ("cfo update",)
-    assert plan.phrase_fallback_terms == ()
+    assert plan.phrase_fallback_terms == ("cfo", "update")
     assert plan.highlight_terms[0] == "cfo update"
     assert plan.descriptive is False
+    assert plan.implicit_phrase is True
+
+
+def test_query_plan_collapses_three_specific_words_into_phrase():
+    plan = build_query_plan("CFO update notes")
+
+    assert plan.fts_terms == ("cfo", "update", "notes")
+    assert plan.exact_phrase_terms == ("cfo update notes",)
+    assert plan.phrase_fallback_terms == ("cfo", "update", "notes")
+    assert plan.implicit_phrase is True
+    assert plan.descriptive is False
+
+
+def test_query_plan_keeps_wildcard_words_as_separate_terms():
+    plan = build_query_plan("runna sca*")
+
+    assert plan.fts_terms == ("runna", "sca*")
+    assert plan.implicit_phrase is False
+
+
+def test_query_plan_keeps_explicit_quote_plus_word_as_separate_terms():
+    plan = build_query_plan('runna "sca2 v3"')
+
+    assert plan.fts_terms == ("sca2 v3", "runna")
+    assert plan.phrase_fallback_terms == ("sca2", "v3")
+    assert plan.implicit_phrase is False
+
+
+def test_query_plan_does_not_collapse_when_a_word_was_dropped():
+    plan = build_query_plan("runna latest")
+
+    assert plan.fts_terms == ("runna",)
+    assert plan.wants_recent is True
+    assert plan.implicit_phrase is False
 
 
 def test_query_plan_tracks_implicit_phrase_for_short_descriptive_anchor_search():

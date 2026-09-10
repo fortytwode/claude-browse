@@ -2,7 +2,8 @@
 
 Replaces fzf's character-level fuzzy matching with proper full-text search:
 single bare words match tokens exactly (no fuzzy false-positive flood),
-multiple bare words AND together, double-quoted strings match as phrases.
+multiple bare words match as one phrase (relaxed to AND only when nothing
+contains the phrase), double-quoted strings force a phrase inside a sentence.
 
 The index lives at ~/.claude/cache/claude-browse-index.db. It's pure cache —
 deletable any time; the next claude-browse run rebuilds from JSONL.
@@ -1379,18 +1380,23 @@ def normalize_query(query: str) -> str:
 
     Each bare word becomes a quoted FTS5 token (so it's an exact-token match,
     never an operator), and double-quoted spans become FTS5 phrase clauses.
-    Implicit AND between clauses is FTS5's default. Result for the four
-    user-stated cases:
+    Several bare words typed together collapse into one phrase clause (see
+    QueryPlan.implicit_phrase); the search fallback chain relaxes that phrase
+    to AND only when nothing contains it. Implicit AND between clauses is
+    FTS5's default. Result for the four user-stated cases:
 
         runna           -> "runna"                (single token)
-        runna sca2      -> "runna" "sca2"         (AND of two tokens)
-        "runna sca2"    -> "runna sca2"           (phrase: adjacent in order)
+        runna sca2      -> "runna sca2"           (phrase: adjacent in order)
+        "runna sca2"    -> "runna sca2"           (phrase, forced by quotes)
         runna "sca2 v3" -> "runna" "sca2 v3"      (token AND phrase)
 
     Bare uppercase AND/OR/NOT also get quoted, so they match literally rather
     than triggering FTS5 boolean operators. Power users who want booleans
     can quote the operands and write them themselves.
     """
+    plan = build_query_plan(query)
+    if plan.implicit_phrase:
+        return _plan_fts_query(plan)
     parts: list[str] = []
     for text in significant_query_terms(query):
         text = text.strip()
@@ -1432,6 +1438,26 @@ def _terms_to_fts_query(
             escaped = text.replace('"', '""')
             parts.append(f'"{escaped}"')
     return joiner.join(parts)
+
+
+def _plan_fts_query(plan: QueryPlan) -> str:
+    """Strict FTS5 query for a plan.
+
+    Bare words typed together (QueryPlan.implicit_phrase) are joined into one
+    phrase clause so `runna sca2` means "runna sca2", not runna AND sca2.
+    Every other plan is the plain AND of its terms.
+    """
+    terms = list(plan.fts_terms)
+    if plan.implicit_phrase and len(terms) >= 2:
+        return _terms_to_fts_query([" ".join(terms)])
+    return _terms_to_fts_query(terms)
+
+
+def _implicit_phrase_relaxed_plan(plan: QueryPlan) -> QueryPlan | None:
+    """Relax a bare-word phrase to AND over the same words after zero hits."""
+    if not plan.implicit_phrase or len(plan.fts_terms) < 2:
+        return None
+    return replace(plan, implicit_phrase=False)
 
 
 def _unique_terms(*groups: tuple[str, ...]) -> tuple[str, ...]:
@@ -3454,6 +3480,18 @@ def search(
         except sqlite3.OperationalError:
             return []
     if not rows:
+        relaxed_plan = _implicit_phrase_relaxed_plan(plan)
+        if relaxed_plan:
+            relaxed_query = _terms_to_fts_query(list(relaxed_plan.fts_terms))
+            if relaxed_query:
+                try:
+                    rows = conn.execute(sql, (relaxed_query, limit)).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                if rows:
+                    plan = relaxed_plan
+                    fallback_matched = True
+    if not rows:
         fallback_plan = _phrase_fallback_plan(plan)
         if fallback_plan:
             fallback_query = _terms_to_fts_query(list(fallback_plan.fts_terms))
@@ -3560,6 +3598,7 @@ def matching_session_ids(conn: sqlite3.Connection, query: str) -> list[str]:
     candidates.extend(
         [
             plan,
+            _implicit_phrase_relaxed_plan(plan),
             _phrase_fallback_plan(plan),
             _prefix_fallback_plan(plan),
             _retokenize_fallback_plan(strict_plan, query),
@@ -3570,7 +3609,7 @@ def matching_session_ids(conn: sqlite3.Connection, query: str) -> list[str]:
     for candidate in candidates:
         if candidate is None or candidate.low_confidence:
             continue
-        fts_query = _terms_to_fts_query(list(candidate.fts_terms))
+        fts_query = _plan_fts_query(candidate)
         if not fts_query or fts_query in seen_queries:
             continue
         seen_queries.add(fts_query)
@@ -3635,7 +3674,7 @@ def search_ranked(
         return list_recent(conn, limit)
     plan = _discriminative_query_plan(conn, plan)
     strict_plan = plan
-    fts_query = "" if plan.low_confidence else _terms_to_fts_query(list(plan.fts_terms))
+    fts_query = "" if plan.low_confidence else _plan_fts_query(plan)
     if not fts_query and not exact_results:
         return list_recent(conn, limit)
     descriptive = plan.descriptive
@@ -3684,6 +3723,19 @@ def search_ranked(
             rows = conn.execute(sql, (fts_query, candidate_pool)).fetchall()
         except sqlite3.OperationalError:
             return exact_results[:limit]
+    if fts_query and not rows:
+        relaxed_plan = _implicit_phrase_relaxed_plan(plan)
+        if relaxed_plan:
+            relaxed_query = _terms_to_fts_query(list(relaxed_plan.fts_terms))
+            if relaxed_query:
+                try:
+                    rows = conn.execute(sql, (relaxed_query, candidate_pool)).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                if rows:
+                    plan = relaxed_plan
+                    terms = list(plan.fts_terms)
+                    fallback_matched = True
     if fts_query and not rows:
         fallback_plan = _phrase_fallback_plan(plan)
         if fallback_plan:

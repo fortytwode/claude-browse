@@ -347,10 +347,13 @@ def render_query_coach_preview(query: str) -> str:
         )
         return "\n".join(lines)
 
-    if plan.anchor_terms:
+    if plan.implicit_phrase:
+        lines.append("")
+        lines.append(f"Phrase: {' '.join(plan.fts_terms)}")
+    elif plan.anchor_terms:
         lines.append("")
         lines.append(f"Anchors: {', '.join(plan.anchor_terms)}")
-    if plan.exact_phrase_terms:
+    if plan.exact_phrase_terms and not plan.implicit_phrase:
         if plan.descriptive:
             lines.append(f"Phrase boost: {', '.join(plan.exact_phrase_terms)}")
         else:
@@ -376,7 +379,12 @@ def render_query_coach_preview(query: str) -> str:
                 "Sentence-style query detected. The ranker will prefer these anchors "
                 "over filler words."
                 if plan.descriptive
-                else "Exact anchor search. Add more context if the results still feel broad."
+                else (
+                    "Phrase search: these words must appear together, in order. "
+                    "Only if nothing matches does it relax to all words anywhere."
+                    if plan.implicit_phrase
+                    else "Exact anchor search. Add more context if the results still feel broad."
+                )
             ),
         ]
     )
@@ -1093,7 +1101,10 @@ def _print_usage(argv0: str, target_provider: str) -> None:
         "  brand brief where we questioned the opportunities\n"
         "  where i was asking about teammate feedback\n"
         "  last closeout session for client\n"
-        '  "runna sca2"          Exact phrase when you know the words already\n'
+        "  runna sca2            Words typed together match as that phrase\n"
+        "                        (relaxed to all-words-anywhere only when\n"
+        "                        nothing contains the phrase)\n"
+        '  "runna sca2"          Quotes force a phrase inside a longer query\n'
         "  runna*                Prefix match: runna, runnathon, runna2026, ...\n"
         "  Longer descriptive queries are reduced to the most specific anchors.\n"
         "\n"
