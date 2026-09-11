@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     msg_count          INTEGER,
     named_at_msg_count INTEGER,
     model_label        TEXT,
+    model_id           TEXT,
     pending_alert      TEXT,
     provider           TEXT,
     done_at            REAL,
@@ -41,7 +42,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     published_revision INTEGER NOT NULL DEFAULT 0,
     pending_alert_revision INTEGER,
     paused_at           REAL,
-    transcript_path    TEXT
+    transcript_path    TEXT,
+    terminal_title_managed INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -58,6 +60,7 @@ _COLUMNS = (
     "msg_count",
     "named_at_msg_count",
     "model_label",
+    "model_id",
     "pending_alert",
     "provider",
     "done_at",
@@ -71,6 +74,7 @@ _COLUMNS = (
     # to use as the default calendar due date.
     "paused_at",
     "transcript_path",
+    "terminal_title_managed",
 )
 
 _COLUMN_TYPES = {
@@ -86,6 +90,7 @@ _COLUMN_TYPES = {
     "msg_count": "INTEGER",
     "named_at_msg_count": "INTEGER",
     "model_label": "TEXT",
+    "model_id": "TEXT",
     "pending_alert": "TEXT",
     # Which CLI owns the session ("claude" / "codex"). Drives the resume
     # command on every surface; NULL on rows written before this column
@@ -113,6 +118,10 @@ _COLUMN_TYPES = {
     # Local-only path used to guard launches before FTS indexes a session.
     # session_doc() deliberately excludes it from remote publication.
     "transcript_path": "TEXT",
+    # Both built-in providers emit OSC titles. This records that the process
+    # was launched with the Board's no-dynamic-title override, so a later
+    # rename never falsely claims it can persist an unmanaged title.
+    "terminal_title_managed": "INTEGER NOT NULL DEFAULT 0",
 }
 
 
@@ -283,6 +292,7 @@ def set_state(
     working_since: float | None = None,
     host: str | None = None,
     model_label: str | None = None,
+    model_id: str | None = None,
 ) -> None:
     fields: dict[str, object] = {"state": state}
     if cwd is not None:
@@ -293,6 +303,8 @@ def set_state(
         fields["host"] = host
     if model_label is not None:
         fields["model_label"] = model_label
+    if model_id is not None:
+        fields["model_id"] = model_id
     upsert(session_id, **fields)
 
 
@@ -304,6 +316,7 @@ def finish_turn(
     cwd: str | None,
     host: str,
     model_label: str | None = None,
+    model_id: str | None = None,
     mark_unattended: bool = True,
 ) -> bool:
     """Atomically commit the exact in-flight turn and its alert marker.
@@ -318,6 +331,7 @@ def finish_turn(
         cwd=cwd,
         host=host,
         model_label=model_label,
+        model_id=model_id,
         mark_unattended=mark_unattended,
     )
     return finished
@@ -331,6 +345,7 @@ def finish_turn_with_decision(
     cwd: str | None,
     host: str,
     model_label: str | None = None,
+    model_id: str | None = None,
     mark_unattended: bool = True,
     alert_allowed: Callable[[sqlite3.Connection], bool] | None = None,
 ) -> tuple[bool, bool]:
@@ -344,7 +359,8 @@ def finish_turn_with_decision(
         cursor = conn.execute(
             "UPDATE sessions SET state = 'idle', working_since = NULL, "
             "cwd = COALESCE(?, cwd), host = ?, "
-            "model_label = COALESCE(?, model_label), heartbeat_at = ?, updated_at = ?, "
+            "model_label = COALESCE(?, model_label), model_id = COALESCE(?, model_id), "
+            "heartbeat_at = ?, updated_at = ?, "
             "done_at = CASE WHEN ? THEN ? ELSE done_at END, "
             "done_turn_s = CASE WHEN ? THEN ? ELSE done_turn_s END, "
             "acked_at = CASE WHEN ? THEN NULL ELSE acked_at END, "
@@ -357,6 +373,7 @@ def finish_turn_with_decision(
                 cwd,
                 host,
                 model_label,
+                model_id,
                 now,
                 now,
                 should_mark_unattended,

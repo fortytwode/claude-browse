@@ -1160,6 +1160,16 @@ def _codex_mobile_cmd(*args: str, yolo: bool) -> list[str]:
     return cmd
 
 
+def _board_managed_title_cmd(cmd: list[str], provider: str) -> list[str]:
+    """Disable Codex's OSC title producer for a Board-managed process only."""
+    if (
+        provider == "codex"
+        and os.environ.get("AGENT_BOARD_MANAGED_TERMINAL_TITLE") == "1"
+    ):
+        return [cmd[0], "-c", "tui.terminal_title=[]", *cmd[1:]]
+    return cmd
+
+
 def _session_holder(session_id: str, binary: str) -> tuple[int, str] | None:
     """Return (pid, tty) of a live provider process attached to session_id.
 
@@ -1272,6 +1282,7 @@ def _native_resume(
                 f"Forking{mode} in {spec.display_name} "
                 f"({folder_name(cwd, prefixes)})..."
             )
+            fork_cmd = _board_managed_title_cmd(fork_cmd, provider)
             os.execvp(fork_cmd[0], fork_cmd)
             return
         if holder:
@@ -1306,11 +1317,13 @@ def _native_resume(
             f"Thread launch is already in progress; forking{mode} in "
             f"{spec.display_name} ({folder_name(cwd, prefixes)})..."
         )
+        fork_cmd = _board_managed_title_cmd(fork_cmd, provider)
         os.execvp(fork_cmd[0], fork_cmd)
         return
     print(f"Resuming{mode} in {spec.display_name} ({folder_name(cwd, prefixes)})...")
     try:
-        os.execvp(spec.binary, cmd)
+        cmd = _board_managed_title_cmd(cmd, provider)
+        os.execvp(cmd[0], cmd)
     finally:
         if reservation_fd is not None:
             os.close(reservation_fd)
@@ -1410,6 +1423,8 @@ def _continue_in_provider(
         "Starting compact continuation" if compact_continuation else "Continuing"
     )
     print(f"{action}{mode} in {target_name} from {folder_name(cwd, prefixes)}...")
+    if not _use_codex_mobile_mode(target_provider):
+        cmd = _board_managed_title_cmd(cmd, target_provider)
     exec_binary = cmd[0] if _use_codex_mobile_mode(target_provider) else target_spec.binary
     os.execvp(exec_binary, cmd)
 

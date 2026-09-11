@@ -25,6 +25,22 @@ def test_upsert_then_get_roundtrips_state(tmp_path, monkeypatch):
     assert row["updated_at"] is not None
 
 
+def test_upsert_preserves_exact_model_identifier(tmp_path, monkeypatch):
+    _fresh_store(tmp_path, monkeypatch)
+
+    store.upsert(
+        "sess-model",
+        host="air",
+        state="idle",
+        model_label="Opus",
+        model_id="claude-opus-4-8",
+    )
+
+    row = store.get("sess-model")
+    assert row["model_label"] == "Opus"
+    assert row["model_id"] == "claude-opus-4-8"
+
+
 def test_set_state_working_then_idle_preserves_working_since(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
 

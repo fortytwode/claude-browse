@@ -28,12 +28,23 @@ def test_info_plist_has_stable_dedicated_notification_identity(notifier_installe
     info = notifier_installer._info_plist("hash")
     assert info["CFBundleIdentifier"] == "com.fortytwode.agent-board-notifier"
     assert info["CFBundleDisplayName"] == "Agent Board"
-    assert info["LSUIElement"] is True
+    assert info["AgentBoardFocusCommand"] == str(REPO_ROOT / "agent-board")
+    assert info["LSUIElement"] is False
     command = notifier_installer._codesign_command(Path("Agent Board.app"))
     assert "--requirements" in command
     assert notifier_installer.SIGNING_REQUIREMENT == (
         '=designated => identifier "com.fortytwode.agent-board-notifier"'
     )
+
+
+def test_notifier_source_keeps_badges_until_a_notification_is_reviewed():
+    source = (REPO_ROOT / "claude_browse/board/macos/AgentBoardNotifier.swift").read_text()
+
+    assert "didReceive response" in source
+    assert "dockTile.badgeLabel" in source
+    assert "applicationShouldHandleReopen" in source
+    assert '"focus-session"' in source
+    assert "focusCommandKey" not in source
 
 
 def test_current_install_requires_matching_source_hash_and_executable(
@@ -52,6 +63,16 @@ def test_current_install_requires_matching_source_hash_and_executable(
     assert notifier_installer.is_current(bundle)
     executable.unlink()
     assert not notifier_installer.is_current(bundle)
+
+
+def test_build_hash_changes_when_the_trusted_focus_command_moves(
+    notifier_installer, monkeypatch
+):
+    original = notifier_installer._build_hash()
+
+    monkeypatch.setattr(notifier_installer, "REPO_DIR", Path("/moved/claude-browse"))
+
+    assert notifier_installer._build_hash() != original
 
 
 def test_current_install_rejects_non_executable_helper(notifier_installer):
@@ -104,6 +125,7 @@ def test_install_builds_signs_and_atomically_replaces_bundle(notifier_installer,
     assert "installed dedicated notifier" in status
     assert notifier_installer.is_current()
     assert any(command[0] == "codesign" for command in commands)
+    assert ["/usr/bin/pkill", "-x", notifier_installer.EXECUTABLE_NAME] in commands
     assert any(command[0] == "open" for command in commands)
 
 

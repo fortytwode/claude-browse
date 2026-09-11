@@ -185,6 +185,18 @@
   function taskProjectKey(task) {
     return task.list_key || task.project_key;
   }
+  function taskLocationName(task) {
+    var directory = String(task.working_directory || task.session_cwd || "").replace(
+      /[\\/]+$/,
+      "",
+    );
+    if (directory) return directory.split(/[\\/]/).pop();
+    return projectName(
+      boardProjects().find(function (project) {
+        return project.project_key === taskProjectKey(task);
+      }) || { name: task.project_name },
+    );
+  }
   function taskPresence(task) {
     if (task.terminal_presence === "open" || task.terminal_presence === "closed" || task.terminal_presence === "unknown") return task.terminal_presence;
     return task.terminal_open === true ? "open" : "unknown";
@@ -523,8 +535,16 @@
     if (queueMode === "open" && taskPresence(task) !== "open") return false;
     if (queueMode === "today" && !task.in_today) return false;
     var query = $("work-search").value.trim().toLowerCase();
+    var serverMatch = Boolean(
+      query &&
+      latestBoard &&
+      String(latestBoard.search_query || "").toLowerCase() === query &&
+      latestBoard.search_task_lookup &&
+      latestBoard.search_task_lookup[task.task_id]
+    );
     if (
       query &&
+      !serverMatch &&
       [
         task.title,
         task.summary,
@@ -1220,7 +1240,10 @@
       if (!next || next === task.title) return cancel();
       input.disabled = true;
       saveTask(task, "title", next).then(function (saved) {
-        Object.assign(task, saved); title.textContent = task.title; cancel(); toast("Task renamed");
+        Object.assign(task, saved); title.textContent = task.title; cancel();
+        if (saved.terminal_title_updated === false)
+          toast("Task renamed. Terminal title unchanged: " + saved.terminal_title_reason, true);
+        else toast("Task renamed");
       }).catch(function (error) { input.disabled = false; input.setAttribute("aria-invalid", "true"); toast("Could not rename: " + error.message, true); });
     }
     input.addEventListener("keydown", function (event) { if (event.key === "Enter") { event.preventDefault(); save(); } if (event.key === "Escape") { event.preventDefault(); cancel(); } });
@@ -1560,11 +1583,7 @@
       crumb = el(
         "button",
         "task-breadcrumb",
-        projectName(
-          boardProjects().find(function (p) {
-            return p.project_key === taskProjectKey(task);
-          }) || { name: task.project_name },
-        ),
+        taskLocationName(task),
       ),
       title = el("button", "task-link", task.title || "Untitled task"), pencil = el("button", "rename-pencil", "✎");
     crumb.type = title.type = "button";
@@ -1615,7 +1634,13 @@
       if (runtime && runtime !== "gone") terminal.appendChild(el("span", "runtime-secondary", TERMINAL_LABELS[runtime] || runtime));
     }
     var agent = el("td", "work-agent");
-    agent.appendChild(el("span", "agent", providerName(task.session_provider)));
+    agent.appendChild(
+      el(
+        "span",
+        "agent",
+        providerName(task.session_provider) + (task.model ? " · " + task.model : ""),
+      ),
+    );
     var actions = el("td", "work-actions");
     actions.append(gridLaunchAction(task, "claude"), gridLaunchAction(task, "codex"));
     var cells = { name: identity, status: status, due: due, updated: updated, priority: priority, terminal: terminal, agent: agent };
@@ -1824,6 +1849,10 @@
   function renderBoard(data) {
     if (!data) return;
     latestBoard = data;
+    latestBoard.search_task_lookup = Object.create(null);
+    (latestBoard.search_task_ids || []).forEach(function (taskId) {
+      latestBoard.search_task_lookup[taskId] = true;
+    });
     if (document.documentElement && document.documentElement.style) document.documentElement.style.setProperty("--sidebar-width", sidebarWidth + "px");
     if (selectedProject && !selectedProjectData()) selectedProject = null;
     renderSidebar(data);
@@ -1878,8 +1907,10 @@
   }
   function fetchBoard(force) {
     if (!force && hasProtectedWorkControls()) return Promise.resolve();
-    var seq = ++boardSeq;
-    return request("/api/board")
+    var seq = ++boardSeq,
+      query = $("work-search").value.trim(),
+      path = "/api/board" + (query ? "?" + new URLSearchParams({ q: query }) : "");
+    return request(path)
       .then(function (data) {
         if (seq === boardSeq && !hasProtectedWorkControls()) {
           $("board-error").hidden = true;
@@ -2336,7 +2367,8 @@
     "input",
     debounce(function () {
       renderBoard(latestBoard);
-    }, 100),
+      fetchBoard(true);
+    }, 350),
   );
   $("edit-project-description").addEventListener("click", function () {
     $("project-description-editor").hidden = false;

@@ -6,6 +6,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from . import work_items
+
 
 def _applescript_quote(s: str) -> str:
     """Escape for an AppleScript string literal.
@@ -36,13 +38,27 @@ def _notifier_executable() -> Path:
     )
 
 
-def _launch_dedicated_notifier(title: str, message: str) -> bool:
+def _launch_dedicated_notifier(
+    title: str,
+    message: str,
+    *,
+    session_id: str | None = None,
+    provider: str | None = None,
+) -> bool:
     executable = _notifier_executable()
     if not executable.is_file() or not os.access(executable, os.X_OK):
         return False
     try:
+        command = [str(executable), "--title", title, "--message", message]
+        if session_id and provider in work_items.PROVIDERS:
+            command.extend([
+                "--session-id",
+                session_id,
+                "--provider",
+                provider,
+            ])
         subprocess.Popen(
-            [str(executable), "--title", title, "--message", message],
+            command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -53,7 +69,13 @@ def _launch_dedicated_notifier(title: str, message: str) -> bool:
     return True
 
 
-def notify(title: str, message: str) -> None:
+def notify(
+    title: str,
+    message: str,
+    *,
+    session_id: str | None = None,
+    provider: str | None = None,
+) -> None:
     """Fire a native macOS notification with sound.
 
     Prefer the dedicated Agent Board app so macOS exposes an isolated
@@ -63,7 +85,12 @@ def notify(title: str, message: str) -> None:
     if _notifications_disabled():
         return
 
-    if _launch_dedicated_notifier(title, message):
+    if _launch_dedicated_notifier(
+        title,
+        message,
+        session_id=session_id,
+        provider=provider,
+    ):
         return
 
     try:

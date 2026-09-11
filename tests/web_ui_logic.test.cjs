@@ -191,6 +191,7 @@ function loadApp({ DateImpl = Date, fetchImpl, initialize = false, setTimeoutImp
   const context = {
     Date: DateImpl,
     AbortController,
+    URLSearchParams,
     Promise,
     console,
     document,
@@ -345,6 +346,41 @@ test("Today keeps server-selected attention items without dates, but an explicit
     filters: { provider: "any", priority: "any", terminal: "any", due: "today" },
   });
   assert.equal(api.taskMatches(attentionItem), false);
+});
+
+test("Work search includes tasks matched by the server's full transcript index", () => {
+  const { api, elementFor } = loadApp();
+  const task = activeTask({ task_id: "historical-match", title: "Unrelated current title", summary: "Recent text" });
+  elementFor("work-search").value = "launcher";
+  api.setState({
+    latestBoard: {
+      tasks: [task], projects: [], folders: [],
+      search_query: "launcher", search_task_ids: ["historical-match"],
+    },
+    queueMode: "all",
+    statusFilter: "all",
+    filters: { provider: "any", priority: "any", terminal: "any", due: "any", presence: "any", lastUpdate: "any" },
+  });
+  api.renderBoard(api.getState().latestBoard);
+
+  assert.equal(api.taskMatches(task), true);
+  elementFor("work-search").value = "different";
+  assert.equal(api.taskMatches(task), false, "stale server results must not match a newer query");
+});
+
+test("fetchBoard sends the Work query to the full-history search endpoint", async () => {
+  const requests = [];
+  const { api, elementFor } = loadApp({
+    fetchImpl: (requestPath) => {
+      requests.push(requestPath);
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ tasks: [], projects: [], folders: [] }) });
+    },
+  });
+  elementFor("work-search").value = "launch plan";
+
+  await api.fetchBoard(true);
+
+  assert.equal(requests[0], "/api/board?q=launch+plan");
 });
 
 test("reordering a task before itself is a no-op and does not POST", async () => {
@@ -558,6 +594,25 @@ test("workspace payload maps Lists into display projects without changing source
   assert.deepEqual(JSON.parse(JSON.stringify(projects)), [{ project_key: "list:yoga", source_project_key: "yoga", name: "Yoga Nidra", description: "Launch notes", folder_status: "unlinked", working_directory: null, launch_revision: null, folder_id: "ops", space_id: "general", position: 0 }]);
 });
 
+test("task rows label nested working directories by their deepest folder", () => {
+  const { api } = loadApp();
+  const task = activeTask({
+    project_name: "Team Operations",
+    working_directory: "/Users/shamanth/team-operations/client/MaxRewards/",
+  });
+  api.setState({
+    latestBoard: {
+      tasks: [task],
+      projects: [{ project_key: "project-1", name: "Team Operations" }],
+      folders: [],
+    },
+  });
+
+  const row = api.renderTaskRow(task);
+
+  assert.equal(findByClass(row, "task-breadcrumb").textContent, "MaxRewards");
+});
+
 test("workspace task moves use compare-and-set and expose a reverse undo operation", async () => {
   const requests = [];
   const { api } = loadApp({
@@ -612,6 +667,16 @@ test("grid exposes direct status, due-date, and provider actions without a row m
   const actions = findAllByClass(row, "grid-launch");
   assert.deepEqual(actions.map((button) => button.textContent), ["Restart Claude", "Start CodeX"]);
   assert.match(actions[0].title, /new Terminal launch/i);
+});
+
+test("Agent cells show the provider and exact reported model", () => {
+  const { api } = loadApp();
+  const task = activeTask({ session_provider: "claude", model: "claude-opus-4-8" });
+  api.setState({ latestBoard: { tasks: [task], projects: [], folders: [] } });
+
+  const row = api.renderTaskRow(task);
+
+  assert.equal(findByClass(row, "agent").textContent, "Claude · claude-opus-4-8");
 });
 
 test("Continue focuses its verified open same-provider terminal before launching", async () => {

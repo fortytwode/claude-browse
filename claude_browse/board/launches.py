@@ -221,6 +221,8 @@ def claim(token: str) -> dict:
 def execute(token: str) -> None:
     """CLI only: revalidate, set cwd and then replace this process with the agent."""
     previous_token = os.environ.get(TOKEN_ENV)
+    previous_title_marker = os.environ.get("AGENT_BOARD_MANAGED_TERMINAL_TITLE")
+    previous_claude_title = os.environ.get("CLAUDE_CODE_DISABLE_TERMINAL_TITLE")
     claimed = False
     try:
         intent = claim(token)
@@ -230,6 +232,8 @@ def execute(token: str) -> None:
         cwd = context["working_directory"]
         os.chdir(cwd)
         os.environ[TOKEN_ENV] = token
+        os.environ["AGENT_BOARD_MANAGED_TERMINAL_TITLE"] = "1"
+        os.environ["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] = "1"
         if intent["kind"] == "task":
             from claude_browse import browse
 
@@ -241,22 +245,35 @@ def execute(token: str) -> None:
         else:
             spec = get_provider(provider)
             argv = [spec.binary]
+            if provider == "codex":
+                argv.extend(["-c", "tui.terminal_title=[]"])
             if intent["full_access"] and spec.handoff_yolo_flag:
                 argv.append(spec.handoff_yolo_flag)
             os.execvp(spec.binary, argv)
     except (Exception, SystemExit):
         # A successful exec never returns here. Restore only the local
-        # launcher's environment on failure; hooks must remain independent.
-        if previous_token is None:
-            os.environ.pop(TOKEN_ENV, None)
-        else:
-            os.environ[TOKEN_ENV] = previous_token
+        # launcher's state on failure; hooks must remain independent.
         try:
             fail(token, "Terminal could not start this request. Check its error and try again.",
                  expected_state="claimed" if claimed else "prepared")
         except (ValueError, sqlite3.Error):
             pass
         raise
+    finally:
+        # os.execvp never returns on a real launch. Restore all markers when a
+        # test double or an unexpected implementation returns instead.
+        if previous_token is None:
+            os.environ.pop(TOKEN_ENV, None)
+        else:
+            os.environ[TOKEN_ENV] = previous_token
+        if previous_title_marker is None:
+            os.environ.pop("AGENT_BOARD_MANAGED_TERMINAL_TITLE", None)
+        else:
+            os.environ["AGENT_BOARD_MANAGED_TERMINAL_TITLE"] = previous_title_marker
+        if previous_claude_title is None:
+            os.environ.pop("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", None)
+        else:
+            os.environ["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] = previous_claude_title
 
 
 def adopt_session(session_id: str, provider: str) -> bool:

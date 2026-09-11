@@ -11,7 +11,16 @@ import urllib.request
 import pytest
 
 from claude_browse import fts, web
-from claude_browse.board import commands, hook, launches, presence, store, work_items, workspace
+from claude_browse.board import (
+    commands,
+    hook,
+    launches,
+    presence,
+    store,
+    terminal_focus,
+    work_items,
+    workspace,
+)
 
 
 @pytest.fixture()
@@ -227,7 +236,15 @@ def test_sidebar_drop_payload_uses_existing_guarded_reorder_route(api):
 def test_inline_rename_keeps_presence_and_updates_terminal_status_name(api, monkeypatch):
     base, path = api
     task = task_at(path, "rename")
+    terminal_titles = []
     monkeypatch.setattr(presence, "snapshot", lambda _rows: {"rename": "open"})
+    monkeypatch.setattr(
+        terminal_focus,
+        "set_session_title",
+        lambda session_id, provider, title: terminal_titles.append(
+            (session_id, provider, title)
+        ) or {"updated": True, "reason": ""},
+    )
     result = request(base, f"/api/tasks/{task['task_id']}", {
         "title": "Plan the release", "_edit_client": "fixture", "_edit_revision": 1,
     }, method="PATCH")
@@ -235,3 +252,29 @@ def test_inline_rename_keeps_presence_and_updates_terminal_status_name(api, monk
     assert result["task"]["title"] == store.get("rename")["name"] == "Plan the release"
     assert store.get("rename")["name_source"] == "manual"
     assert request(base, "/api/session/rename")["meta"]["title"] == "Plan the release"
+    assert terminal_titles == [("rename", "claude", "Plan the release")]
+    assert result["task"]["terminal_title_updated"] is True
+    assert result["task"]["terminal_title_reason"] == ""
+
+
+def test_inline_rename_reports_when_the_runtime_terminal_is_unavailable(api, monkeypatch):
+    base, path = api
+    task = task_at(path, "rename")
+    with store.get_conn() as conn:
+        conn.execute("DELETE FROM sessions WHERE session_id = ?", ("rename",))
+    monkeypatch.setattr(
+        terminal_focus,
+        "set_session_title",
+        lambda *_args: {"updated": False, "reason": "No verified terminal."},
+    )
+
+    result = request(
+        base,
+        f"/api/tasks/{task['task_id']}",
+        {"title": "Saved without runtime", "_edit_client": "fixture", "_edit_revision": 1},
+        method="PATCH",
+    )
+
+    assert result["task"]["title"] == "Saved without runtime"
+    assert result["task"]["terminal_title_updated"] is False
+    assert result["task"]["terminal_title_reason"] == "No verified terminal."
