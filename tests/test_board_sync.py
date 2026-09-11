@@ -766,6 +766,27 @@ def test_ack_full_push_refreshes_slack_with_rendered_body(tmp_path, monkeypatch)
     assert bodies == ["rendered board after ack"]
 
 
+def test_check_reports_opted_out_slack_as_disabled(monkeypatch):
+    monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
+    monkeypatch.delenv("AGENT_BOARD_SLACK_ENABLED", raising=False)
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+
+    result = sync.check()
+
+    assert "slack: DISABLED (opt-in)" in result
+    assert "slack: DEGRADED" not in result
+
+
+def test_check_requires_token_when_slack_is_enabled(monkeypatch):
+    monkeypatch.setattr(sync, "_firestore_client", lambda: _FakeClient())
+    monkeypatch.setenv("AGENT_BOARD_SLACK_ENABLED", "1")
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+
+    result = sync.check()
+
+    assert "slack: DEGRADED - SLACK_BOT_TOKEN not found" in result
+
+
 def test_ack_stays_locally_successful_when_publication_fails(tmp_path, monkeypatch):
     _fresh_store(tmp_path, monkeypatch)
     store.upsert("abc-3", host="air", cwd="/tmp/p", state="idle", name="offline task")

@@ -465,7 +465,7 @@ local alert source, and reports:
   avoid duplicate lower-information banners) and how many of your recent
   sessions already have an `ai-title` -- the
   namer only calls Haiku for the rest)
-- live Firestore + Slack connectivity (`agent-board sync check`)
+- live Firestore connectivity and Slack delivery status (`agent-board sync check`)
 
 To audit without changing anything (exit 1 on any drift):
 

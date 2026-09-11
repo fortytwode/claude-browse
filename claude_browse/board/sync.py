@@ -504,10 +504,15 @@ def check() -> str:
     except Exception as exc:
         lines.append(f"firestore: DEGRADED - {exc}")
 
-    token = os.environ.get("SLACK_BOT_TOKEN")
-    if not token:
-        lines.append("slack: DEGRADED - SLACK_BOT_TOKEN not found in env or team-operations/.env")
+    if not _slack_delivery_enabled():
+        lines.append("slack: DISABLED (opt-in)")
     else:
+        token = os.environ.get("SLACK_BOT_TOKEN")
+        if not token:
+            lines.append(
+                "slack: DEGRADED - SLACK_BOT_TOKEN not found in env or team-operations/.env"
+            )
+            return "\n".join(lines)
         try:
             import requests
 
