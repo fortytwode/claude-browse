@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-11
+
 ### Added
 - **ClickUp-style project and priority navigation.** Work now has a responsive
   persistent project sidebar, project paths/counts/local descriptions, row
@@ -56,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   without writing (exit 1 on drift).
 
 ### Changed
+- **Bare words typed together now search as one phrase.** `runna sca2` means
+  the phrase `runna sca2`, not every thread that mentions both words
+  somewhere. Only when nothing contains the phrase does the picker relax to
+  all-words-anywhere and label those rows `near phrase`. Quoted phrases,
+  `prefix*` wildcards, and sentence-style queries keep their previous
+  behavior.
 - A plain "done" no longer posts an immediate Slack message (it could not
   distinguish a run you walked away from and a turn you watched; an
   interactive evening produced ~15 alerts from 3 threads). Local banner and
@@ -63,6 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   restores the old behaviour.
 
 ### Fixed
+- **Agent Board context and desktop alerts now stay connected to their thread.**
+  Rows show the deepest working folder and exact model, Work search includes
+  full historical transcripts, and renames update a verified live Terminal
+  title. Native notifications keep a Dock badge until review and focus the
+  matching terminal when opened.
 - **Every Slack alert posted twice, and session names flip-flopped.** The
   sync hook command embeds the interpreter path, which changes from system
   python to `.venv/bin/python` once the board-sync venv exists; the
@@ -461,7 +474,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (keyword resume)
 - `install.sh` symlinks scripts into `~/.local/bin/`
 
-[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/fortytwode/claude-browse/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/fortytwode/claude-browse/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/fortytwode/claude-browse/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/fortytwode/claude-browse/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/fortytwode/claude-browse/compare/v1.2.0...v1.2.1

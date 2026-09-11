@@ -162,6 +162,9 @@ class QueryPlan:
     wants_recent: bool
     wants_closeout: bool
     low_confidence: bool
+    # True when several bare words were typed together and strict retrieval
+    # must match them as one phrase (terms themselves stay individual words).
+    implicit_phrase: bool = False
 
 
 def parse_query_terms(query: str) -> list[str]:
@@ -270,6 +273,23 @@ def build_query_plan(query: str, max_terms: int = 5) -> QueryPlan:
         if implicit_phrase and len(implicit_phrase.split()) >= 2:
             exact_phrase_terms.append(implicit_phrase)
 
+    # Several bare words typed together are one phrase, not a bag of AND
+    # tokens: `runna sca2` means "runna sca2", never every thread that merely
+    # mentions both words somewhere. Quoted spans, wildcards, and
+    # sentence-style queries keep their explicit semantics. When nothing
+    # contains the phrase, the search fallback chain relaxes it to AND over
+    # `phrase_fallback_terms` and labels those rows "near phrase". The plan
+    # keeps the individual words as `fts_terms` / `anchor_terms` so ranking,
+    # labels, and logs are unchanged; only the strict retrieval query joins
+    # them into one phrase (see fts._plan_fts_query).
+    implicit_phrase_query = (
+        not descriptive
+        and not phrase_terms
+        and len(word_terms) >= 2
+        and len(word_terms) == len(normalized_terms)
+        and not any(term.endswith("*") for term in word_terms)
+    )
+
     normalized_query_phrase = " ".join(normalized_terms).strip()
     phrase_highlights = []
     if len(raw_terms) >= 4 and normalized_query_phrase:
@@ -289,7 +309,7 @@ def build_query_plan(query: str, max_terms: int = 5) -> QueryPlan:
     phrase_fallback_terms = _dedupe_preserve_order(
         [
             word
-            for phrase in phrase_terms
+            for phrase in (exact_phrase_terms if implicit_phrase_query else phrase_terms)
             for word in phrase.split()
             if " " not in word
             and not word.endswith("*")
@@ -314,6 +334,7 @@ def build_query_plan(query: str, max_terms: int = 5) -> QueryPlan:
         wants_recent=wants_recent,
         wants_closeout=wants_closeout,
         low_confidence=low_confidence,
+        implicit_phrase=implicit_phrase_query,
     )
 
 

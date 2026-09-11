@@ -331,11 +331,13 @@ def test_render_query_coach_preview_explains_descriptive_query_interpretation():
     assert "Sentence-style query detected." in preview
 
 
-def test_render_query_coach_preview_shows_exact_phrase_boost():
+def test_render_query_coach_preview_shows_implicit_phrase_search():
     preview = browse.render_query_coach_preview("cfo update")
 
-    assert "Anchors: cfo, update" in preview
-    assert "Exact phrase boost: cfo update" in preview
+    assert "Phrase: cfo update" in preview
+    assert "No-hit fallback: cfo + update" in preview
+    assert "Phrase search: these words must appear together" in preview
+    assert "Anchors:" not in preview
 
 
 def test_render_query_coach_preview_shows_phrase_no_hit_fallback():
