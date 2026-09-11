@@ -107,6 +107,10 @@ def _firestore_client():
     return _firestore_client_cache
 
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _immediate_done_alert_enabled() -> bool:
     """Whether a "done" transition posts a fresh Slack message the instant
     the turn ends. Default OFF since the unattended redesign: an immediate
@@ -117,9 +121,16 @@ def _immediate_done_alert_enabled() -> bool:
     come back for a while. "needs-input" is always immediate -- a blocked
     session is urgent regardless of whether you're watching.
     Set AGENT_BOARD_IMMEDIATE_DONE_ALERT=1 to restore the old behaviour."""
-    return os.environ.get("AGENT_BOARD_IMMEDIATE_DONE_ALERT", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    return _env_flag("AGENT_BOARD_IMMEDIATE_DONE_ALERT")
+
+
+def _slack_delivery_enabled() -> bool:
+    """Whether Agent Board may post alerts or update its Slack board.
+
+    Slack delivery is opt-in. Local state, Firestore sync, statusline output,
+    and Mission Control remain available when it is disabled.
+    """
+    return _env_flag("AGENT_BOARD_SLACK_ENABLED")
 
 
 def post_alert(
@@ -279,6 +290,11 @@ def _publish_session(session_id: str) -> bool:
                     f"skipped superseded {pending_alert} alert "
                     f"for session_id={session_id}"
                 )
+            elif not _slack_delivery_enabled():
+                _log(
+                    f"skipped {pending_alert} Slack alert for session_id={session_id} "
+                    "(AGENT_BOARD_SLACK_ENABLED off)"
+                )
             elif pending_alert == "needs-input" or _immediate_done_alert_enabled():
                 post_alert(
                     session_id,
@@ -339,7 +355,7 @@ def push(session_id: str, *, coalesce: bool = False) -> bool:
                 if queued_session_id == session_id:
                     requested_published = published
 
-            if published_any:
+            if published_any and _slack_delivery_enabled():
                 try:
                     post_or_update_slack(render_slack_body())
                 except Exception as exc:
@@ -488,10 +504,15 @@ def check() -> str:
     except Exception as exc:
         lines.append(f"firestore: DEGRADED - {exc}")
 
-    token = os.environ.get("SLACK_BOT_TOKEN")
-    if not token:
-        lines.append("slack: DEGRADED - SLACK_BOT_TOKEN not found in env or team-operations/.env")
+    if not _slack_delivery_enabled():
+        lines.append("slack: DISABLED (opt-in)")
     else:
+        token = os.environ.get("SLACK_BOT_TOKEN")
+        if not token:
+            lines.append(
+                "slack: DEGRADED - SLACK_BOT_TOKEN not found in env or team-operations/.env"
+            )
+            return "\n".join(lines)
         try:
             import requests
 

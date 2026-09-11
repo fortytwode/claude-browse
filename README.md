@@ -465,7 +465,7 @@ local alert source, and reports:
   avoid duplicate lower-information banners) and how many of your recent
   sessions already have an `ai-title` -- the
   namer only calls Haiku for the rest)
-- live Firestore + Slack connectivity (`agent-board sync check`)
+- live Firestore connectivity and Slack delivery status (`agent-board sync check`)
 
 To audit without changing anything (exit 1 on any drift):
 
@@ -523,7 +523,9 @@ Firestore uses Application Default Credentials (`gcloud auth
 application-default login`). Point it at YOUR project via
 `CLAUDE_BROWSE_BOARD_PROJECT`, `CLAUDE_BROWSE_BOARD_DATABASE`, and
 `CLAUDE_BROWSE_BOARD_COLLECTION` (defaults preserve existing installs). Slack
-needs `SLACK_BOT_TOKEN` -- set in your environment, or in
+delivery is disabled by default. To opt into the `#agent-status` board and
+needs-input alerts, set `AGENT_BOARD_SLACK_ENABLED=1`; it also needs
+`SLACK_BOT_TOKEN` set in your environment, or in
 `~/team-operations/.env` (auto-detected as a fallback, since hooks run
 with a minimal inherited environment that usually won't have it exported).
 
