@@ -30,6 +30,9 @@ def test_info_plist_has_stable_dedicated_notification_identity(notifier_installe
     assert info["CFBundleDisplayName"] == "Agent Board"
     assert info["AgentBoardFocusCommand"] == str(REPO_ROOT / "agent-board")
     assert info["LSUIElement"] is False
+    # Without a usage description macOS silently denies the Apple Events
+    # behind click-to-focus whenever the helper is its own responsible process.
+    assert "Terminal" in info["NSAppleEventsUsageDescription"]
     command = notifier_installer._codesign_command(Path("Agent Board.app"))
     assert "--requirements" in command
     assert notifier_installer.SIGNING_REQUIREMENT == (
@@ -45,6 +48,30 @@ def test_notifier_source_keeps_badges_until_a_notification_is_reviewed():
     assert "applicationShouldHandleReopen" in source
     assert '"focus-session"' in source
     assert "focusCommandKey" not in source
+
+
+def test_notifier_singleton_lock_survives_temp_sweeps_and_dedupes_requests():
+    source = (REPO_ROOT / "claude_browse/board/macos/AgentBoardNotifier.swift").read_text()
+
+    # A lock in $TMPDIR was deleted under its holder, so each new launch
+    # locked a fresh inode and every "singleton" delivered every request.
+    assert "NSTemporaryDirectory" not in source
+    assert "Library/Application Support/Agent Board" in source
+    assert "guard ownsSingleton() else { finish(); return }" in source
+    # One request, one identifier: double delivery collapses into one banner.
+    assert "let identifier = arguments.requestID" in source
+    assert "info[requestIDKey] = requestID" in source
+
+
+def test_notifier_honours_a_click_even_when_it_is_not_the_resident_helper():
+    source = (REPO_ROOT / "claude_browse/board/macos/AgentBoardNotifier.swift").read_text()
+
+    # Clicking a banner launches the app with no arguments. Exiting
+    # immediately on a lost lock race beat `didReceive response` to the
+    # punch, so the click silently did nothing.
+    assert "guard acquireSingleton() else { finish(); return }\n            restoreDelivered" not in source
+    assert "guard let self, !self.handledClick else { return }" in source
+    assert "handledClick = true" in source
 
 
 def test_current_install_requires_matching_source_hash_and_executable(

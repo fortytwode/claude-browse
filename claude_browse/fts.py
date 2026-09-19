@@ -1448,16 +1448,22 @@ def _plan_fts_query(plan: QueryPlan) -> str:
     Every other plan is the plain AND of its terms.
     """
     terms = list(plan.fts_terms)
-    if plan.implicit_phrase and len(terms) >= 2:
-        return _terms_to_fts_query([" ".join(terms)])
+    if plan.implicit_phrase:
+        phrase = plan.implicit_phrase_text or " ".join(terms)
+        if len(phrase.split()) >= 2:
+            return _terms_to_fts_query([phrase])
     return _terms_to_fts_query(terms)
 
 
 def _implicit_phrase_relaxed_plan(plan: QueryPlan) -> QueryPlan | None:
     """Relax a bare-word phrase to AND over the same words after zero hits."""
-    if not plan.implicit_phrase or len(plan.fts_terms) < 2:
+    # The phrase can carry words that `fts_terms` drops (`click to focus`
+    # keeps one anchor), so a single anchor is still a real relaxation.
+    if not plan.implicit_phrase or not plan.fts_terms:
         return None
-    return replace(plan, implicit_phrase=False)
+    if len(plan.fts_terms) < 2 and not plan.implicit_phrase_text:
+        return None
+    return replace(plan, implicit_phrase=False, implicit_phrase_text="")
 
 
 def _unique_terms(*groups: tuple[str, ...]) -> tuple[str, ...]:

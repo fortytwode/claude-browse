@@ -165,6 +165,11 @@ class QueryPlan:
     # True when several bare words were typed together and strict retrieval
     # must match them as one phrase (terms themselves stay individual words).
     implicit_phrase: bool = False
+    # The exact words to match adjacently, as typed. Filtering stopwords and
+    # generic words out of the phrase is wrong: `focus should work` means
+    # those three words in that order, so the phrase keeps every word while
+    # `fts_terms` keeps only the specific anchors for ranking and relaxation.
+    implicit_phrase_text: str = ""
 
 
 def parse_query_terms(query: str) -> list[str]:
@@ -226,6 +231,11 @@ def _dedupe_preserve_order(terms: list[str]) -> tuple[str, ...]:
         seen.add(term)
         ordered.append(term)
     return tuple(ordered)
+
+
+# Longer than this reads as a sentence describing a thread, not a phrase
+# quoted from one, so those queries keep bag-of-anchors retrieval.
+_MAX_IMPLICIT_PHRASE_WORDS = 4
 
 
 def build_query_plan(query: str, max_terms: int = 5) -> QueryPlan:
@@ -290,6 +300,37 @@ def build_query_plan(query: str, max_terms: int = 5) -> QueryPlan:
         and not any(term.endswith("*") for term in word_terms)
     )
 
+    # A short bare query is a phrase the user typed, even when some of its
+    # words are stopwords or generic ones that `word_terms` drops. Without
+    # this, `focus should work` silently became focus AND should -- matching
+    # threads where the words are paragraphs apart -- and `click to focus`
+    # lost "to" entirely. Only sentence-length queries stay a bag of anchors,
+    # and a phrase with no hits still relaxes to AND through the usual
+    # fallback chain, so nothing becomes unfindable.
+    implicit_phrase_text = ""
+    if (
+        not phrase_terms
+        and not implicit_phrase_query
+        # Any quote means the user said exactly which span is a phrase;
+        # `say "hi"` is a word AND a phrase, never the phrase `say hi`.
+        and '"' not in query
+        # Recency and lifecycle words ("latest", "finished") are intent
+        # filters the ranker consumes, not words expected in the text, so
+        # `runna latest` must stay an anchor plus a filter.
+        and not wants_recent
+        and not wants_closeout
+        and 2 <= len(normalized_terms) <= _MAX_IMPLICIT_PHRASE_WORDS
+        and len(normalized_terms) == len(raw_terms)
+        and word_terms
+        and not any(term.endswith("*") for term in normalized_terms)
+        and not any(" " in term for term in normalized_terms)
+    ):
+        implicit_phrase_text = " ".join(normalized_terms)
+        implicit_phrase_query = True
+        exact_phrase_terms.append(implicit_phrase_text)
+    elif implicit_phrase_query:
+        implicit_phrase_text = " ".join(fts_terms)
+
     normalized_query_phrase = " ".join(normalized_terms).strip()
     phrase_highlights = []
     if len(raw_terms) >= 4 and normalized_query_phrase:
@@ -335,6 +376,7 @@ def build_query_plan(query: str, max_terms: int = 5) -> QueryPlan:
         wants_closeout=wants_closeout,
         low_confidence=low_confidence,
         implicit_phrase=implicit_phrase_query,
+        implicit_phrase_text=implicit_phrase_text,
     )
 
 

@@ -119,3 +119,56 @@ fence/paragraph logic was dead code in production. A cross-model review pass
 caught it; a 10-second check (`0 of 1,538 real turns contained a newline`)
 confirmed. When a renderer consumes an upstream extractor, always feed it
 actual extractor output at least once before calling it verified.
+
+
+## macOS notification helpers
+
+### A lock file in $TMPDIR is not a singleton
+`NSTemporaryDirectory()` is swept. When the lock file is deleted under a live
+holder, the next launch creates the path afresh, locks a different inode, and
+`flock` reports success to both processes. Nothing is excluded. Seven helpers
+accumulated this way and each one delivered every distributed request, so a
+single event produced seven identical banners.
+
+Two habits make a file lock honest: put it somewhere nothing sweeps
+(`~/Library/Application Support/<app>/`), and after `flock` succeeds compare
+`fstat(fd).st_ino` against `stat(path).st_ino`. If they differ, the lock is on
+an unlinked inode -- retry on the live file rather than trusting it.
+
+### Losing the singleton race is not a reason to quit
+Clicking a delivered banner launches the app with no arguments. A helper that
+exits immediately because another instance holds the lock races the click:
+the process is gone before `didReceive response` arrives, and the banner
+silently does nothing. Losing the lock only means "do not become the resident
+helper" -- the click still has to be honoured, then the transient process can
+exit.
+
+### Apple Events need a usage description even with no sandbox
+An ad-hoc-signed helper that shells out to AppleScript works fine when you
+launch it from a terminal, because it inherits the terminal's Automation
+grant. Launched by macOS itself (a banner click, login restore) it is its own
+responsible process, and without `NSAppleEventsUsageDescription` in
+`Info.plist` the events are denied with no prompt and no log line. The symptom
+is a click that does nothing, which looks like broken focus logic rather than
+a missing plist key.
+
+To reproduce a click path without waiting for a real banner, give the helper a
+mode that runs exactly what the click runs and launch it through
+LaunchServices (`open -n -W --args ...`), so TCC sees the same responsible
+process a click would.
+
+## Phrase search
+
+### Filtering the phrase is not the same as filtering the anchors
+Search keeps only "specific" words as ranking anchors, dropping stopwords and
+generic ones. Building the implicit phrase out of those surviving anchors
+meant `focus should work` retrieved `focus AND should` -- matching threads
+where the words sit paragraphs apart -- and `click to focus` lost "to"
+entirely. A phrase quoted from a thread has to keep every word the user typed;
+only ranking and relaxation use the filtered anchors. Keep them as two fields.
+
+Aggressive phrase matching is safe precisely because the fallback chain
+relaxes a zero-hit phrase back to AND and labels those rows "near phrase".
+What is not safe is phrasing a query that was never a phrase: anything the
+user quoted themselves, wildcards, sentence-length queries, and intent words
+like "latest" that filter rather than appear in the text.

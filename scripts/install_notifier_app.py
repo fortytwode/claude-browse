@@ -17,7 +17,7 @@ SOURCE = REPO_DIR / "claude_browse/board/macos/AgentBoardNotifier.swift"
 APP_NAME = "Agent Board Notifier.app"
 EXECUTABLE_NAME = "AgentBoardNotifier"
 BUNDLE_ID = "com.fortytwode.agent-board-notifier"
-BUILD_SCHEMA = "3"
+BUILD_SCHEMA = "4"
 SIGNING_REQUIREMENT = f'=designated => identifier "{BUNDLE_ID}"'
 
 
@@ -56,6 +56,15 @@ def _info_plist(build_hash: str) -> dict:
         "CFBundleVersion": "1",
         "LSMinimumSystemVersion": "12.0",
         "LSUIElement": False,
+        # Clicking a banner focuses the session's Terminal tab via Apple
+        # Events. When macOS launched the helper itself (login restore, a
+        # click on a delivered banner) the helper is its own TCC responsible
+        # process, and without this key macOS denies those events silently
+        # instead of asking -- the click then does nothing at all.
+        "NSAppleEventsUsageDescription": (
+            "Agent Board brings the Terminal tab for a finished agent session "
+            "to the front when you click its notification."
+        ),
     }
 
 

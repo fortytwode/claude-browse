@@ -111,3 +111,42 @@ def test_query_plan_keeps_full_sentence_as_highlight_for_descriptive_queries():
 
 def test_term_spans_supports_prefix_terms():
     assert term_spans("Ayan and Kartik are in the review", "kar*") == [(9, 15)]
+
+
+def test_short_bare_query_matches_every_word_typed_as_one_phrase():
+    """`focus should work` means those three words, in that order."""
+    plan = build_query_plan("focus should work")
+
+    assert plan.implicit_phrase is True
+    # The phrase keeps "should", which is not a specific-enough anchor to
+    # survive into fts_terms. Filtering it out of the phrase matched threads
+    # where the words were paragraphs apart.
+    assert plan.implicit_phrase_text == "focus should work"
+    assert "focus should work" in plan.exact_phrase_terms
+
+
+def test_short_bare_query_keeps_stopwords_inside_the_phrase():
+    plan = build_query_plan("click to focus")
+
+    assert plan.implicit_phrase is True
+    assert plan.implicit_phrase_text == "click to focus"
+
+
+def test_sentence_length_query_stays_a_bag_of_anchors():
+    plan = build_query_plan("the notifier app is broken")
+
+    assert plan.implicit_phrase is False
+    assert plan.implicit_phrase_text == ""
+
+
+def test_quoted_span_beside_a_bare_word_is_never_one_implicit_phrase():
+    plan = build_query_plan('say "hi"')
+
+    assert plan.implicit_phrase is False
+
+
+def test_recency_word_filters_rather_than_joining_the_phrase():
+    plan = build_query_plan("runna latest")
+
+    assert plan.implicit_phrase is False
+    assert plan.wants_recent is True
