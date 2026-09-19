@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **One notification per event, and clicking it focuses the terminal.** The
+  helper's singleton lock lived in `$TMPDIR`, where it was swept out from
+  under the running process; every later launch then locked a fresh inode and
+  became another "singleton", so one event produced a banner per stale helper.
+  The lock moved to `~/Library/Application Support/Agent Board/`, a lost lock
+  race is now re-checked by inode, and each request carries one identifier so
+  a double-delivered request still collapses into a single banner. Clicking a
+  banner also did nothing when a helper lost that race: it called `finish()`
+  before `didReceive response` arrived. A click is now honoured first and the
+  transient helper exits afterwards. The bundle declares
+  `NSAppleEventsUsageDescription`, without which macOS silently denies the
+  Apple Events behind click-to-focus whenever the helper is its own
+  responsible process.
+- **Multi-word searches match the words as typed.** A short bare query is one
+  phrase, including its stopwords: `focus should work` searches for those
+  three adjacent words instead of `focus` AND `should`, and `click to focus`
+  no longer drops "to". Sentence-length queries, quoted spans, wildcards and
+  recency words ("runna latest") keep their previous meaning, and a phrase
+  with no hits still relaxes to AND. Claude Browse and Agent Board share this
+  planner, so both surfaces changed together.
+
 ## [1.4.0] - 2026-09-11
 
 ### Added
