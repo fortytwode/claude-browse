@@ -109,6 +109,20 @@ if ! python3 "$SCRIPT_DIR/scripts/install_notifier_app.py"; then
 fi
 python3 "$SCRIPT_DIR/scripts/install_agent_board.py"
 
+# A launchd service keeps running the code it started with. Without this,
+# `git pull && ./install.sh` left the previous revision live in memory and a
+# search or board fix appeared to do nothing until the next reboot. Only
+# restarts what is already loaded, so machines without the relay skip it.
+for label in com.rocketshiphq.agent-board-backend com.rocketshiphq.agent-board-relay; do
+    if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+        if launchctl kickstart -k "gui/$(id -u)/$label" >/dev/null 2>&1; then
+            echo "  restarted $label on this revision"
+        else
+            echo "  NOTE: $label is running an older revision; restart it manually."
+        fi
+    fi
+done
+
 echo ""
 echo "  To enable \`work <name>\` (tmux attach-or-create) and \`aj\` (board glance),"
 echo "  add this line to your shell rc (~/.zshrc):"

@@ -63,7 +63,20 @@ def install() -> None:
         loaded = subprocess.run(["launchctl", "print", f"{domain}/{label}"], capture_output=True)
         if loaded.returncode:
             subprocess.run(["launchctl", "bootstrap", domain, str(target)], check=True)
-        print(f"Installed {label}")
+            print(f"Installed {label}")
+            continue
+        # Already running -- and running the code as it was when it started.
+        # Without this, `git pull && ./install.sh` left the previous revision
+        # live in memory, so a search or board fix appeared to do nothing
+        # until the next reboot.
+        restarted = subprocess.run(
+            ["launchctl", "kickstart", "-k", f"{domain}/{label}"],
+            capture_output=True,
+        )
+        if restarted.returncode:
+            print(f"Installed {label} (restart it to pick up this revision)")
+        else:
+            print(f"Installed {label} (restarted on the current revision)")
 
 
 if __name__ == "__main__":
