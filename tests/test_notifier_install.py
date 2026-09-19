@@ -191,3 +191,14 @@ def test_failed_bundle_swap_restores_previous_install(notifier_installer, monkey
 def test_install_sh_runs_dedicated_notifier_installer():
     text = (REPO_ROOT / "install.sh").read_text()
     assert 'python3 "$SCRIPT_DIR/scripts/install_notifier_app.py"' in text
+
+
+def test_install_sh_restarts_running_board_services():
+    """`git pull && ./install.sh` must not leave the old revision in memory."""
+    text = (REPO_ROOT / "install.sh").read_text()
+
+    assert "launchctl kickstart -k" in text
+    assert "com.rocketshiphq.agent-board-backend" in text
+    assert "com.rocketshiphq.agent-board-relay" in text
+    # Machines without the relay installed must not fail the install.
+    assert 'launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1' in text

@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `NSAppleEventsUsageDescription`, without which macOS silently denies the
   Apple Events behind click-to-focus whenever the helper is its own
   responsible process.
+- **`./install.sh` restarts the board services it just updated.** A launchd
+  service keeps running the code it started with, so `git pull &&
+  ./install.sh` left the previous revision live in memory and a search or
+  board fix appeared to do nothing until the next reboot. The installer now
+  restarts the backend and relay when they are already loaded, and says so
+  when it cannot.
 - **Multi-word searches match the words as typed.** A short bare query is one
   phrase, including its stopwords: `focus should work` searches for those
   three adjacent words instead of `focus` AND `should`, and `click to focus`
