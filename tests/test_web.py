@@ -174,10 +174,16 @@ def test_sessions_here_param_scopes_to_folder(web_server):
 def test_shared_search_returns_cross_machine_excerpts_without_local_launch_data(
     web_server, monkeypatch
 ):
+    import socket
+
     base, _server = web_server
     monkeypatch.setattr(
         "claude_browse.shared_search_query.search",
         lambda query: [
+            {
+                "host": socket.gethostname(), "session_id": "local-review",
+                "title": "Already local", "snippet": "Local review",
+            },
             {
                 "host": "studio-mac",
                 "session_id": "remote-anna-review",

@@ -21,6 +21,8 @@ PROJECT = os.environ.get("CLAUDE_BROWSE_BOARD_PROJECT", "team-projects-480520")
 DATABASE = os.environ.get("CLAUDE_BROWSE_BOARD_DATABASE", "creative-dashboard")
 COLLECTION = os.environ.get("CLAUDE_BROWSE_SHARED_SEARCH_COLLECTION", "shared_search_windows")
 ENV_FLAG = "CLAUDE_BROWSE_SHARED_SEARCH_ENABLED"
+MODEL = "text-embedding-3-small"
+DIMENSIONS = 256
 DEFAULT_BATCH_SIZE = 400  # Firestore permits at most 500 writes per batch.
 SNIPPET_LIMIT = 1_200
 
@@ -90,6 +92,8 @@ def publish(
     batch_size: int = DEFAULT_BATCH_SIZE,
     force: bool = False,
     vector_factory: Any | None = None,
+    model: str = MODEL,
+    dimensions: int = DIMENSIONS,
 ) -> PublishReport:
     """Publish local dense embeddings, deleting only this host's stale docs.
 
@@ -117,8 +121,10 @@ def publish(
         FROM dense_embeddings e
         JOIN semantic_windows w ON w.rowid = e.window_id
         LEFT JOIN sessions s ON s.sid = w.sid
+        WHERE e.model = ? AND e.dimensions = ?
         ORDER BY w.rowid
-        """
+        """,
+        (model, dimensions),
     )
     previous = {
         row[0]: row[1]
@@ -173,8 +179,8 @@ def publish(
             window_idx,
             window_timestamp,
             text,
-            model,
-            dimensions,
+            row_model,
+            row_dimensions,
             vector_blob,
             content_hash,
             indexed_at,
@@ -184,6 +190,8 @@ def publish(
             session_timestamp,
             last_timestamp,
         ) = row
+        if len(vector_blob) != dimensions * 4:
+            continue
         # semantic_windows.rowid is recreated on reindex; window_idx is stable
         # for the same session content and prevents needless delete/recreate.
         doc_id = _document_id(host, str(sid), int(window_idx))
@@ -198,8 +206,8 @@ def publish(
             "timestamp": window_timestamp or last_timestamp or session_timestamp,
             "session_timestamp": session_timestamp,
             "last_timestamp": last_timestamp,
-            "model": str(model),
-            "dimensions": int(dimensions),
+            "model": str(row_model),
+            "dimensions": int(row_dimensions),
             "content_hash": str(content_hash),
             "indexed_at": float(indexed_at),
             "text_snippet": _snippet(str(text)),

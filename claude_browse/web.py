@@ -19,6 +19,7 @@ import json
 import math
 import os
 import secrets
+import socket
 import sqlite3
 import sys
 import threading
@@ -445,6 +446,8 @@ class _Handler(BaseHTTPRequestHandler):
             results = []
         matches = []
         for result in results:
+            if result.get("host") == socket.gethostname():
+                continue  # already present as an actionable local thread
             # Match the hosted board contract while accepting the local query
             # module's concise internal key.
             match = dict(result)

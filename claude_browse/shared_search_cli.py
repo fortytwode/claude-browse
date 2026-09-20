@@ -21,6 +21,8 @@ def run_once() -> shared_search.PublishReport:
     # This worker is an explicit opt-in.  The normal browse refresh keeps its
     # local-only behavior unless configured separately.
     os.environ["CLAUDE_BROWSE_DENSE_EMBEDDINGS"] = "1"
+    os.environ["CLAUDE_BROWSE_EMBEDDING_MODEL"] = shared_search.MODEL
+    os.environ["CLAUDE_BROWSE_EMBEDDING_DIMENSIONS"] = str(shared_search.DIMENSIONS)
     os.environ[shared_search.ENV_FLAG] = "1"
     conn = fts.open_db()
     try:

@@ -78,30 +78,34 @@ def _db():
     return conn
 
 
+def _publish(conn, **kwargs):
+    return shared_search.publish(conn, model="embedding", dimensions=2, **kwargs)
+
+
 def test_publish_is_idempotent_and_never_needs_firestore_credentials():
     conn, client = _db(), _Client()
-    first = shared_search.publish(conn, client=client, host="mac")
+    first = _publish(conn, client=client, host="mac")
     assert first.published == 1 and first.batches == 1
     doc = next(iter(client.store.values()))
     assert doc["embedding"] == [1.0, 2.0]
     assert doc["text_snippet"] != "secret " + "detail " * 300
     assert doc["session_id"] == "s/one"
-    second = shared_search.publish(conn, client=client, host="mac")
+    second = _publish(conn, client=client, host="mac")
     assert second.unchanged == 1 and second.batches == 0
 
 
 def test_publish_deletes_only_previously_published_stale_documents():
     conn, client = _db(), _Client()
-    shared_search.publish(conn, client=client, host="mac")
+    _publish(conn, client=client, host="mac")
     conn.execute("DELETE FROM dense_embeddings")
-    report = shared_search.publish(conn, client=client, host="mac")
+    report = _publish(conn, client=client, host="mac")
     assert report.deleted == 1
     assert client.store == {}
 
 
 def test_publish_is_opt_in_when_client_is_not_injected(monkeypatch):
     monkeypatch.delenv(shared_search.ENV_FLAG, raising=False)
-    assert shared_search.publish(_db()).skipped
+    assert _publish(_db()).skipped
 
 
 def test_document_ids_are_stable_and_host_scoped():
@@ -111,8 +115,21 @@ def test_document_ids_are_stable_and_host_scoped():
 
 def test_publish_wraps_vector_for_firestore_index():
     conn, client = _db(), _Client()
-    shared_search.publish(conn, client=client, host="mac", vector_factory=tuple)
+    _publish(conn, client=client, host="mac", vector_factory=tuple)
     assert next(iter(client.store.values()))["embedding"] == (1.0, 2.0)
+
+
+def test_default_publication_rejects_incompatible_embeddings():
+    conn, client = _db(), _Client()
+    assert shared_search.publish(conn, client=client, host="mac").published == 0
+    conn.execute(
+        "UPDATE dense_embeddings SET model = ?, dimensions = ?",
+        (shared_search.MODEL, shared_search.DIMENSIONS),
+    )
+    # Metadata alone is insufficient: a two-float blob cannot enter the
+    # fixed 256-dimensional Firestore vector index.
+    assert shared_search.publish(conn, client=client, host="mac").published == 0
+    assert client.store == {}
 
 
 def test_partial_publish_resumes_from_committed_batch():
@@ -135,9 +152,9 @@ def test_partial_publish_resumes_from_committed_batch():
 
     client.batch = failing_batch
     with pytest.raises(RuntimeError, match="offline"):
-        shared_search.publish(conn, client=client, host="mac", batch_size=1)
+        _publish(conn, client=client, host="mac", batch_size=1)
     assert len(client.store) == 1
     client.batch = original_batch
-    report = shared_search.publish(conn, client=client, host="mac", batch_size=1)
+    report = _publish(conn, client=client, host="mac", batch_size=1)
     assert report.published == 1 and report.unchanged == 1
     assert len(client.store) == 2

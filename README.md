@@ -532,9 +532,19 @@ batches; the first backfill may take multiple runs. Progress and errors are in
 `~/.claude/shared-search/publisher.log` and `publisher.err.log`. The installer
 also enables shared search in an existing local Agent Board backend. The
 hosted Agent Board queries Firestore
-directly. The database needs a 256-dimension vector index on
-`shared_search_windows.embedding` (created once with `gcloud firestore indexes
-composite create`). The publisher sends transcript excerpts and embeddings to
+directly. Create the shared 256-dimension vector index once (already done for
+`team-projects-480520/creative-dashboard`):
+
+```bash
+gcloud firestore indexes composite create \
+  --project=team-projects-480520 \
+  --database=creative-dashboard \
+  --collection-group=shared_search_windows \
+  --query-scope=COLLECTION \
+  --field-config='field-path=embedding,vector-config={"dimension":"256","flat":"{}"}'
+```
+
+The publisher sends transcript excerpts and embeddings to
 the shared project, so enable it only for histories intended to be searchable
 there.
 

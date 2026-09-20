@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from typing import Any, Callable
 
 from . import fts, shared_search
+
+
+@lru_cache(maxsize=256)
+def _cached_embed(query: str, model: str, dimensions: int) -> tuple[float, ...]:
+    vectors = fts._request_openai_embeddings([query], model=model, dimensions=dimensions)
+    if len(vectors) != 1 or len(vectors[0]) != dimensions:
+        raise RuntimeError("query embedding unavailable")
+    return tuple(vectors[0])
 
 
 def _embed(query: str, model: str, dimensions: int) -> list[float]:
@@ -13,8 +22,7 @@ def _embed(query: str, model: str, dimensions: int) -> list[float]:
         from .board.sync import _load_env_fallback
 
         _load_env_fallback()
-    vectors = fts._request_openai_embeddings([query], model=model, dimensions=dimensions)
-    return vectors[0] if len(vectors) == 1 else []
+    return list(_cached_embed(query, model, dimensions))
 
 
 def search(
@@ -35,8 +43,8 @@ def search(
         return []
     if client is None and not shared_search.enabled():
         return []
-    model = fts._dense_embedding_model()
-    dimensions = fts._dense_embedding_dimensions()
+    model = shared_search.MODEL
+    dimensions = shared_search.DIMENSIONS
     embed = embed or _embed
     vector = embed(query, model, dimensions)
     if len(vector) != dimensions:

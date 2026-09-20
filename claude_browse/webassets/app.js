@@ -1969,7 +1969,7 @@
     if (!results.length) return;
     container.append(
       el("h3", "shared-search-heading", "Cross-machine semantic matches"),
-      el("p", "shared-search-note", "Read-only excerpts from other Macs. Open the source Mac to continue the thread."),
+      el("p", "shared-search-note", "Read-only excerpts from indexed Macs. Open the source Mac to continue the thread."),
     );
     results.slice(0, 8).forEach(function (result) {
       var hit = el("article", "shared-search-hit"),
