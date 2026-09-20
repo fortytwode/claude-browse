@@ -384,7 +384,7 @@ def test_web_assets_define_reading_first_work_and_history_contract():
     assert "delete rowMutationTails[key]" in javascript
     assert '"/api/shared-search?"' in javascript
     assert "Cross-machine semantic matches" in javascript
-    assert "Read-only excerpts from other Macs" in javascript
+    assert "Read-only excerpts from indexed Macs" in javascript
     assert "sharedSearchCache" in javascript
     assert "5 * 60 * 1000" in javascript
     assert ".shared-search-results" in stylesheet
