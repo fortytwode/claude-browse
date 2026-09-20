@@ -498,22 +498,14 @@ class _Handler(BaseHTTPRequestHandler):
         work_status = str(task.get("status") or "active")
         due_date = task.get("due_date")
         due_date_defaulted = False
-        if not due_date and task.get("due_date_source", "automatic") != "manual" and runtime:
-            paused_at = runtime.get("paused_at")
+        if not due_date and task.get("due_date_source", "automatic") != "manual":
             try:
-                if paused_at:
-                    due_date = datetime.fromtimestamp(float(paused_at)).date().isoformat()
+                if last_activity:
+                    due_date = datetime.fromtimestamp(last_activity).date().isoformat()
                     due_date_defaulted = True
             except (TypeError, ValueError, OverflowError, OSError):
                 pass
-        in_today = bool(
-            work_status == "active"
-            and (
-                needs_attention
-                or unattended
-                or (due_date and str(due_date) <= date.today().isoformat())
-            )
-        )
+        in_today = bool(last_activity and datetime.fromtimestamp(last_activity).date() == date.today())
         cwd_available = bool(cwd and os.path.isdir(cwd))
         launch_session = commands.session_for_launch(
             session_id, indexed_session, runtime

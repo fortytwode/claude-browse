@@ -380,7 +380,8 @@ def test_automatic_thread_update_and_board_roundtrip(web_server):
     _status, board = _get_json(base + "/api/board")
     task = board["tasks"][0]
     assert task["title"] == "Ship the work queue"
-    assert task["due_date"] is None
+    assert task["due_date"] == date.fromtimestamp(task["last_activity_at"]).isoformat()
+    assert task["due_date_defaulted"] is True
     assert task["priority"] == "urgent"
     assert isinstance(task["position"], int)
     assert task["summary"] == "(no transcript preview)"
@@ -450,7 +451,7 @@ def test_board_search_membership_is_not_capped_by_history_display_limit(web_serv
     assert set(board["search_task_ids"]) == matching_tasks
 
 
-def test_automatic_due_date_defaults_to_last_pause_until_overridden(web_server):
+def test_automatic_due_date_defaults_to_last_update_until_overridden(web_server):
     base, _server = web_server
     task = _board_thread("paused", provider="codex", name="Paused work")
     paused_day = date.today() - timedelta(days=1)
@@ -462,7 +463,7 @@ def test_automatic_due_date_defaults_to_last_pause_until_overridden(web_server):
 
     _status, board = _get_json(base + "/api/board")
     rendered = next(item for item in board["tasks"] if item["task_id"] == task["task_id"])
-    assert rendered["due_date"] == paused_day.isoformat()
+    assert rendered["due_date"] == date.fromtimestamp(rendered["last_activity_at"]).isoformat()
     assert rendered["due_date_defaulted"] is True
 
     _status, updated = _mutate_json(
@@ -503,7 +504,7 @@ def test_board_returns_summary_fallback_and_project_aggregates(web_server):
     assert project["path"] == first["project_path"]
     assert project["description"] == "Project context"
     assert project["counts"] == {
-        "active": 1, "today": 0, "needs_input": 0, "total": 2,
+        "active": 1, "today": 2, "needs_input": 0, "total": 2,
         "open_terminal": 0, "closed_terminal": 0, "unknown_terminal": 2,
     }
 
@@ -648,14 +649,32 @@ def test_board_normalizes_today_states_actions_and_order(web_server, monkeypatch
     assert tasks["attention"]["work_status"] == "active"
     assert tasks["attention"]["in_today"] is True
     assert tasks["overdue"]["in_today"] is True
-    assert tasks["quiet"]["in_today"] is False
-    assert tasks["future"]["in_today"] is False
-    assert tasks["closed"]["in_today"] is False
+    assert tasks["quiet"]["in_today"] is True
+    assert tasks["future"]["in_today"] is True
+    assert tasks["closed"]["in_today"] is True
     assert set(tasks["quiet"]["actions"]) == {"claude", "codex"}
     assert tasks["quiet"]["actions"]["claude"]["label"] == "Resume Claude"
     assert tasks["quiet"]["actions"]["codex"]["label"] == "Continue in CodeX"
     assert tasks["quiet"]["actions"]["codex"]["available"] is False
     assert "transcript" in tasks["quiet"]["actions"]["codex"]["reason"].lower()
+
+
+def test_today_excludes_old_updates_even_when_due_or_needing_input(web_server):
+    base, _server = web_server
+    task = _board_thread("old-attention", cwd=tempfile.gettempdir())
+    work_items.mutate(task["task_id"], due_date=date.today().isoformat())
+    store.upsert("old-attention", state="needs-input")
+    yesterday = datetime.combine(date.today() - timedelta(days=1), time(hour=12)).timestamp()
+    store._raw_set_updated_at("old-attention", yesterday)
+    store.heartbeat("old-attention")
+    with work_items._conn() as conn:
+        conn.execute("UPDATE work_items SET updated_at = ? WHERE task_id = ?", (yesterday, task["task_id"]))
+
+    _status, board = _get_json(base + "/api/board")
+    rendered = next(item for item in board["tasks"] if item["task_id"] == task["task_id"])
+    assert rendered["terminal_state"] == "needs-input"
+    assert rendered["due_date"] == date.today().isoformat()
+    assert rendered["in_today"] is False
 
 
 def test_closing_row_acknowledges_and_publishes_only_after_commit(web_server, monkeypatch):

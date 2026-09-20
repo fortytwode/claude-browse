@@ -639,6 +639,43 @@ select {
   font-size: 16px;
   font-weight: 700;
 }
+.filter-date-range {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 2px 0 5px;
+}
+.filter-date-range[hidden] { display: none; }
+.filter-date-range label { min-width: 0; }
+.filter-date-range input {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  margin-top: 5px;
+  padding: 7px;
+  border: 1px solid #dcdce3;
+  border-radius: 9px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+.filter-date-range input:focus-visible { outline: 2px solid var(--purple); outline-offset: 1px; }
+.sort-direction {
+  height: 34px;
+  min-width: 112px;
+  padding: 5px 10px;
+  border: 1px solid #dcdce3;
+  border-radius: 9px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sort-direction:hover { border-color: var(--purple); color: var(--purple); }
+.sort-direction:disabled { opacity: .55; cursor: default; }
 .popover-panel label {
   display: grid;
   grid-template-columns: 112px minmax(0, 1fr);
@@ -647,6 +684,12 @@ select {
   color: var(--muted);
   font-size: 12px;
   font-weight: 600;
+}
+.popover-panel .filter-date-range label {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
 }
 .popover-panel select {
   width: 100%;

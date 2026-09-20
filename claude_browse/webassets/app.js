@@ -24,6 +24,10 @@
       due: "any",
       presence: "any",
       lastUpdate: "any",
+      dueFrom: "",
+      dueTo: "",
+      lastUpdateFrom: "",
+      lastUpdateTo: "",
     },
     collapsedFolders = Object.create(null);
   var boardTimer = null,
@@ -190,12 +194,15 @@
       /[\\/]+$/,
       "",
     );
-    if (directory) return directory.split(/[\\/]/).pop();
-    return projectName(
-      boardProjects().find(function (project) {
-        return project.project_key === taskProjectKey(task);
-      }) || { name: task.project_name },
-    );
+    var worktree = directory.match(/^(.*?)[\\/]\.worktrees[\\/].+$/);
+    if (worktree) return "Worktree · " + worktree[1].split(/[\\/]/).pop();
+    if (/^(?:\/private)?\/tmp\/|^\/var\/folders\//.test(directory))
+      return "Temporary folder · " + directory.split(/[\\/]/).pop();
+    var listed = boardProjects().find(function (project) {
+      return project.project_key === taskProjectKey(task);
+    });
+    var name = task.list_name || projectName(listed || { name: task.project_name });
+    return name ? "List · " + name : directory ? "Folder · " + directory.split(/[\\/]/).pop() : "Unfiled";
   }
   function taskPresence(task) {
     if (task.terminal_presence === "open" || task.terminal_presence === "closed" || task.terminal_presence === "unknown") return task.terminal_presence;
@@ -324,9 +331,9 @@
       filters.provider !== "any" ||
       filters.priority !== "any" ||
       filters.terminal !== "any" ||
-      filters.due !== "any" ||
+      (filters.due !== "any" && (filters.due !== "custom" || filters.dueFrom || filters.dueTo)) ||
       (filters.presence || "any") !== "any" ||
-      (filters.lastUpdate || "any") !== "any"
+      ((filters.lastUpdate || "any") !== "any" && (filters.lastUpdate !== "custom" || filters.lastUpdateFrom || filters.lastUpdateTo))
     );
   }
   function reorderLockReason() {
@@ -360,8 +367,24 @@
     $("filter-due").value = filters.due;
     $("filter-presence").value = filters.presence;
     $("filter-last-update").value = filters.lastUpdate;
-    $("sort-direction").textContent = sortDirection === "desc" ? "↓" : "↑";
-    $("sort-direction").setAttribute("aria-label", "Sort " + (sortDirection === "desc" ? "descending" : "ascending"));
+    ["due", "last-update"].forEach(function (name) {
+      var field = name === "due" ? "due" : "lastUpdate";
+      $("filter-" + name + "-from").value = filters[field + "From"] || "";
+      $("filter-" + name + "-to").value = filters[field + "To"] || "";
+      $(name === "due" ? "due-date-range" : "last-update-date-range").hidden = filters[field] !== "custom";
+    });
+    var directionLabels = {
+      name: ["A to Z", "Z to A"],
+      updated: ["Oldest first", "Newest first"],
+      due: ["Earliest first", "Latest first"],
+      priority: ["Highest first", "Lowest first"],
+      terminal: ["State A to Z", "State Z to A"],
+      agent: ["Agent A to Z", "Agent Z to A"],
+    };
+    var label = (directionLabels[sortBy] || ["Ascending", "Descending"])[sortDirection === "desc" ? 1 : 0];
+    $("sort-direction").textContent = (sortDirection === "desc" ? "↓ " : "↑ ") + label;
+    $("sort-direction").setAttribute("aria-label", "Sort " + label);
+    $("sort-direction").hidden = sortBy === "manual";
     refreshCustomSelects();
   }
   var customSelects = Object.create(null);
@@ -426,6 +449,10 @@
     shell.appendChild(select);
     customSelects[id] = { select: select, button: button, menu: menu };
     refreshCustomSelect(id);
+  }
+  function closeFilterPopover(event) {
+    var popover = $("filter-popover");
+    if (popover && popover.open && !(event.target && event.target.closest && event.target.closest("#filter-popover"))) popover.open = false;
   }
   function selectedProjectData() {
     return (
@@ -527,6 +554,37 @@
       String(today.getDate()).padStart(2, "0");
     return Boolean(task.due_date && task.due_date <= day);
   }
+  var FILTER_WINDOWS = { "24h": 1, "7d": 7, "19d": 19, "30d": 30, "60d": 60, "90d": 90, "365d": 365 };
+  function localDateString(timestamp) {
+    var value = new Date(Number(timestamp) * 1000);
+    return value.getFullYear() + "-" + String(value.getMonth() + 1).padStart(2, "0") + "-" + String(value.getDate()).padStart(2, "0");
+  }
+  function matchesDateRange(value, from, to) {
+    return Boolean(value && (!from || value >= from) && (!to || value <= to));
+  }
+  function matchesDueFilter(task) {
+    var filter = filters.due || "any";
+    if (filter === "any") return true;
+    if (filter === "none") return !task.due_date;
+    if (filter === "today") return isDueTodayOrOverdue(task);
+    if (filter === "custom") return !filters.dueFrom && !filters.dueTo ? true : matchesDateRange(task.due_date, filters.dueFrom, filters.dueTo);
+    if (!task.due_date) return false;
+    var days = FILTER_WINDOWS[filter];
+    if (!days) return true;
+    var start = new Date();
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - days + 1);
+    return matchesDateRange(task.due_date, localDateString(start.getTime() / 1000), localDateString(Date.now() / 1000));
+  }
+  function matchesLastUpdateFilter(task) {
+    var filter = filters.lastUpdate || "any";
+    if (filter === "any") return true;
+    if (filter === "custom" && !filters.lastUpdateFrom && !filters.lastUpdateTo) return true;
+    if (!task.last_activity_at) return false;
+    if (filter === "custom") return matchesDateRange(localDateString(task.last_activity_at), filters.lastUpdateFrom, filters.lastUpdateTo);
+    var days = FILTER_WINDOWS[filter];
+    return !days || Number(task.last_activity_at) >= Date.now() / 1000 - days * 86400;
+  }
   function taskMatches(task) {
     if (selectedProject && taskProjectKey(task) !== selectedProject) return false;
     var status = task.work_status === "done" ? "completed" : task.work_status;
@@ -568,12 +626,7 @@
       return false;
     if ((filters.presence || "any") !== "any" && taskPresence(task) !== filters.presence)
       return false;
-    if (filters.due === "today" && !isDueTodayOrOverdue(task)) return false;
-    if (filters.due === "none" && task.due_date) return false;
-    if ((filters.lastUpdate || "any") !== "any") {
-      var windows = { "24h": 86400, "7d": 604800, "30d": 2592000 };
-      if (!task.last_activity_at || Number(task.last_activity_at) < Date.now() / 1000 - windows[filters.lastUpdate]) return false;
-    }
+    if (!matchesDueFilter(task) || !matchesLastUpdateFilter(task)) return false;
     return true;
   }
   function visibleTasks() {
@@ -645,7 +698,7 @@
     $("project-counts").textContent =
       ((project.counts || {}).active === undefined ? projectTasks.filter(function (task) { return task.work_status === "active"; }).length : (project.counts || {}).active) +
       " active · " +
-      ((project.counts || {}).today === undefined ? projectTasks.filter(function (task) { return task.in_today && task.work_status === "active"; }).length : (project.counts || {}).today) +
+      ((project.counts || {}).today === undefined ? projectTasks.filter(function (task) { return task.in_today; }).length : (project.counts || {}).today) +
       " today";
     $("list-launch-actions").hidden = !workspaceEnabled();
     updateListActions(project);
@@ -1607,7 +1660,7 @@
     dueValue.type = "date";
     dueValue.value = task.due_date || "";
     dueValue.title = task.due_date_defaulted
-      ? "Defaulted from the last pause; choose a date to override"
+      ? "Defaulted from the last update; choose a date to override"
       : task.due_date ? "Due " + dueText(task.due_date) : "Set due date";
     dueValue.setAttribute("aria-label", "Due date for " + task.title);
     dueValue.addEventListener("change", function () {
@@ -1859,8 +1912,8 @@
     renderProjectDetail();
     syncToolbarControls();
     updateReorderReason();
-    var filterCount = Object.values(filters).filter(function (value) {
-      return value !== "any";
+    var filterCount = ["provider", "priority", "terminal", "due", "presence", "lastUpdate"].filter(function (field) {
+      return filters[field] !== "any" && (filters[field] !== "custom" || filters[field + "From"] || filters[field + "To"]);
     }).length;
     $("filter-summary").textContent = filterCount
       ? filterCount + " Filters"
@@ -1987,6 +2040,11 @@
     if (result.indexOf("status") < 0) result.splice(Math.max(0, result.indexOf("name") + 1), 0, "status");
     return result.length === DATA_COLUMNS.length && new Set(result).size === DATA_COLUMNS.length ? result : DATA_COLUMNS.slice();
   }
+  function validFilterDate(value) {
+    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return "";
+    var timestamp = new Date(value + "T00:00:00").getTime();
+    return Number.isFinite(timestamp) && localDateString(timestamp / 1000) === value ? value : "";
+  }
   function applySnapshot(snapshot) {
     if (projectDescriptionDirty())
       return announce(
@@ -2034,11 +2092,15 @@
           ? savedFilters.terminal
           : "any",
       due:
-        ["any", "today", "none"].indexOf(savedFilters.due) >= 0
+        ["any", "today", "none", "custom"].concat(Object.keys(FILTER_WINDOWS)).indexOf(savedFilters.due) >= 0
           ? savedFilters.due
           : "any",
       presence: ["any", "open", "closed", "unknown"].indexOf(savedFilters.presence) >= 0 ? savedFilters.presence : "any",
-      lastUpdate: ["any", "24h", "7d", "30d"].indexOf(savedFilters.lastUpdate) >= 0 ? savedFilters.lastUpdate : "any",
+      lastUpdate: ["any", "custom"].concat(Object.keys(FILTER_WINDOWS)).indexOf(savedFilters.lastUpdate) >= 0 ? savedFilters.lastUpdate : "any",
+      dueFrom: validFilterDate(savedFilters.dueFrom),
+      dueTo: validFilterDate(savedFilters.dueTo),
+      lastUpdateFrom: validFilterDate(savedFilters.lastUpdateFrom),
+      lastUpdateTo: validFilterDate(savedFilters.lastUpdateTo),
     };
     renderBoard(latestBoard);
   }
@@ -2306,8 +2368,12 @@
     },
   );
   if (typeof document.addEventListener === "function") document.addEventListener("click", function (event) {
+    closeFilterPopover(event);
     if (event.target && typeof event.target.closest === "function" && event.target.closest(".priority-menu")) return;
     Array.prototype.forEach.call(document.querySelectorAll(".priority-menu[open]"), function (menu) { menu.open = false; });
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape" && $("filter-popover").open) $("filter-popover").open = false;
   });
   Array.prototype.forEach.call(
     document.querySelectorAll(".scope-tab"),
@@ -2339,8 +2405,19 @@
       renderBoard(latestBoard);
     });
   });
+  ["due", "last-update"].forEach(function (name) {
+    var field = name === "due" ? "due" : "lastUpdate";
+    ["from", "to"].forEach(function (bound) {
+      $("filter-" + name + "-" + bound).addEventListener("change", function () {
+        filters[field + (bound === "from" ? "From" : "To")] = validFilterDate(this.value);
+        filters[field] = "custom";
+        activeSavedView = null;
+        renderBoard(latestBoard);
+      });
+    });
+  });
   $("clear-filters").addEventListener("click", function () {
-    filters = { provider: "any", priority: "any", terminal: "any", due: "any", presence: "any", lastUpdate: "any" };
+    filters = { provider: "any", priority: "any", terminal: "any", due: "any", presence: "any", lastUpdate: "any", dueFrom: "", dueTo: "", lastUpdateFrom: "", lastUpdateTo: "" };
     ["provider", "priority", "terminal", "due", "presence", "last-update"].forEach(function (name) {
       $("filter-" + name).value = "any";
     });

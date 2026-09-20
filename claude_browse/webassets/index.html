@@ -140,7 +140,7 @@
             <h2 id="work-heading">Checking open terminals…</h2>
             <p id="presence-note" class="toolbar-note" hidden></p>
             <p id="today-note" class="toolbar-note" hidden>
-              Today includes due-today, overdue, and work that needs your input.
+              Today shows threads last updated on this Mac today.
             </p>
           </div>
           <div class="toolbar-controls">
@@ -154,7 +154,7 @@
                 autocomplete="off"
               />
             </div>
-            <details class="popover">
+            <details id="filter-popover" class="popover">
               <summary id="filter-summary">Filters</summary>
               <div class="popover-panel">
                 <label
@@ -193,14 +193,35 @@
                     <option value="any">Any due date</option>
                     <option value="today">Today or overdue</option>
                     <option value="none">No due date</option>
+                    <option value="24h">Past 24 hours</option>
+                    <option value="7d">Past 7 days</option>
+                    <option value="19d">Past 19 days</option>
+                    <option value="30d">Past 30 days</option>
+                    <option value="60d">Past 60 days</option>
+                    <option value="90d">Past 90 days</option>
+                    <option value="365d">Past 365 days</option>
+                    <option value="custom">Custom dates…</option>
                   </select></label
+                ><div id="due-date-range" class="filter-date-range" hidden>
+                  <label>From<input id="filter-due-from" type="date" /></label>
+                  <label>To<input id="filter-due-to" type="date" /></label>
+                </div
                 ><label
                   >Last update<select id="filter-last-update">
                     <option value="any">Any time</option>
                     <option value="24h">Past 24 hours</option>
                     <option value="7d">Past 7 days</option>
+                    <option value="19d">Past 19 days</option>
                     <option value="30d">Past 30 days</option>
+                    <option value="60d">Past 60 days</option>
+                    <option value="90d">Past 90 days</option>
+                    <option value="365d">Past 365 days</option>
+                    <option value="custom">Custom dates…</option>
                   </select></label
+                ><div id="last-update-date-range" class="filter-date-range" hidden>
+                  <label>From<input id="filter-last-update-from" type="date" /></label>
+                  <label>To<input id="filter-last-update-to" type="date" /></label>
+                </div
                 ><button id="clear-filters" class="text-button" type="button">
                   Clear filters
                 </button>
@@ -228,7 +249,7 @@
                 <option value="terminal">Terminal state</option>
                 <option value="agent">Agent</option>
               </select></label
-            ><button id="sort-direction" class="toolbar-chip" type="button" aria-label="Toggle sort direction">↓</button>
+            ><button id="sort-direction" class="sort-direction" type="button" aria-label="Sort descending">↓ Newest first</button>
           </div>
         </div>
         <p id="reorder-reason" class="reorder-reason" aria-live="polite"></p>
