@@ -171,6 +171,68 @@ def test_sessions_here_param_scopes_to_folder(web_server):
     assert sids == {"home1", "home-sub"}
 
 
+def test_shared_search_returns_cross_machine_excerpts_without_local_launch_data(
+    web_server, monkeypatch
+):
+    import socket
+
+    base, _server = web_server
+    monkeypatch.setattr(
+        "claude_browse.shared_search_query.search",
+        lambda query: [
+            {
+                "host": socket.gethostname(), "session_id": "local-review",
+                "title": "Already local", "snippet": "Local review",
+            },
+            {
+                "host": "studio-mac",
+                "session_id": "remote-anna-review",
+                "title": "Anna one-on-one review",
+                "snippet": "Discussed Anna's review notes.",
+                "provider": "codex",
+                "cwd": "/work/people",
+                "last_timestamp": "2026-09-20T10:00:00Z",
+                "score": 0.88,
+            }
+        ],
+    )
+
+    status, payload = _get_json(
+        base + "/api/shared-search?q=" + urllib.parse.quote("find my review of Anna")
+    )
+
+    assert status == 200
+    assert payload == {
+        "query": "find my review of Anna",
+        "matches": [
+            {
+                "host": "studio-mac",
+                "session_id": "remote-anna-review",
+                "title": "Anna one-on-one review",
+                "snippet": "Discussed Anna's review notes.",
+                "provider": "codex",
+                "cwd": "/work/people",
+                "last_timestamp": "2026-09-20T10:00:00Z",
+                "score": 0.88,
+                "text_snippet": "Discussed Anna's review notes.",
+            }
+        ]
+    }
+
+
+def test_shared_search_is_empty_when_optional_index_is_unavailable(web_server, monkeypatch):
+    base, _server = web_server
+    monkeypatch.setattr(
+        "claude_browse.shared_search_query.search",
+        lambda _query: (_ for _ in ()).throw(RuntimeError("Firestore unavailable")),
+    )
+
+    status, payload = _get_json(base + "/api/shared-search?q=review%20Anna")
+
+    assert status == 200
+    assert payload == {"query": "review Anna", "matches": []}
+
+
 def test_meta_reflects_forced_here(web_server):
     base, server = web_server
     _status, data = _get_json(base + "/api/meta")
@@ -285,6 +347,8 @@ def test_web_assets_define_reading_first_work_and_history_contract():
     assert 'data-scope="today"' in html
     assert 'id="folder-list"' in html
     assert 'id="filter-status"' in html
+    assert 'id="shared-work-results"' in html
+    assert 'id="shared-session-results"' in html
     assert '<option value="completed">Completed</option>' in html
 
     for heading in (
@@ -318,6 +382,14 @@ def test_web_assets_define_reading_first_work_and_history_contract():
     assert "setLaunchBusy" in javascript
     assert "rowMutationTails" in javascript
     assert "delete rowMutationTails[key]" in javascript
+    assert '"/api/shared-search?"' in javascript
+    assert "Cross-machine semantic matches" in javascript
+    assert "Read-only excerpts from indexed Macs" in javascript
+    assert "sharedSearchCache" in javascript
+    assert "5 * 60 * 1000" in javascript
+    assert "fetchBoard().finally(scheduleBoardPoll)" in javascript
+    assert "Promise.all([request(path), fetchSharedSearch(query)])" not in javascript
+    assert ".shared-search-results" in stylesheet
     assert "Save or cancel the project description before changing views." in javascript
     assert "hasProtectedWorkControls" in javascript
     assert "History is read-only" in html
@@ -449,6 +521,34 @@ def test_board_search_membership_is_not_capped_by_history_display_limit(web_serv
         item["task_id"] for item in board["tasks"] if item["session_id"] in {"match-one", "match-two"}
     }
     assert set(board["search_task_ids"]) == matching_tasks
+
+
+def test_board_search_finds_semantic_match_in_earlier_continuation(web_server):
+    base, _server = web_server
+    conn = fts.open_db(fts.DB_PATH)
+    _seed(conn, "anna-old", cwd="/w/search")
+    _seed(conn, "anna-current", cwd="/w/search")
+    _seed(conn, "anna-unlinked", cwd="/w/search")
+    for sid in ("anna-old", "anna-unlinked"):
+        conn.execute(
+            """INSERT INTO segments (sid, segment_idx, role, timestamp, text)
+               VALUES (?, 1, 'user', '2026-05-01T10:00:00Z', ?)""",
+            (sid, "We had our regular 1:1 check-in with Anna and agreed her next steps."),
+        )
+        fts._reindex_semantic_windows_from_segments(conn, sid)
+    conn.commit()
+    conn.close()
+    task = _board_thread("anna-old", cwd="/w/search")
+    current = work_items.attach_continuation(
+        task["task_id"],
+        {"session_id": "anna-current", "provider": "claude", "cwd": "/w/search"},
+        "anna-old",
+    )
+
+    query = urllib.parse.quote("find threads where I did a one-on-one review of Anna")
+    _status, board = _get_json(base + "/api/board?q=" + query)
+
+    assert board["search_task_ids"] == [current["task_id"]]
 
 
 def test_automatic_due_date_defaults_to_last_update_until_overridden(web_server):

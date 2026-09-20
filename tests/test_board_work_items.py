@@ -64,6 +64,7 @@ def test_task_ids_for_sessions_chunks_broad_history_lookups(tmp_path):
             conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
 
     assert work_items.task_ids_for_sessions(historical_ids) == {task["task_id"]}
+    assert set(work_items.searchable_session_ids()) == {"current", *historical_ids}
 
 
 def test_work_item_mutation_validation_and_one_task_per_session(tmp_path):

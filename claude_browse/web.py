@@ -19,6 +19,7 @@ import json
 import math
 import os
 import secrets
+import socket
 import sqlite3
 import sys
 import threading
@@ -171,6 +172,8 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/board":
                 self._serve_board(parse_qs(parsed.query))
+            elif path == "/api/shared-search":
+                self._serve_shared_search(parse_qs(parsed.query))
             elif path.startswith("/api/tasks/") and path.endswith("/history"):
                 task_id = unquote(path[len("/api/tasks/") : -len("/history")])
                 self._serve_task_history(task_id)
@@ -424,6 +427,36 @@ class _Handler(BaseHTTPRequestHandler):
             conn.close()
         self._send_json({"sessions": [_session_to_json(r, prefixes) for r in rows]})
 
+    def _serve_shared_search(self, qs: dict[str, list[str]]) -> None:
+        """Return optional cross-machine semantic matches without failing local search.
+
+        This endpoint deliberately exposes only the compact, indexed result
+        metadata. A thread still belongs to the Mac that captured it, so the
+        browser must present these results as read-only context.
+        """
+        query = (qs.get("q") or [""])[0].strip()
+        if not query:
+            self._send_json({"query": query, "matches": []})
+            return
+        try:
+            from . import shared_search_query
+
+            results = shared_search_query.search(query)
+        except Exception:  # optional credentials/index must never break local search
+            results = []
+        matches = []
+        for result in results:
+            if result.get("host") == socket.gethostname():
+                continue  # already present as an actionable local thread
+            # Match the hosted board contract while accepting the local query
+            # module's concise internal key.
+            match = dict(result)
+            match["text_snippet"] = str(
+                match.get("text_snippet") or match.get("snippet") or ""
+            )
+            matches.append(match)
+        self._send_json({"query": query, "matches": matches})
+
     def _serve_session(self, sid: str) -> None:
         # Runtime capture and search indexing have independent clocks. Reading
         # and launching must resolve the same local file, including hook-only
@@ -601,7 +634,9 @@ class _Handler(BaseHTTPRequestHandler):
                         indexed[session_id] = row
                 if query:
                     search_task_ids = work_items.task_ids_for_sessions(
-                        fts.matching_session_ids(conn, query)
+                        fts.matching_session_ids(
+                            conn, query, candidate_sids=work_items.searchable_session_ids()
+                        )
                     )
             finally:
                 conn.close()

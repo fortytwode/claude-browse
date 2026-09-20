@@ -53,6 +53,10 @@ def install() -> None:
             "StandardOutPath": str(state / f"{label}.log"),
             "StandardErrorPath": str(state / f"{label}.log"),
         }
+        if label == "com.rocketshiphq.agent-board-backend" and (
+            directory / "com.rocketshiphq.claude-browse-shared-search.plist"
+        ).exists():
+            config["EnvironmentVariables"]["CLAUDE_BROWSE_SHARED_SEARCH_ENABLED"] = "1"
         data = plistlib.dumps(config)
         if target.exists() and target.read_bytes() != data:
             raise SystemExit(f"Existing service differs: {target}; inspect before replacing it.")

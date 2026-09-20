@@ -727,6 +727,18 @@ def task_ids_for_sessions(session_ids: list[str]) -> set[str]:
     return task_ids
 
 
+def searchable_session_ids() -> list[str]:
+    """Current and historical session IDs belonging to visible work items."""
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT session_id FROM work_items WHERE session_id IS NOT NULL
+               UNION
+               SELECT links.session_id FROM task_session_links AS links
+               JOIN work_items AS items ON items.task_id = links.task_id"""
+        ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
 def list_items(*, include_done: bool = False) -> list[dict]:
     clauses = ["session_id IS NOT NULL"]
     if not include_done:

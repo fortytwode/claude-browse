@@ -3,6 +3,10 @@
   "use strict";
   var csrfToken = "",
     latestBoard = null,
+    sharedWorkResults = [],
+    sharedSessionResults = [],
+    sharedSearchCache = Object.create(null),
+    sharedSearchInFlight = Object.create(null),
     activeSid = null,
     activeSessionMeta = null,
     currentTurns = null,
@@ -1958,12 +1962,65 @@
     var control = $(id);
     if (control && typeof control.focus === "function") control.focus();
   }
+  function renderSharedResults(containerId, results) {
+    var container = $(containerId);
+    container.replaceChildren();
+    container.hidden = !results.length;
+    if (!results.length) return;
+    container.append(
+      el("h3", "shared-search-heading", "Cross-machine semantic matches"),
+      el("p", "shared-search-note", "Read-only excerpts from indexed Macs. Open the source Mac to continue the thread."),
+    );
+    results.slice(0, 8).forEach(function (result) {
+      var hit = el("article", "shared-search-hit"),
+        meta = [result.host, result.provider, result.cwd].filter(Boolean).join(" · ");
+      hit.append(
+        el("span", "shared-search-hit-title", result.title || "Untitled thread"),
+        el("span", "shared-search-hit-meta", meta),
+        el("span", "shared-search-hit-snippet", result.text_snippet || result.snippet || "No indexed excerpt."),
+      );
+      container.appendChild(hit);
+    });
+  }
+  function fetchSharedSearch(query) {
+    if (!query || query.length < 8) return Promise.resolve([]);
+    var cached = sharedSearchCache[query],
+      now = Date.now();
+    if (cached && cached.expiresAt > now) return Promise.resolve(cached.results);
+    if (sharedSearchInFlight[query]) return sharedSearchInFlight[query];
+    sharedSearchInFlight[query] = request("/api/shared-search?" + new URLSearchParams({ q: query }))
+      .then(function (data) {
+        var results = Array.isArray(data.matches)
+          ? data.matches
+          : Array.isArray(data.results)
+            ? data.results
+            : [];
+        // The board refreshes every ten seconds. Cache an exact query long
+        // enough that a static search uses one embedding/vector request.
+        sharedSearchCache[query] = { results: results, expiresAt: Date.now() + 5 * 60 * 1000 };
+        return results;
+      })
+      .catch(function () {
+        return [];
+      })
+      .finally(function () {
+        delete sharedSearchInFlight[query];
+      });
+    return sharedSearchInFlight[query];
+  }
   function fetchBoard(force) {
     if (!force && hasProtectedWorkControls()) return Promise.resolve();
     var seq = ++boardSeq,
       query = $("work-search").value.trim(),
-      path = "/api/board" + (query ? "?" + new URLSearchParams({ q: query }) : "");
-    return request(path)
+      path = "/api/board" + (query ? "?" + new URLSearchParams({ q: query }) : ""),
+      boardRequest = request(path);
+    fetchSharedSearch(query).then(function (results) {
+      if (seq === boardSeq) {
+        sharedWorkResults = results;
+        renderSharedResults("shared-work-results", results);
+      }
+    });
+    return boardRequest
       .then(function (data) {
         if (seq === boardSeq && !hasProtectedWorkControls()) {
           $("board-error").hidden = true;
@@ -2187,12 +2244,22 @@
     if (query) params.set("q", query);
     if ($("here-toggle").checked) params.set("here", "1");
     var seq = ++sessionsSeq;
+    fetchSharedSearch(query).then(function (results) {
+      if (seq === sessionsSeq) {
+        sharedSessionResults = results;
+        renderSharedResults("shared-session-results", results);
+      }
+    });
     request("/api/sessions?" + params)
       .then(function (data) {
-        if (seq === sessionsSeq) renderSessionList(data.sessions || []);
+        if (seq === sessionsSeq) {
+          renderSessionList(data.sessions || []);
+        }
       })
       .catch(function (error) {
-        if (seq === sessionsSeq) empty($("session-list"), error.message);
+        if (seq === sessionsSeq) {
+          empty($("session-list"), error.message);
+        }
       });
   }
   function renderSessionList(sessions) {
@@ -2611,6 +2678,9 @@
     .then(scheduleBoardPoll)
     .catch(function (error) {
       toast(error.message, true);
+      // Shared search is hosted separately from the Mac relay. Keep it
+      // available when the relay cannot serve meta or board state.
+      fetchBoard().finally(scheduleBoardPoll);
     });
   window.addEventListener("pagehide", function () {
     if (boardTimer) clearTimeout(boardTimer);

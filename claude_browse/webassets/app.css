@@ -1091,6 +1091,59 @@ select {
 #session-list {
   overflow: auto;
 }
+.shared-search-results {
+  margin: 0 0 12px;
+  border: 1px solid #d7cdfd;
+  border-radius: 8px;
+  background: #fbfaff;
+  overflow: hidden;
+}
+#sidebar .shared-search-results {
+  margin: 0;
+  border-width: 0 0 1px;
+  border-radius: 0;
+}
+.shared-search-heading {
+  margin: 0;
+  padding: 9px 11px 3px;
+  color: var(--purple);
+  font-size: 12px;
+  font-weight: 700;
+}
+.shared-search-note {
+  margin: 0;
+  padding: 0 11px 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.shared-search-hit {
+  display: block;
+  padding: 8px 11px;
+  border-top: 1px solid #e9e4ff;
+}
+.shared-search-hit-title {
+  display: block;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shared-search-hit-meta,
+.shared-search-hit-snippet {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.shared-search-hit-snippet {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
 .session-row {
   display: block;
   width: 100%;

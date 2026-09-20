@@ -1749,6 +1749,35 @@ def main() -> None:
         _print_usage(sys.argv[0], target_provider)
         return
 
+    if "--shared-search" in args:
+        position = args.index("--shared-search")
+        query = " ".join(args[position + 1 :]).strip()
+        if not query:
+            print("Usage: claude-browse --shared-search <query>", file=sys.stderr)
+            raise SystemExit(2)
+        from . import shared_search, shared_search_query
+        from .board.sync import _load_env_fallback
+
+        _load_env_fallback()
+        os.environ[shared_search.ENV_FLAG] = "1"
+        try:
+            matches = shared_search_query.search(query)
+        except Exception as exc:
+            print(f"Shared search unavailable: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        if not matches:
+            print("No cross-machine semantic matches.")
+            return
+        for match in matches:
+            score = float(match["score"])
+            title = " ".join(str(match["title"] or "(untitled)").split())[:120]
+            snippet = " ".join(str(match["snippet"] or "").split())[:360]
+            print(f"{title}  [{match['host']}, {score:.2f}]")
+            print(f"  {match['provider']} · {match['cwd']} · {match['last_timestamp'] or ''}")
+            print(f"  {snippet}")
+            print("  Read-only result; continue on the source Mac.\n")
+        return
+
     show_all = "--all" in args
     if show_all:
         args.remove("--all")

@@ -21,6 +21,28 @@ from claude_browse import browse
 from claude_browse.browse import format_row
 
 
+@pytest.mark.parametrize("executable", ["claude-browse", "codex-browse"])
+def test_shared_search_available_from_both_browse_commands(monkeypatch, capsys, executable):
+    from claude_browse import shared_search_query
+
+    monkeypatch.setattr(browse.sys, "argv", [executable, "--shared-search", "review Anna"])
+    monkeypatch.setattr("claude_browse.board.sync._load_env_fallback", lambda: None)
+    monkeypatch.setattr(
+        shared_search_query,
+        "search",
+        lambda query: [{
+            "title": "One-on-one review", "host": "mac-b", "score": 0.81,
+            "provider": "codex", "cwd": "/work", "last_timestamp": "2026-09-20",
+            "snippet": "Anna's review notes", "session_id": "s1",
+        }],
+    )
+    browse.main()
+    output = capsys.readouterr().out
+    assert "One-on-one review" in output
+    assert "mac-b" in output
+    assert "Anna's review notes" in output
+
+
 def _info(**overrides) -> dict:
     base = {
         "session_id": "abc-123",
