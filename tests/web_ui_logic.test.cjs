@@ -99,6 +99,7 @@ class FakeElement {
 }
 
 function matchesSelector(node, selector) {
+  if (selector.startsWith("#")) return node.id === selector.slice(1);
   const open = selector.endsWith("[open]");
   const className = selector.replace(/^\./, "").replace("[open]", "");
   if (selector.startsWith("."))
@@ -234,6 +235,7 @@ globalThis.testApi = {
   reorderTask,
   saveTask,
   taskMatches,
+  closeFilterPopover,
   taskPresence,
   startFreshTask,
   beginColumnResize,
@@ -332,7 +334,7 @@ test("due checks use the user's local calendar day rather than the UTC day", () 
   assert.equal(america.isDueTodayOrOverdue({ due_date: "2026-09-06" }), false);
 });
 
-test("Today keeps server-selected attention items without dates, but an explicit due filter excludes them", () => {
+test("Today keeps server-selected updated items without dates, but an explicit due filter excludes them", () => {
   const { api, elementFor } = loadApp();
   const attentionItem = activeTask({ in_today: true, due_date: null });
   api.setState({
@@ -594,7 +596,7 @@ test("workspace payload maps Lists into display projects without changing source
   assert.deepEqual(JSON.parse(JSON.stringify(projects)), [{ project_key: "list:yoga", source_project_key: "yoga", name: "Yoga Nidra", description: "Launch notes", folder_status: "unlinked", working_directory: null, launch_revision: null, folder_id: "ops", space_id: "general", position: 0 }]);
 });
 
-test("task rows label nested working directories by their deepest folder", () => {
+test("task rows label their List rather than a nested working directory", () => {
   const { api } = loadApp();
   const task = activeTask({
     project_name: "Team Operations",
@@ -610,7 +612,22 @@ test("task rows label nested working directories by their deepest folder", () =>
 
   const row = api.renderTaskRow(task);
 
-  assert.equal(findByClass(row, "task-breadcrumb").textContent, "MaxRewards");
+  assert.equal(findByClass(row, "task-breadcrumb").textContent, "List · Team Operations");
+});
+
+test("task rows identify temporary worktrees without calling them repos", () => {
+  const { api } = loadApp();
+  const task = activeTask({
+    list_name: "littlegrove-four-region-review.CQnQfi",
+    working_directory: "/private/tmp/littlegrove-four-region-review.CQnQfi",
+    project_key: "path:/private/tmp/littlegrove-four-region-review.CQnQfi",
+  });
+  api.setState({ latestBoard: { tasks: [task], projects: [], folders: [] } });
+  assert.equal(findByClass(api.renderTaskRow(task), "task-breadcrumb").textContent, "Temporary folder · littlegrove-four-region-review.CQnQfi");
+  const nestedWorktree = activeTask({
+    working_directory: "/Users/shamanth/repos/team-operations/.worktrees/security/meta-token-boundary",
+  });
+  assert.equal(findByClass(api.renderTaskRow(nestedWorktree), "task-breadcrumb").textContent, "Worktree · team-operations");
 });
 
 test("workspace task moves use compare-and-set and expose a reverse undo operation", async () => {
@@ -663,6 +680,8 @@ test("grid exposes direct status, due-date, and provider actions without a row m
   const row = api.renderTaskRow(task);
   assert.ok(findByClass(row, "task-status"), "status is directly editable in the grid");
   assert.ok(findByClass(row, "due-input"), "due date is directly editable in the grid");
+  const automatic = api.renderTaskRow(activeTask({ due_date: "2026-09-20", due_date_defaulted: true }));
+  assert.match(findByClass(automatic, "due-input").title, /last update/i);
   assert.equal(findByClass(row, "row-menu"), null, "row menu clutter is removed");
   const actions = findAllByClass(row, "grid-launch");
   assert.deepEqual(actions.map((button) => button.textContent), ["Restart Claude", "Start CodeX"]);
@@ -743,7 +762,7 @@ test("sidebar size and manual order persist globally across views", () => {
   assert.equal(api.getState().sidebarManualOrder, true);
 });
 
-test("last update filters honor 24h, 7d, and 30d boundaries", () => {
+test("last update filters honor all preset and custom date boundaries", () => {
   const now = 1_789_000_000;
   const { api, elementFor } = loadApp({ DateImpl: fixedDate(now * 1000) });
   elementFor("work-search").value = "";
@@ -755,6 +774,42 @@ test("last update filters honor 24h, 7d, and 30d boundaries", () => {
   assert.equal(api.taskMatches(activeTask({ last_activity_at: now - 604799 })), true);
   api.setState({ filters: { ...base, lastUpdate: "30d" } });
   assert.equal(api.taskMatches(activeTask({ last_activity_at: now - 2592001 })), false);
+  for (const [preset, days] of [["19d", 19], ["60d", 60], ["90d", 90], ["365d", 365]]) {
+    api.setState({ filters: { ...base, lastUpdate: preset } });
+    assert.equal(api.taskMatches(activeTask({ last_activity_at: now - days * 86400 + 1 })), true, preset);
+    assert.equal(api.taskMatches(activeTask({ last_activity_at: now - days * 86400 - 1 })), false, preset);
+  }
+  const day = new Date(now * 1000).toLocaleDateString("en-CA");
+  api.setState({ filters: { ...base, lastUpdate: "custom", lastUpdateFrom: day, lastUpdateTo: day } });
+  assert.equal(api.taskMatches(activeTask({ last_activity_at: now })), true);
+});
+
+test("due date supports custom inclusive dates without losing no-date filter", () => {
+  const { api, elementFor } = loadApp();
+  elementFor("work-search").value = "";
+  const base = { provider: "any", priority: "any", terminal: "any", presence: "any", lastUpdate: "any" };
+  api.setState({ queueMode: "all", filters: { ...base, due: "custom", dueFrom: "2026-09-10", dueTo: "2026-09-20" } });
+  assert.equal(api.taskMatches(activeTask({ due_date: "2026-09-10" })), true);
+  assert.equal(api.taskMatches(activeTask({ due_date: "2026-09-20" })), true);
+  assert.equal(api.taskMatches(activeTask({ due_date: "2026-09-21" })), false);
+  assert.equal(api.taskMatches(activeTask({ due_date: null })), false);
+  api.setState({ filters: { ...base, due: "custom" } });
+  assert.equal(api.taskMatches(activeTask({ due_date: null })), true, "choosing Custom alone does not filter");
+  api.setState({ filters: { ...base, due: "none" } });
+  assert.equal(api.taskMatches(activeTask({ due_date: null })), true);
+});
+
+test("filter popover closes on outside click and stays open inside", () => {
+  const { api, document, elementFor } = loadApp();
+  const popover = elementFor("filter-popover");
+  popover.className = "popover";
+  popover.open = true;
+  const inner = document.createElement("button");
+  popover.appendChild(inner);
+  api.closeFilterPopover({ target: inner });
+  assert.equal(popover.open, true);
+  api.closeFilterPopover({ target: document.createElement("div") });
+  assert.equal(popover.open, false);
 });
 
 test("lifecycle status intersects Today and retains the selected List", () => {
@@ -773,7 +828,7 @@ test("lifecycle status intersects Today and retains the selected List", () => {
   assert.equal(api.taskMatches(completedToday), true);
 });
 
-test("Today restores its heading and attention note", () => {
+test("Today restores its heading and updated-today note", () => {
   const { api, elementFor } = loadApp();
   api.setState({
     latestBoard: { tasks: [], projects: [], folders: [], workspace: { spaces: [], folders: [], lists: [] } },
