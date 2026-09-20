@@ -387,6 +387,8 @@ def test_web_assets_define_reading_first_work_and_history_contract():
     assert "Read-only excerpts from indexed Macs" in javascript
     assert "sharedSearchCache" in javascript
     assert "5 * 60 * 1000" in javascript
+    assert "fetchBoard().finally(scheduleBoardPoll)" in javascript
+    assert "Promise.all([request(path), fetchSharedSearch(query)])" not in javascript
     assert ".shared-search-results" in stylesheet
     assert "Save or cancel the project description before changing views." in javascript
     assert "hasProtectedWorkControls" in javascript
