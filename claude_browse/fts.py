@@ -21,11 +21,12 @@ import platform
 import re
 import sqlite3
 import struct
+import threading
 import time
 import urllib.error
 import urllib.request
-from collections import Counter
-from collections.abc import Callable
+from collections import Counter, OrderedDict
+from collections.abc import Callable, Iterable
 
 try:
     import fcntl
@@ -258,7 +259,15 @@ _PHRASE_CONTINUATION_CONNECTORS = frozenset(
 )
 _DENSE_EMBEDDING_ENDPOINT = "https://api.openai.com/v1/embeddings"
 _DENSE_QUERY_CACHE_LIMIT = 500
+_WORK_DENSE_MATCH_CACHE_LIMIT = 100
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_DENSE_QUERY_MEMORY_CACHE: OrderedDict[
+    str, tuple[tuple[float, ...], float]
+] = OrderedDict()
+_WORK_DENSE_MATCH_CACHE: OrderedDict[
+    str, dict[str, dict[str, object]]
+] = OrderedDict()
+_DENSE_MEMORY_CACHE_LOCK = threading.Lock()
 
 
 def _env_flag(name: str) -> bool:
@@ -287,6 +296,23 @@ def _dense_embedding_batch_size() -> int:
         return max(1, min(256, int(raw)))
     except (TypeError, ValueError):
         return 64
+
+
+def _dense_embedding_window_cap() -> int:
+    """Bound embedding work done while one reindex lock is held."""
+    raw = os.environ.get("CLAUDE_BROWSE_EMBEDDING_WINDOWS_PER_RUN", "256").strip()
+    try:
+        return max(1, min(4096, int(raw)))
+    except (TypeError, ValueError):
+        return 256
+
+
+def _dense_embedding_retry_count() -> int:
+    raw = os.environ.get("CLAUDE_BROWSE_EMBEDDING_RETRIES", "3").strip()
+    try:
+        return max(0, min(5, int(raw)))
+    except (TypeError, ValueError):
+        return 3
 
 
 def _dense_embedding_max_chars() -> int:
@@ -2463,11 +2489,23 @@ def _request_openai_embeddings(
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except (OSError, TimeoutError, urllib.error.URLError, ValueError):
-        return []
+    retries = _dense_embedding_retry_count()
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            retryable = exc.code == 429 or 500 <= exc.code < 600
+            if not retryable or attempt >= retries:
+                return []
+            try:
+                retry_after = float(exc.headers.get("Retry-After", ""))
+            except (AttributeError, TypeError, ValueError):
+                retry_after = 0.0
+            time.sleep(min(60.0, retry_after if retry_after > 0 else 2**attempt))
+        except (OSError, TimeoutError, urllib.error.URLError, ValueError):
+            return []
 
     items = body.get("data") if isinstance(body, dict) else None
     if not isinstance(items, list):
@@ -2499,23 +2537,41 @@ def _sync_dense_embeddings(conn: sqlite3.Connection) -> None:
         """,
         (model, dimensions),
     )
+    conn.commit()
 
-    rows = conn.execute(
-        """
-        SELECT w.rowid, w.sid, w.text, e.content_hash
-        FROM semantic_windows w
-        LEFT JOIN dense_embeddings e ON e.window_id = w.rowid
-        ORDER BY w.rowid
-        """
-    ).fetchall()
+    # A cold index can contain tens of thousands of windows. Index a bounded
+    # slice per reindex so the writer lock stays short; already committed
+    # windows are skipped on the next run, which makes interruption safe.
+    window_cap = _dense_embedding_window_cap()
     pending: list[tuple[int, str, str, str]] = []
-    for window_id, sid, text, existing_hash in rows:
-        embedding_text = _dense_embedding_input(str(text or ""))
-        if not embedding_text:
-            continue
-        content_hash = _dense_content_hash(embedding_text)
-        if existing_hash != content_hash:
-            pending.append((int(window_id), str(sid), embedding_text, content_hash))
+    last_rowid = 0
+    scan_size = max(_dense_embedding_batch_size(), 64)
+    while len(pending) < window_cap:
+        rows = conn.execute(
+            """
+            SELECT w.rowid, w.sid, w.text, e.content_hash
+            FROM semantic_windows w
+            LEFT JOIN dense_embeddings e ON e.window_id = w.rowid
+            WHERE w.rowid > ?
+            ORDER BY w.rowid
+            LIMIT ?
+            """,
+            (last_rowid, scan_size),
+        ).fetchall()
+        if not rows:
+            break
+        for window_id, sid, text, existing_hash in rows:
+            last_rowid = int(window_id)
+            embedding_text = _dense_embedding_input(str(text or ""))
+            if not embedding_text:
+                continue
+            content_hash = _dense_content_hash(embedding_text)
+            if existing_hash != content_hash:
+                pending.append((int(window_id), str(sid), embedding_text, content_hash))
+                if len(pending) >= window_cap:
+                    break
+        if len(rows) < scan_size:
+            break
     if not pending:
         return
 
@@ -2569,6 +2625,31 @@ def _dense_query_cache_key(model: str, dimensions: int, query: str) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _memory_cache_get(
+    cache: OrderedDict,
+    key: str,
+):
+    with _DENSE_MEMORY_CACHE_LOCK:
+        value = cache.get(key)
+        if value is not None:
+            cache.move_to_end(key)
+        return value
+
+
+def _memory_cache_put(
+    cache: OrderedDict,
+    key: str,
+    value: object,
+    *,
+    limit: int,
+) -> None:
+    with _DENSE_MEMORY_CACHE_LOCK:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > limit:
+            cache.popitem(last=False)
+
+
 def _prune_dense_query_cache(conn: sqlite3.Connection) -> None:
     stale = conn.execute(
         """
@@ -2598,6 +2679,10 @@ def _dense_query_embedding(
     if not embedding_text:
         return None
     cache_key = _dense_query_cache_key(model, dimensions, embedding_text)
+    cached = _memory_cache_get(_DENSE_QUERY_MEMORY_CACHE, cache_key)
+    if cached is not None:
+        vector, norm = cached
+        return (list(vector), float(norm))
     try:
         row = conn.execute(
             """
@@ -2610,7 +2695,15 @@ def _dense_query_embedding(
     except sqlite3.Error:
         row = None
     if row:
-        return (_vector_from_blob(row[0]), float(row[1] or 0.0))
+        vector = _vector_from_blob(row[0])
+        norm = float(row[1] or 0.0)
+        _memory_cache_put(
+            _DENSE_QUERY_MEMORY_CACHE,
+            cache_key,
+            (tuple(vector), norm),
+            limit=_DENSE_QUERY_CACHE_LIMIT,
+        )
+        return (vector, norm)
 
     try:
         vectors = _request_openai_embeddings(
@@ -2624,6 +2717,12 @@ def _dense_query_embedding(
         return None
     vector = vectors[0]
     norm = max(_vector_norm(vector), 1e-9)
+    _memory_cache_put(
+        _DENSE_QUERY_MEMORY_CACHE,
+        cache_key,
+        (tuple(vector), norm),
+        limit=_DENSE_QUERY_CACHE_LIMIT,
+    )
     try:
         conn.execute(
             """
@@ -2663,6 +2762,7 @@ def _dense_window_matches(
     query: str,
     *,
     plan: QueryPlan,
+    sids: list[str] | None = None,
     limit: int = 200,
 ) -> dict[str, dict[str, object]]:
     if not _dense_query_is_eligible(query, plan):
@@ -2694,15 +2794,22 @@ def _dense_window_matches(
         return {}
     query_vector, query_norm = query_embedding
     min_score = _dense_min_score()
+    where = ["e.model = ?", "e.dimensions = ?", "e.norm > 0"]
+    params: list[object] = [model, dimensions]
+    if sids:
+        placeholders = ",".join("?" for _ in sids)
+        where.append(f"w.sid IN ({placeholders})")
+        params.extend(sids)
+
     try:
         rows = conn.execute(
             """
             SELECT w.sid, w.segment_idx, w.timestamp, w.text, e.vector, e.norm
             FROM dense_embeddings e
             JOIN semantic_windows w ON w.rowid = e.window_id
-            WHERE e.model = ? AND e.dimensions = ? AND e.norm > 0
-            """,
-            (model, dimensions),
+            WHERE """
+            + " AND ".join(where),
+            params,
         ).fetchall()
     except sqlite3.Error:
         return {}
@@ -2757,6 +2864,79 @@ def _dense_window_matches(
             "_match_bm25": 0.0,
             "_assistant_bonus": 0,
         }
+    return matches
+
+
+def _work_dense_cache_key(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    model: str,
+    dimensions: int,
+    candidate_sids: list[str],
+) -> str | None:
+    """Fingerprint a bounded Work dense lookup and its indexed vectors."""
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*), MAX(indexed_at)
+            FROM dense_embeddings
+            WHERE model = ? AND dimensions = ?
+            """,
+            (model, dimensions),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or not row[0]:
+        return None
+    raw = "\0".join(
+        (
+            model,
+            str(dimensions),
+            str(row[0]),
+            str(row[1] or ""),
+            query,
+            *sorted(candidate_sids),
+        )
+    ).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _work_dense_window_matches(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    plan: QueryPlan,
+    candidate_sids: list[str],
+) -> dict[str, dict[str, object]]:
+    """Cache dense Work membership between board polls while vectors match."""
+    if not _dense_query_is_eligible(query, plan):
+        return {}
+    key = _work_dense_cache_key(
+        conn,
+        query,
+        model=_dense_embedding_model(),
+        dimensions=_dense_embedding_dimensions(),
+        candidate_sids=candidate_sids,
+    )
+    if key:
+        cached = _memory_cache_get(_WORK_DENSE_MATCH_CACHE, key)
+        if cached is not None:
+            return dict(cached)
+    matches = _dense_window_matches(
+        conn,
+        query,
+        plan=plan,
+        sids=candidate_sids,
+        limit=len(candidate_sids),
+    )
+    if key:
+        _memory_cache_put(
+            _WORK_DENSE_MATCH_CACHE,
+            key,
+            dict(matches),
+            limit=_WORK_DENSE_MATCH_CACHE_LIMIT,
+        )
     return matches
 
 
@@ -3582,18 +3762,85 @@ def search(
     return trimmed
 
 
-def matching_session_ids(conn: sqlite3.Connection, query: str) -> list[str]:
+_WORK_SEMANTIC_SID_BATCH_SIZE = 800
+
+
+def _work_semantic_session_ids(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    plan: QueryPlan,
+    candidate_sids: list[str],
+) -> list[str]:
+    """Return semantic Work-search IDs, limited to visible Work candidates.
+
+    This deliberately does not use ``search_ranked``. Work needs membership
+    across all of its task-linked sessions, while the History ranker fetches
+    and decorates a broad transcript pool designed for a result list. The
+    caller supplies the board's session IDs, so both sparse and optional dense
+    lookup inspect only relevant task threads.
+    """
+    if not plan.descriptive or not candidate_sids:
+        return []
+
+    matched: dict[str, None] = {}
+    for start in range(0, len(candidate_sids), _WORK_SEMANTIC_SID_BATCH_SIZE):
+        batch = candidate_sids[start : start + _WORK_SEMANTIC_SID_BATCH_SIZE]
+        # Windows are denser than sessions. Keep enough matching windows to
+        # retain a hit for every scoped task session without querying the full
+        # corpus or imposing the History view's result limit.
+        sparse = _semantic_window_matches(
+            conn,
+            query,
+            plan=plan,
+            sids=batch,
+            limit=max(200, len(batch) * 8),
+        )
+        dense = _work_dense_window_matches(
+            conn,
+            query,
+            plan=plan,
+            candidate_sids=batch,
+        )
+        for sid in (*sparse, *dense):
+            matched[sid] = None
+    return list(matched)
+
+
+def matching_session_ids(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    candidate_sids: Iterable[str] | None = None,
+) -> list[str]:
     """Return every indexed session ID matching a non-empty Work query.
 
     Work search needs set membership, not snippets or ranking. Keeping this
     ID-only path separate avoids capping task visibility at the Thread History
-    result limit or materializing full transcript result rows.
+    result limit or materializing full transcript result rows. Supplying
+    ``candidate_sids`` scopes all results to task-linked sessions and adds
+    sparse semantic matches plus optional dense-vector matches from that same
+    bounded set. The two-argument form remains the established lexical FTS
+    path for callers that have no Work candidate set.
     """
     if not query.strip():
         return []
+    scoped_sids = (
+        list(dict.fromkeys(str(sid) for sid in candidate_sids if sid))
+        if candidate_sids is not None
+        else None
+    )
+    if scoped_sids == []:
+        return []
+    allowed_sids = set(scoped_sids) if scoped_sids is not None else None
+
     strict_plan = build_query_plan(query)
     exact = _exact_identifier_results(conn, query, 200)
-    exact_ids = [str(row["session_id"]) for row in exact]
+    exact_ids = [
+        str(row["session_id"])
+        for row in exact
+        if allowed_sids is None or str(row["session_id"]) in allowed_sids
+    ]
     if strict_plan.low_confidence:
         return exact_ids
 
@@ -3626,10 +3873,26 @@ def matching_session_ids(conn: sqlite3.Connection, query: str) -> list[str]:
             ).fetchall()
         except sqlite3.OperationalError:
             continue
-        if rows:
-            matched = [str(row[0]) for row in rows]
-            return list(dict.fromkeys([*exact_ids, *matched]))
-    return exact_ids
+        matched = [
+            str(row[0])
+            for row in rows
+            if allowed_sids is None or str(row[0]) in allowed_sids
+        ]
+        if matched or exact_ids:
+            lexical_ids = list(dict.fromkeys([*exact_ids, *matched]))
+            break
+    else:
+        lexical_ids = exact_ids
+
+    if scoped_sids is None:
+        return lexical_ids
+    semantic_ids = _work_semantic_session_ids(
+        conn,
+        query,
+        plan=plan,
+        candidate_sids=scoped_sids,
+    )
+    return list(dict.fromkeys([*lexical_ids, *semantic_ids]))
 
 
 # --- ranker_v1 -----------------------------------------------------------

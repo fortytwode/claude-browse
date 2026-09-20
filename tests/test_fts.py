@@ -11,6 +11,9 @@ import shutil
 import sqlite3
 import tempfile
 import time
+import urllib.error
+from collections import OrderedDict
+from email.message import Message
 from pathlib import Path
 
 import pytest
@@ -39,6 +42,8 @@ def _isolated_index_environment(monkeypatch):
     monkeypatch.delenv("CLAUDE_BROWSE_EMBEDDING_MODEL", raising=False)
     monkeypatch.delenv("CLAUDE_BROWSE_EMBEDDING_DIMENSIONS", raising=False)
     monkeypatch.delenv("CLAUDE_BROWSE_EMBEDDING_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("CLAUDE_BROWSE_EMBEDDING_WINDOWS_PER_RUN", raising=False)
+    monkeypatch.delenv("CLAUDE_BROWSE_EMBEDDING_RETRIES", raising=False)
     monkeypatch.delenv("CLAUDE_BROWSE_DENSE_MIN_SCORE", raising=False)
     # Reindex tests control their provider record stream explicitly; never let
     # the developer's live CodeX corpus leak into an in-memory fixture.
@@ -249,6 +254,122 @@ def test_matching_session_ids_two_words_is_phrase_then_relaxes(db):
     assert fts.matching_session_ids(db, "runna sca2") == ["s1"]
     # ...and relaxes to AND over the same words only when nothing has it.
     assert sorted(fts.matching_session_ids(db, "sca2 runna")) == ["s1", "s2"]
+
+
+def test_matching_session_ids_scoped_work_search_relaxes_after_outside_phrase_hit(db):
+    _seed(db, "outside_work", "the runna sca2 deck is ready")
+    _seed(db, "task_thread", "runna and sca2 are mentioned with a gap")
+
+    # A global phrase hit must not stop the fallback sequence before it finds
+    # the relaxed lexical hit that belongs to the supplied Work task set.
+    assert fts.matching_session_ids(
+        db,
+        "runna sca2",
+        candidate_sids=["task_thread"],
+    ) == ["task_thread"]
+
+
+def test_matching_session_ids_scoped_work_search_adds_sparse_semantic_hits(db):
+    """Natural-language Work queries inspect only task-linked sessions."""
+    _seed(
+        db,
+        "anna_review",
+        "We had our regular 1:1 check-in with Anna and agreed her next steps.",
+    )
+    _seed(
+        db,
+        "unrelated_anna",
+        "Anna's birthday gathering for the office is ready.",
+    )
+    _refresh_semantic(db)
+
+    query = "find threads where I did a one-on-one review of Anna"
+
+    # The phrase-aware lexical path cannot turn one-on-one into 1:1. The
+    # scoped sparse window index recovers the task session, and must never
+    # add a similarly named session outside the visible Work candidates.
+    assert fts.matching_session_ids(db, query) == []
+    assert fts.matching_session_ids(
+        db,
+        query,
+        candidate_sids=["anna_review"],
+    ) == ["anna_review"]
+
+
+def test_matching_session_ids_scoped_work_search_uses_dense_vectors(db, monkeypatch):
+    monkeypatch.setenv("CLAUDE_BROWSE_DENSE_EMBEDDINGS", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("CLAUDE_BROWSE_EMBEDDING_DIMENSIONS", "2")
+    _seed(db, "career_chat", "I met Bianca to talk through her next role.")
+    _seed(db, "outside_work", "We discussed an unrelated product roadmap.")
+    _refresh_semantic(db)
+
+    def fake_embeddings(texts, *, model, dimensions):
+        assert dimensions == 2
+        vectors = []
+        for text in texts:
+            lowered = text.lower()
+            vectors.append(
+                [1.0, 0.0]
+                if "bianca" in lowered or "leadership conversation" in lowered
+                else [0.0, 1.0]
+            )
+        return vectors
+
+    monkeypatch.setattr(fts, "_request_openai_embeddings", fake_embeddings)
+    fts._sync_dense_embeddings(db)
+
+    assert fts.matching_session_ids(
+        db,
+        "find my private leadership conversation",
+        candidate_sids=["career_chat"],
+    ) == ["career_chat"]
+
+
+def test_scoped_work_dense_search_caches_query_and_matches_for_read_only_db(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CLAUDE_BROWSE_DENSE_EMBEDDINGS", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("CLAUDE_BROWSE_EMBEDDING_DIMENSIONS", "2")
+    path = tmp_path / "index.db"
+    writer = fts.open_db(str(path))
+    _seed(writer, "career_chat", "I met Bianca to talk through her next role.")
+    _refresh_semantic(writer)
+
+    monkeypatch.setattr(
+        fts,
+        "_request_openai_embeddings",
+        lambda texts, *, model, dimensions: [[1.0, 0.0] for _ in texts],
+    )
+    fts._sync_dense_embeddings(writer)
+    writer.close()
+
+    # The board uses a read-only SQLite handle, so its persistent query-cache
+    # write is intentionally rejected. Process memory must still prevent the
+    # same poll/search from making another embedding request or vector scan.
+    monkeypatch.setattr(fts, "_DENSE_QUERY_MEMORY_CACHE", OrderedDict())
+    monkeypatch.setattr(fts, "_WORK_DENSE_MATCH_CACHE", OrderedDict())
+    calls = []
+
+    def fake_query_embedding(texts, *, model, dimensions):
+        calls.append(list(texts))
+        return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(fts, "_request_openai_embeddings", fake_query_embedding)
+    reader = fts.open_db(str(path), read_only=True)
+    try:
+        query = "find my private leadership conversation"
+        assert fts.matching_session_ids(
+            reader, query, candidate_sids=["career_chat"]
+        ) == ["career_chat"]
+        assert fts.matching_session_ids(
+            reader, query, candidate_sids=["career_chat"]
+        ) == ["career_chat"]
+    finally:
+        reader.close()
+
+    assert calls == [["find my private leadership conversation"]]
 
 
 def test_search_two_words_relax_to_AND_only_without_phrase_hit(db):
@@ -1875,6 +1996,89 @@ def test_dense_embedding_sync_skips_unchanged_windows(db, monkeypatch):
 
     assert len(calls) == 1
     assert len(calls[0]) == 2
+
+
+def test_dense_embedding_sync_caps_each_reindex_run_and_resumes(db, monkeypatch):
+    monkeypatch.setenv("CLAUDE_BROWSE_DENSE_EMBEDDINGS", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("CLAUDE_BROWSE_EMBEDDING_DIMENSIONS", "2")
+    monkeypatch.setenv("CLAUDE_BROWSE_EMBEDDING_BATCH_SIZE", "1")
+    monkeypatch.setenv("CLAUDE_BROWSE_EMBEDDING_WINDOWS_PER_RUN", "2")
+    for idx in range(3):
+        _seed(db, f"thread_{idx}", f"Transcript window {idx} about a roadmap.")
+    _refresh_semantic(db)
+    calls = []
+
+    def fake_embeddings(texts, *, model, dimensions):
+        calls.append(list(texts))
+        return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(fts, "_request_openai_embeddings", fake_embeddings)
+    fts._sync_dense_embeddings(db)
+    assert db.execute("SELECT COUNT(*) FROM dense_embeddings").fetchone()[0] == 2
+
+    fts._sync_dense_embeddings(db)
+    assert db.execute("SELECT COUNT(*) FROM dense_embeddings").fetchone()[0] == 3
+    assert [len(batch) for batch in calls] == [1, 1, 1]
+
+
+def test_dense_embedding_request_retries_rate_limit_with_retry_after(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("CLAUDE_BROWSE_EMBEDDING_RETRIES", "1")
+    headers = Message()
+    headers["Retry-After"] = "7"
+    responses = [
+        urllib.error.HTTPError("https://example.test", 429, "slow down", headers, None),
+        type(
+            "Response",
+            (),
+            {
+                "__enter__": lambda self: self,
+                "__exit__": lambda self, *args: None,
+                "read": lambda self: b'{"data":[{"index":0,"embedding":[1,0]}]}',
+            },
+        )(),
+    ]
+    delays = []
+
+    def fake_urlopen(_request, timeout):
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(fts.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(fts.time, "sleep", delays.append)
+
+    assert fts._request_openai_embeddings(
+        ["retry this"], model="text-embedding-3-small", dimensions=2
+    ) == [[1.0, 0.0]]
+    assert delays == [7.0]
+
+
+def test_dense_embedding_sync_resumes_after_a_failed_batch(db, monkeypatch):
+    monkeypatch.setenv("CLAUDE_BROWSE_DENSE_EMBEDDINGS", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("CLAUDE_BROWSE_EMBEDDING_DIMENSIONS", "2")
+    monkeypatch.setenv("CLAUDE_BROWSE_EMBEDDING_BATCH_SIZE", "1")
+    _seed(db, "first", "First pending transcript window.")
+    _seed(db, "second", "Second pending transcript window.")
+    _refresh_semantic(db)
+    calls = 0
+
+    def flaky_embeddings(texts, *, model, dimensions):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return []
+        return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(fts, "_request_openai_embeddings", flaky_embeddings)
+    fts._sync_dense_embeddings(db)
+    assert db.execute("SELECT COUNT(*) FROM dense_embeddings").fetchone()[0] == 1
+
+    fts._sync_dense_embeddings(db)
+    assert db.execute("SELECT COUNT(*) FROM dense_embeddings").fetchone()[0] == 2
 
 
 def test_search_ranked_uses_dense_embeddings_when_enabled(db, monkeypatch):

@@ -511,6 +511,33 @@ Firestore/Slack creds. Without it, the local loop (statusline,
 notifications, `aj`) still works fully -- sync just no-ops and logs to
 `~/.claude/agent-board/sync.log`.
 
+**Cross-machine semantic search:** Each Mac can publish embeddings and short
+excerpts of its local session history to the shared Firestore database. Agent
+Board and Thread History show read-only matches from all published Macs, even
+when the source Mac is offline. `claude-browse --shared-search "review of Anna"`
+and `codex-browse --shared-search "review of Anna"` print the same matches.
+Native resume and full transcripts still require the source Mac.
+
+On each Mac, install the `board-sync` extra, configure Application Default
+Credentials for the shared Firestore project and `OPENAI_API_KEY` (the existing
+Agent Board env fallback is supported), then run:
+
+```bash
+python3 scripts/install_shared_search.py
+```
+
+The macOS LaunchAgent starts immediately and then every 10 minutes. Each run
+embeds at most 4,096 new windows and publishes them in retry-safe Firestore
+batches; the first backfill may take multiple runs. Progress and errors are in
+`~/.claude/shared-search/publisher.log` and `publisher.err.log`. The installer
+also enables shared search in an existing local Agent Board backend. The
+hosted Agent Board queries Firestore
+directly. The database needs a 256-dimension vector index on
+`shared_search_windows.embedding` (created once with `gcloud firestore indexes
+composite create`). The publisher sends transcript excerpts and embeddings to
+the shared project, so enable it only for histories intended to be searchable
+there.
+
 ```bash
 python3 -m venv .venv
 ./.venv/bin/pip install -e ".[board-sync]"
