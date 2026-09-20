@@ -2012,14 +2012,15 @@
     if (!force && hasProtectedWorkControls()) return Promise.resolve();
     var seq = ++boardSeq,
       query = $("work-search").value.trim(),
-      path = "/api/board" + (query ? "?" + new URLSearchParams({ q: query }) : "");
+      path = "/api/board" + (query ? "?" + new URLSearchParams({ q: query }) : ""),
+      boardRequest = request(path);
     fetchSharedSearch(query).then(function (results) {
       if (seq === boardSeq) {
         sharedWorkResults = results;
         renderSharedResults("shared-work-results", results);
       }
     });
-    return request(path)
+    return boardRequest
       .then(function (data) {
         if (seq === boardSeq && !hasProtectedWorkControls()) {
           $("board-error").hidden = true;

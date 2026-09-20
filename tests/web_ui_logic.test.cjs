@@ -385,6 +385,26 @@ test("fetchBoard sends the Work query to the full-history search endpoint", asyn
   assert.equal(requests[0], "/api/board?q=launch+plan");
 });
 
+test("shared matches remain visible when the Mac relay is offline", async () => {
+  const { api, elementFor } = loadApp({
+    fetchImpl: (requestPath) => {
+      if (requestPath.startsWith("/api/board")) return Promise.reject(new Error("Mac offline"));
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ matches: [{ host: "other-mac", title: "Anna review", text_snippet: "One-on-one notes" }] }),
+      });
+    },
+  });
+  elementFor("work-search").value = "review Anna";
+
+  await api.fetchBoard(true);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(elementFor("shared-work-results").hidden, false);
+  assert.equal(elementFor("shared-work-results").children.length, 3);
+  assert.equal(elementFor("board-error").hidden, false);
+});
+
 test("reordering a task before itself is a no-op and does not POST", async () => {
   const requests = [];
   const { api, elementFor } = loadApp({
