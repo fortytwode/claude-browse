@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-09-25
+
 ### Fixed
+- **Phrase searches include recently captured threads.** When the picker starts
+  from a warm index, a typed search now waits briefly for an in-progress
+  background refresh instead of returning stale results without explanation.
+- **ClickUp URLs resolve by exact task ID.** Short ClickUp task IDs are matched
+  as complete `/t/<id>` path segments, including transcript segments. A missing
+  or mistyped task URL now returns no match instead of falling through to
+  generic words such as `clickup` and `task`.
 - **One notification per event, and clicking it focuses the terminal.** The
   helper's singleton lock lived in `$TMPDIR`, where it was swept out from
   under the running process; every later launch then locked a fresh inode and

@@ -235,6 +235,10 @@ _CODE_REFERENCE_WINDOW_CUES = (
 )
 _EXACT_URL_RE = re.compile(r"https?://[^\s<>)\"']+", re.IGNORECASE)
 _EXACT_ID_RE = re.compile(r"\b[a-z0-9][a-z0-9_-]{15,}\b", re.IGNORECASE)
+_CLICKUP_TASK_URL_RE = re.compile(
+    r"https?://(?:app\.)?clickup\.com/t/(?:\d+/)?([a-z0-9_-]{6,})",
+    re.IGNORECASE,
+)
 _SEMANTIC_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9']+")
 _SEMANTIC_WINDOW_RADIUS = 2
 _SEMANTIC_MAX_FEATURES = 160
@@ -1553,13 +1557,19 @@ def _escape_like(text: str) -> str:
 
 def _exact_identifier_terms(query: str) -> tuple[str, ...]:
     terms: list[str] = []
-    for match in _EXACT_URL_RE.finditer(query):
-        url = match.group(0).rstrip(".,;:)]}")
-        if url:
-            terms.append(url.lower())
-            base_url = url.split("?", 1)[0].rstrip("/")
-            if base_url and base_url != url:
-                terms.append(base_url.lower())
+    clickup_task_ids = [
+        match.group(1).lower() for match in _CLICKUP_TASK_URL_RE.finditer(query)
+    ]
+    if clickup_task_ids:
+        terms.extend(f"clickup-task:{task_id}" for task_id in clickup_task_ids)
+    else:
+        for match in _EXACT_URL_RE.finditer(query):
+            url = match.group(0).rstrip(".,;:)]}")
+            if url:
+                terms.append(url.lower())
+                base_url = url.split("?", 1)[0].rstrip("/")
+                if base_url and base_url != url:
+                    terms.append(base_url.lower())
     for match in _EXACT_ID_RE.finditer(query.lower()):
         raw = match.group(0).strip("_-")
         compact = raw.replace("-", "").replace("_", "")
@@ -1576,7 +1586,8 @@ def _exact_segment_context(
     terms: tuple[str, ...],
 ) -> tuple[str, str | None, int | None]:
     for term in terms:
-        pattern = f"%{_escape_like(term.lower())}%"
+        search_term = term.removeprefix("clickup-task:")
+        pattern = f"%{_escape_like(search_term.lower())}%"
         row = conn.execute(
             """
             SELECT text, timestamp, segment_idx
@@ -1588,7 +1599,7 @@ def _exact_segment_context(
             (sid, pattern),
         ).fetchone()
         if row:
-            context = _highlight_context(str(row[0] or ""), (term,))
+            context = _highlight_context(str(row[0] or ""), (search_term,))
             return (context, row[1], row[2])
     return ("", None, None)
 
@@ -1615,8 +1626,38 @@ def _exact_identifier_results(
             coalesce(sessions_fts.asst_text, '')
         )
     """
-    where = " OR ".join([f"{haystack} LIKE ? ESCAPE '\\'" for _ in terms])
-    params = [f"%{_escape_like(term)}%" for term in terms]
+    clauses: list[str] = []
+    params: list[str] = []
+    for term in terms:
+        if term.startswith("clickup-task:"):
+            path = f"/t/{term.removeprefix('clickup-task:')}"
+            after_id = len(path) + 1
+            # ClickUp task IDs are often short (for example, 9 characters),
+            # so they cannot use the generic long-ID substring matcher. Match
+            # a `/t/<task-id>` path segment and check the following character
+            # so an ID prefix cannot select another task.
+            path_pattern = f"%{_escape_like(path)}%"
+            boundary = (
+                "substr({source}, instr({source}, ?) + ?, 1) "
+                "NOT GLOB '[a-z0-9_-]'"
+            )
+            session_path_clause = (
+                f"({haystack} LIKE ? ESCAPE '\\' AND "
+                + boundary.format(source=haystack)
+                + ")"
+            )
+            segment_path_clause = (
+                "EXISTS (SELECT 1 FROM segments g WHERE g.sid = s.sid "
+                "AND lower(g.text) LIKE ? ESCAPE '\\' AND "
+                + boundary.format(source="lower(g.text)")
+                + ")"
+            )
+            clauses.append(f"({session_path_clause} OR {segment_path_clause})")
+            params.extend((path_pattern, path, after_id, path_pattern, path, after_id))
+        else:
+            clauses.append(f"{haystack} LIKE ? ESCAPE '\\'")
+            params.append(f"%{_escape_like(term)}%")
+    where = " OR ".join(clauses)
     rows = conn.execute(
         f"""
         SELECT s.sid, s.path, s.provider, s.cwd, s.timestamp, s.last_timestamp,
@@ -1645,7 +1686,9 @@ def _exact_identifier_results(
         item["match_timestamp"] = timestamp or item.get("last_timestamp")
         if segment_idx is not None:
             item["match_segment_idx"] = segment_idx
-        item["exact_identifier_match"] = ", ".join(terms)
+        item["exact_identifier_match"] = ", ".join(
+            term.removeprefix("clickup-task:") for term in terms
+        )
         item["_exact_identifier_score"] = 50.0
         item["_bm25"] = 0.0
         results.append(item)
@@ -3620,6 +3663,9 @@ def search(
     if not query.strip():
         return list_recent(conn, limit)
 
+    if _CLICKUP_TASK_URL_RE.search(query):
+        return _exact_identifier_results(conn, query, limit)
+
     plan = build_query_plan(query)
     if plan.low_confidence:
         return list_recent(conn, limit)
@@ -3939,6 +3985,11 @@ def search_ranked(
 
     plan = build_query_plan(query)
     exact_results = _exact_identifier_results(conn, query, max(limit * 2, 50))
+    if _CLICKUP_TASK_URL_RE.search(query) and not exact_results:
+        # A ClickUp task URL expresses a specific task identity. Falling
+        # through to lexical URL tokens like `clickup` or `task` turns a miss
+        # into plausible but incorrect results from unrelated tasks.
+        return []
     if plan.low_confidence and not exact_results:
         return list_recent(conn, limit)
     plan = _discriminative_query_plan(conn, plan)

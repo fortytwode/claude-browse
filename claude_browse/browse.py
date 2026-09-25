@@ -787,6 +787,24 @@ CURRENT_CWD = {current_cwd!r}
 LIMIT = {limit}
 
 q = os.environ.get("FZF_QUERY", "")
+if q.strip():
+    # A warm picker paints from the existing DB while a detached refresh
+    # indexes new or changed threads. If the user starts searching during
+    # that refresh, don't silently search the stale snapshot. Wait briefly;
+    # continue with an explicit notice if indexing is unusually slow.
+    refresh_lock = fts.acquire_reindex_lock(DB_PATH, block=False)
+    if refresh_lock is None:
+        print("(updating search index; waiting for recent threads)", flush=True)
+        refresh_lock = fts.acquire_reindex_lock(
+            DB_PATH, block=True, poll_interval=0.25, timeout_s=30
+        )
+        if refresh_lock is None:
+            print("(index refresh is still running; results may be stale)", flush=True)
+        else:
+            fts.release_reindex_lock(refresh_lock)
+    else:
+        fts.release_reindex_lock(refresh_lock)
+
 try:
     conn = fts.open_db(DB_PATH, read_only=True)
 except sqlite3.Error:
