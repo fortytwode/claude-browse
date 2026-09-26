@@ -121,73 +121,97 @@ class _Markdown:
 
 
 class _Screen:
-    """Permanent transcript above a redrawable live region (TTY only)."""
+    """Permanent transcript plus one status row. The status row lives on the
+    cursor's own line and is only ever rewritten with \\r + ESC[K; nothing
+    moves the cursor up, so terminals with odd row accounting stay in sync."""
 
     def __init__(self) -> None:
         self.tty = sys.stdout.isatty()
-        self._live: list[str] = []
-        self._lock = threading.RLock()
+        self.col = 0
+        self.status_shown = False
         self._last_blank = True
+        self._lock = threading.RLock()
 
-    def _erase_live(self) -> None:
-        if not self._live:
-            return
-        n = len(self._live)
-        sys.stdout.write("\r\033[K")
-        for _ in range(n - 1):
-            sys.stdout.write("\033[1A\033[K")
-        self._live = []
+    def _drop_status(self) -> None:
+        if self.status_shown:
+            sys.stdout.write("\r\033[K")
+            self.status_shown = False
+            self.col = 0
+
+    def write(self, text: str) -> None:
+        """Append text to the current transcript line (no newline)."""
+        with self._lock:
+            self._drop_status()
+            sys.stdout.write(text)
+            self.col += _visible_len(text)
+            sys.stdout.flush()
+
+    def newline(self) -> None:
+        with self._lock:
+            self._drop_status()
+            sys.stdout.write("\n")
+            self._last_blank = self.col == 0
+            self.col = 0
+            sys.stdout.flush()
+
+    def end_line(self) -> None:
+        if self.col:
+            self.newline()
 
     def print(self, text: str = "") -> None:
         with self._lock:
-            live = list(self._live)
-            if self.tty:
-                self._erase_live()
+            self._drop_status()
+            self.end_line()
             sys.stdout.write(text + "\n")
             self._last_blank = not _ANSI_RE.sub("", text).strip()
-            if self.tty and live:
-                self._draw(live)
+            self.col = 0
             sys.stdout.flush()
 
     def block(self) -> None:
-        if not self._last_blank:
-            self.print()
+        with self._lock:
+            self.end_line()
+            if not self._last_blank:
+                self.print()
 
-    def _draw(self, lines: list[str]) -> None:
-        width = _width()
-        shown = []
-        for line in lines:
-            if _visible_len(line) >= width:
-                line = legacy._truncate_width(_ANSI_RE.sub("", line), width - 1)
-            shown.append(line)
-        sys.stdout.write("\n".join(shown))
-        self._live = shown
-
-    def live(self, lines: list[str]) -> None:
+    def status(self, text: str) -> None:
         if not self.tty:
             return
         with self._lock:
-            self._erase_live()
-            self._draw([line for line in lines if line is not None])
+            if self.col:
+                return
+            plain = _ANSI_RE.sub("", text)
+            limit = _width()
+            if len(plain) > limit:
+                text = plain[: limit - 1] + "…"
+            sys.stdout.write("\r\033[K" + text)
+            self.status_shown = True
             sys.stdout.flush()
 
-    def clear_live(self) -> None:
-        if not self.tty:
-            return
+    def clear_status(self) -> None:
         with self._lock:
-            self._erase_live()
+            self._drop_status()
             sys.stdout.flush()
 
 
 class _Stream:
-    """Accumulates agent deltas, emits wrapped complete lines, keeps the tail."""
+    """Streams agent text straight into the transcript, wrapping at word
+    boundaries as deltas arrive. Light markdown: bullets, headings, **bold**,
+    `code`, fenced blocks (raw, hard-cut at the width)."""
 
-    def __init__(self, screen: _Screen, md: _Markdown) -> None:
+    def __init__(self, screen: _Screen) -> None:
         self.screen = screen
-        self.md = md
-        self.buffer = ""
+        self.word = ""
         self.total = ""
         self.started = False
+        self.at_line_start = True
+        self.indent = ""
+        self.line_bold = False
+        self.bold = False
+        self.code = False
+        self.in_fence = False
+        self.fence_line = ""
+        self.fence_opening = False
+        self.fence_held = ""
 
     def feed(self, delta: str) -> None:
         if not delta:
@@ -196,23 +220,146 @@ class _Stream:
             self.started = True
             self.screen.block()
         self.total += delta
-        self.buffer += delta
-        while "\n" in self.buffer:
-            line, self.buffer = self.buffer.split("\n", 1)
-            for rendered in self.md.render(line, _width()):
-                self.screen.print(rendered)
+        for ch in delta:
+            if self.in_fence:
+                self._fence_char(ch)
+            elif ch == "\n":
+                self._flush_word()
+                if self.in_fence:
+                    self.fence_opening = False
+                    continue
+                self._end_line()
+            elif ch in " \t":
+                self._flush_word()
+                self._space()
+            else:
+                self.word += ch
 
-    def tail(self) -> str:
-        return self.buffer.replace("\n", " ")
+    def _fence_char(self, ch: str) -> None:
+        if ch == "\n":
+            if self.fence_opening:
+                self.fence_opening = False
+            elif self.fence_held == "```":
+                self._close_fence()
+            else:
+                self._fence_write(self.fence_held)
+                self.screen.newline()
+            self.fence_held = ""
+            return
+        if self.fence_opening:
+            return
+        if ch == "`" and len(self.fence_held) < 3 and self.fence_held == "`" * len(self.fence_held):
+            self.fence_held += ch
+            return
+        if self.fence_held:
+            self._fence_write(self.fence_held)
+            self.fence_held = "\x00"
+        self._fence_write(ch)
+
+    def _fence_write(self, text: str) -> None:
+        for ch in text.replace("\x00", ""):
+            if self.screen.col >= _width():
+                self.screen.newline()
+            self.screen.write(ch)
+
+    def _close_fence(self) -> None:
+        self.in_fence = False
+        self.screen.end_line()
+        self.screen.print(f"{DIM}{'─' * min(_width(), 40)}{RESET}")
+        self.at_line_start = True
+
+    def _style(self) -> str:
+        return (BOLD if self.bold or self.line_bold else "") + (DIM if self.code else "")
+
+    def _emit(self, text: str) -> None:
+        width = _width()
+        if self.at_line_start:
+            self.screen.write(self.indent)
+            self.at_line_start = False
+        elif self.screen.col + len(text) > width and self.screen.col > len(self.indent):
+            self.screen.newline()
+            self.screen.write(self.indent)
+        while len(text) > width - len(self.indent):
+            room = width - self.screen.col
+            if room <= 0:
+                self.screen.newline()
+                self.screen.write(self.indent)
+                room = width - self.screen.col
+            self.screen.write(self._style() + text[:room] + (RESET if self._style() else ""))
+            text = text[room:]
+            self.screen.newline()
+            self.screen.write(self.indent)
+        style = self._style()
+        self.screen.write(style + text + (RESET if style else ""))
+
+    def _flush_word(self) -> None:
+        word = self.word
+        self.word = ""
+        if not word:
+            return
+        if self.at_line_start and self.indent == "":
+            if word.startswith("```"):
+                self.screen.end_line()
+                self.screen.print(f"{DIM}{'─' * min(_width(), 40)}{RESET}")
+                self.in_fence = True
+                self.fence_opening = True
+                self.fence_held = ""
+                return
+            if word in ("-", "*", "•"):
+                self.screen.write("• ")
+                self.at_line_start = False
+                self.indent = "  "
+                return
+            if word.strip("#") == "" and len(word) <= 6:
+                self.line_bold = True
+                return
+            if word[:-1].isdigit() and word[-1] in ".)":
+                self.screen.write(word + " ")
+                self.at_line_start = False
+                self.indent = " " * (len(word) + 1)
+                return
+        parts = word.split("**")
+        for index, part in enumerate(parts):
+            if index:
+                self.bold = not self.bold
+            segs = part.split("`")
+            for j, seg in enumerate(segs):
+                if j:
+                    self.code = not self.code
+                if seg:
+                    self._emit(seg)
+        self._pending_space = True
+
+    def _space(self) -> None:
+        if getattr(self, "_pending_space", False) and not self.at_line_start:
+            if self.screen.col < _width():
+                self.screen.write(" ")
+            else:
+                self.screen.newline()
+                self.screen.write(self.indent)
+            self._pending_space = False
+
+    def _end_line(self) -> None:
+        self._pending_space = False
+        if self.at_line_start:
+            self.screen.newline()
+        else:
+            self.screen.newline()
+        self.at_line_start = True
+        self.indent = ""
+        self.line_bold = False
+        self.code = False
 
     def finish(self, full_text: str | None = None) -> None:
         if full_text and len(full_text) > len(self.total):
             self.feed(full_text[len(self.total) :])
-        if self.buffer:
-            for rendered in self.md.render(self.buffer, _width()):
-                self.screen.print(rendered)
-            self.buffer = ""
-        self.md.in_code = False
+        if self.in_fence:
+            self._fence_write(self.fence_held.replace("```", ""))
+            self.fence_held = ""
+            self._close_fence()
+        self._flush_word()
+        self.screen.end_line()
+        self.bold = self.code = self.line_bold = False
 
 
 class AppServerError(RuntimeError):
@@ -322,7 +469,6 @@ class Client:
         self.busy = False
         self.interrupts = 0
         self.stream: _Stream | None = None
-        self.md = _Markdown()
         self.reasoning: dict[str, str] = {}
         self.reasoning_started = 0.0
         self.reasoning_pending = False
@@ -390,22 +536,25 @@ class Client:
             parts.append(f"thinking… {int(time.time() - self.started_at)}s")
         else:
             parts.append("idle")
-        if model:
-            parts.append(model)
         if self.yolo:
             parts.append("yolo")
-        return f"{DIM}{' · '.join(parts)}{RESET}"
+        limit = _width()
+        if model:
+            base = len(" · ".join(parts)) + 3
+            room = limit - base
+            if room >= 4:
+                parts.insert(len(parts) - (1 if self.yolo else 0), model if len(model) <= room else model[: room - 1] + "…")
+        line = " · ".join(parts)
+        if len(line) > limit:
+            line = line[: limit - 1] + "…"
+        return f"{DIM}{line}{RESET}"
 
     def _tick(self) -> None:
         if not self.busy:
             return
         if self.screen.tty:
-            lines = []
-            tail = self.stream.tail() if self.stream else ""
-            if tail:
-                lines.append(tail)
-            lines.append(self.status_line())
-            self.screen.live(lines)
+            if self.stream is None or not self.stream.started:
+                self.screen.status(self.status_line())
         else:
             elapsed = int(time.time() - self.started_at)
             if elapsed and elapsed % 30 == 0 and getattr(self, "_last_plain_tick", -1) != elapsed:
@@ -444,7 +593,7 @@ class Client:
             self.reasoning_pending = True
         elif kind == "agentMessage":
             self._collapse_reasoning()
-            self.stream = _Stream(self.screen, self.md)
+            self.stream = _Stream(self.screen)
         elif kind == "commandExecution":
             self._collapse_reasoning()
             self._finish_stream()
@@ -503,7 +652,7 @@ class Client:
     def on_item_agentMessage_delta(self, params: dict[str, Any]) -> None:
         if self.stream is None:
             self._collapse_reasoning()
-            self.stream = _Stream(self.screen, self.md)
+            self.stream = _Stream(self.screen)
         self.stream.feed(str(params.get("delta") or ""))
         self._tick()
 
@@ -520,7 +669,7 @@ class Client:
         if kind == "agentMessage":
             if self.stream is None:
                 self._collapse_reasoning()
-                self.stream = _Stream(self.screen, self.md)
+                self.stream = _Stream(self.screen)
             self.stream.finish(str(item.get("text") or ""))
             self.stream = None
         elif kind == "commandExecution":
@@ -675,7 +824,7 @@ class Client:
         if method == "item/tool/requestUserInput":
             answers = {}
             self._finish_stream()
-            self.screen.clear_live()
+            self.screen.clear_status()
             for question in params.get("questions") or []:
                 if not isinstance(question, dict):
                     continue
@@ -691,7 +840,7 @@ class Client:
         self.server.respond_error(request_id, f"{method} not supported by codexmobile")
 
     def _ask_yes_no(self) -> bool:
-        self.screen.clear_live()
+        self.screen.clear_status()
         while True:
             try:
                 reply = input(f"{CYAN}{BOLD}[y/n]>{RESET} ").strip().lower()
@@ -758,7 +907,6 @@ class Client:
         self.reasoning.clear()
         self.reasoning_started = 0.0
         self.reasoning_pending = False
-        self.md = _Markdown()
         self.stream = None
         self.interrupts = 0
         self.turn_id = None
@@ -793,7 +941,7 @@ class Client:
                 self.interrupts += 1
                 if self.interrupts >= 2:
                     self.busy = False
-                    self.screen.clear_live()
+                    self.screen.clear_status()
                     raise
                 self.screen.print(f"{DIM}[interrupting… press Ctrl-C again to quit]{RESET}")
                 if self.thread_id and self.turn_id:
@@ -810,7 +958,7 @@ class Client:
                         self.error(str(exc))
         self._collapse_reasoning()
         self._finish_stream()
-        self.screen.clear_live()
+        self.screen.clear_status()
         self.last_elapsed = time.time() - self.started_at
         self.turn_count += 1
         if self.turn_error:
@@ -972,30 +1120,19 @@ class Client:
         self.screen.print()
 
     def read_prompt(self) -> str | None:
-        tty = self.screen.tty
-        if tty:
-            self.screen.live([self.status_line()])
-            sys.stdout.write("\n")
-            self.screen._live.append("")
+        self.screen.clear_status()
+        self.screen.end_line()
+        if self.screen.tty:
+            self.screen.print(self.status_line())
         try:
-            line = input(f"{BOLD}> {RESET}")
+            line = input(f"{CYAN}{BOLD}> {RESET}")
         except EOFError:
-            if tty:
-                sys.stdout.write("\r\033[K\033[1A\033[K")
-                sys.stdout.flush()
-                self.screen._live = []
-            return None
-        except KeyboardInterrupt:
-            if tty:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-                self.screen._live = []
-            raise
-        if tty:
-            rows = max(1, -(-(2 + len(line)) // _width()))
-            sys.stdout.write("\033[1A\033[K" * (rows + 1))
+            sys.stdout.write("\n")
             sys.stdout.flush()
-            self.screen._live = []
+            return None
+        self.screen.col = 0
+        self.screen._last_blank = False
+        self.screen.print()
         return line
 
     def repl(self) -> int:
@@ -1006,6 +1143,7 @@ class Client:
             except KeyboardInterrupt:
                 idle_interrupts += 1
                 sys.stdout.write("\n")
+                self.screen.col = 0
                 if idle_interrupts >= 2:
                     return 0
                 self.say("(press Ctrl-C again or /quit to exit)", DIM)
@@ -1024,7 +1162,8 @@ class Client:
                 if self.handle_local(text):
                     continue
                 self.say("not a local command; sending to Codex", DIM)
-            self.print_user(text)
+            if not self.screen.tty:
+                self.print_user(text)
             try:
                 self.run_turn(text)
             except KeyboardInterrupt:
@@ -1119,7 +1258,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         code = 0
     finally:
-        client.screen.clear_live()
+        client.screen.clear_status()
         client.server.close()
     return code
 
