@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,11 @@ _last_stderr_path: Path | None = None
 _last_prompt: str = ""
 _last_reply: str = ""
 _last_exit_code = 0
+_turn_count = 0
+_last_elapsed = 0.0
+_yolo = False
+_fork_from: str | None = None
+_SESSION_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def _term_width(default: int = 70) -> int:
@@ -90,6 +96,7 @@ def _build_cmd(
     session_id: str | None = None,
     real_codex: str | None = None,
     yolo: bool = False,
+    fork_from: str | None = None,
 ) -> list[str]:
     binary = real_codex or _real_codex_binary()
     common = [
@@ -105,6 +112,8 @@ def _build_cmd(
         common.append(YOLO_FLAG)
     if session_id:
         return [binary, "exec", "resume", *common, session_id, "-"]
+    if fork_from:
+        return [binary, "exec", "fork", *common, fork_from, "-"]
     return [binary, "exec", *common, "--color", "never", "-"]
 
 
@@ -117,7 +126,105 @@ def _print_user(prompt: str) -> None:
 def _print_assistant(text: str) -> None:
     print()
     print(_rule("ASSISTANT", GREEN), flush=True)
-    print(text.rstrip(), flush=True)
+    print(_render_markdown(text.rstrip()), flush=True)
+
+
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_MD_CODE_RE = re.compile(r"`([^`\n]+)`")
+_MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
+_MD_BULLET_RE = re.compile(r"^(\s*)[-*]\s+")
+
+
+def _render_markdown(text: str) -> str:
+    """Light markdown -> ANSI. Untouched when color is off (NO_COLOR / not a TTY)."""
+    if not USE_COLOR:
+        return text
+    out: list[str] = []
+    in_code = False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            out.append(f"{DIM}{'─' * min(_term_width(), 40)}{RESET}")
+            continue
+        if in_code:
+            out.append(line)
+            continue
+        heading = _MD_HEADING_RE.match(line)
+        if heading:
+            out.append(f"{BOLD}{heading.group(1)}{RESET}")
+            continue
+        line = _MD_BULLET_RE.sub(lambda m: f"{m.group(1)}• ", line)
+        line = _MD_CODE_RE.sub(lambda m: f"{DIM}{m.group(1)}{RESET}", line)
+        line = _MD_BOLD_RE.sub(lambda m: f"{BOLD}{m.group(1)}{RESET}", line)
+        out.append(line)
+    return "\n".join(out)
+
+
+def _short_id(session_id: str | None) -> str:
+    # Codex ids are time-ordered, so the first 8 chars collide; keep two groups.
+    return session_id[:13] if session_id else "new"
+
+
+def _display_cwd() -> str:
+    cwd = os.getcwd()
+    home = str(Path.home())
+    if cwd == home or cwd.startswith(home + os.sep):
+        return "~" + cwd[len(home):]
+    return cwd
+
+
+def _footer_label(session_id: str | None) -> str:
+    return f"◇ thread {_short_id(session_id)}"
+
+
+def _print_footer(session_id: str | None) -> None:
+    yolo = "on" if _yolo else "off"
+    print(f"{DIM}{_footer_label(session_id)} · idle · yolo {yolo} · {_display_cwd()}{RESET}", flush=True)
+
+
+class _Ticker:
+    """Live `thinking… Ns` counter. Rewrites one line on a TTY; prints a plain
+    line every 30s otherwise."""
+
+    def __init__(self, label: str) -> None:
+        self._label = label
+        self._start = time.time()
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._tty = sys.stdout.isatty()
+        self._last_len = 0
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _elapsed(self) -> int:
+        return int(time.time() - self._start)
+
+    def _run(self) -> None:
+        interval = 1.0 if self._tty else 30.0
+        while not self._stop.wait(interval):
+            with self._lock:
+                if self._tty:
+                    plain = f"{self._label} · thinking… {self._elapsed()}s"
+                    pad = " " * max(0, self._last_len - len(plain))
+                    sys.stdout.write(f"\r{DIM}{plain}{RESET}{pad}")
+                    sys.stdout.flush()
+                    self._last_len = len(plain)
+                else:
+                    print(f"{DIM}[thinking… {self._elapsed()}s]{RESET}", flush=True)
+
+    def clear(self) -> None:
+        with self._lock:
+            if self._last_len:
+                sys.stdout.write("\r" + " " * self._last_len + "\r")
+                sys.stdout.flush()
+                self._last_len = 0
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        self.clear()
 
 
 def _truncate_middle(text: str, limit: int) -> tuple[str, bool]:
@@ -277,6 +384,7 @@ def run_turn(
 ) -> str | None:
     """Run one Codex turn and render JSON events as normal stdout."""
     global _current_session_id, _last_exit_code, _last_prompt, _last_raw_path, _last_stderr_path
+    global _turn_count, _last_elapsed, _fork_from
 
     prompt = prompt.strip()
     if not prompt:
@@ -289,7 +397,8 @@ def run_turn(
     _last_raw_path = raw_path
     _last_stderr_path = stderr_path
 
-    cmd = _build_cmd(prompt, last_message_path, session_id=session_id, yolo=yolo)
+    fork_from = None if session_id else _fork_from
+    cmd = _build_cmd(prompt, last_message_path, session_id=session_id, yolo=yolo, fork_from=fork_from)
     if show_user_block:
         _print_user(prompt)
 
@@ -317,6 +426,7 @@ def run_turn(
         return session_id
 
     assert proc.stdin is not None
+    _fork_from = None
     try:
         proc.stdin.write(prompt)
         proc.stdin.close()
@@ -324,6 +434,8 @@ def run_turn(
         _status(f"could not send prompt to Codex: {exc}", RED)
 
     seen_session_id = session_id
+    ticker = _Ticker(_footer_label(session_id or fork_from))
+    ticker.start()
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -332,6 +444,7 @@ def run_turn(
             stripped = line.strip()
             if not stripped:
                 continue
+            ticker.clear()
             try:
                 event = json.loads(stripped)
             except json.JSONDecodeError:
@@ -342,14 +455,18 @@ def run_turn(
                 seen_session_id = new_session_id
     except KeyboardInterrupt:
         proc.terminate()
+        ticker.clear()
         _status("interrupted; terminating Codex", RED)
     finally:
+        ticker.stop()
         raw_file.close()
         stderr_file.close()
 
     code = proc.wait()
     _last_exit_code = code
     duration = time.time() - start
+    _turn_count += 1
+    _last_elapsed = duration
     stderr_text = _safe_read(stderr_path).strip()
     if code != 0:
         _status(f"codex exited with status {code}", RED)
@@ -361,6 +478,7 @@ def run_turn(
     _status(f"elapsed {duration:.1f}s · :history all · :full raw · :q quit", DIM)
 
     _current_session_id = seen_session_id
+    _print_footer(seen_session_id)
     return seen_session_id
 
 
@@ -488,18 +606,190 @@ def show_full() -> None:
     _page(f"\n{_rule('RAW LAST TURN', DIM)}\n" + "\n\n".join(parts))
 
 
+def _session_id_from_path(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    match = _SESSION_ID_RE.search(path.name)
+    return match.group(0) if match else None
+
+
+def _session_meta(session_id: str | None) -> dict[str, Any]:
+    path = _find_session_file(session_id) if session_id else None
+    if path is None:
+        return {}
+    meta: dict[str, Any] = {"_path": str(path)}
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for _ in range(200):
+                line = handle.readline()
+                if not line:
+                    break
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = obj.get("payload") or {}
+                if obj.get("type") == "session_meta":
+                    meta["cwd"] = payload.get("cwd")
+                    meta["cli_version"] = payload.get("cli_version")
+                elif obj.get("type") == "turn_context" and payload.get("model"):
+                    meta["model"] = payload.get("model")
+                    break
+    except OSError:
+        pass
+    return meta
+
+
+def _first_user_message(path: Path, limit: int = 400) -> str:
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for _ in range(limit):
+                line = handle.readline()
+                if not line:
+                    break
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                message = _extract_transcript_message(obj)
+                if message and message[0] == "user":
+                    return message[1]
+    except OSError:
+        pass
+    return ""
+
+
+def _age(mtime: float) -> str:
+    seconds = max(0, int(time.time() - mtime))
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+def _recent_sessions(limit: int = 10) -> list[tuple[str, str, str]]:
+    files = glob.glob(str(Path.home() / ".codex" / "sessions" / "**" / "*.jsonl"), recursive=True)
+    files.sort(key=os.path.getmtime, reverse=True)
+    rows: list[tuple[str, str, str]] = []
+    for file in files[: limit * 4]:
+        path = Path(file)
+        session_id = _session_id_from_path(path)
+        title = _one_line(_first_user_message(path), 60)
+        if not session_id or not title:
+            continue
+        rows.append((session_id, _age(path.stat().st_mtime), title))
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _pick_session() -> str | None:
+    """Interactive startup picker. Returns a session id, None for a new thread,
+    or "quit"."""
+    rows = _recent_sessions()
+    if not rows:
+        return None
+    print(f"{BOLD}Recent Codex sessions{RESET}", flush=True)
+    for index, (session_id, age, title) in enumerate(rows, start=1):
+        print(f"{index:>2}. {title:<60}  {DIM}{age} · {_short_id(session_id)}{RESET}", flush=True)
+    print(f"{DIM} n. new thread   q. quit{RESET}", flush=True)
+    while True:
+        try:
+            choice = input(f"{CYAN}{BOLD}pick>{RESET} ").strip().lower()
+        except EOFError:
+            return "quit"
+        if choice in {"", "n", "new"}:
+            return None
+        if choice in {"q", "quit", "exit"}:
+            return "quit"
+        if choice.isdigit() and 1 <= int(choice) <= len(rows):
+            return rows[int(choice) - 1][0]
+        _status(f"pick 1-{len(rows)}, n or q", RED)
+
+
+def _help_text() -> str:
+    return "\n".join(
+        [
+            f"{BOLD}Local commands{RESET} (never sent to Codex)",
+            "  /status            thread, model, cwd, turns, yolo",
+            "  /resume <id>       switch to another Codex thread",
+            "  /resume --last     switch to the most recent thread on disk",
+            "  /history  :history transcript of the current thread",
+            "  /full     :full    raw JSONL + stderr of the last turn",
+            "  :paste             multi-line prompt, end with '.'",
+            "  /quit  :q          exit",
+            f"{DIM}Anything else is sent to Codex as a prompt.{RESET}",
+        ]
+    )
+
+
+def show_status() -> None:
+    global _current_session_id
+    meta = _session_meta(_current_session_id)
+    lines = [
+        f"{BOLD}thread{RESET}   {_current_session_id or '(none yet: first prompt starts one)'}",
+    ]
+    if meta.get("_path"):
+        lines.append(f"{BOLD}file{RESET}     {meta['_path']}")
+    if meta.get("model"):
+        lines.append(f"{BOLD}model{RESET}    {meta['model']}")
+    lines.append(f"{BOLD}cwd{RESET}      {_display_cwd()}")
+    lines.append(f"{BOLD}turns{RESET}    {_turn_count} this run · last {_last_elapsed:.1f}s")
+    lines.append(f"{BOLD}yolo{RESET}     {'on' if _yolo else 'off'}")
+    print("\n".join(lines), flush=True)
+
+
+def _handle_local_command(command: str) -> bool:
+    global _current_session_id
+    parts = command.split()
+    name = parts[0].lower()
+    if name == "/status":
+        show_status()
+        return True
+    if name == "/help":
+        print(_help_text(), flush=True)
+        return True
+    if name == "/resume":
+        if len(parts) < 2:
+            _status("usage: /resume <id> | /resume --last", RED)
+            return True
+        target = parts[1]
+        if target == "--last":
+            session_id = _session_id_from_path(_latest_session_file())
+            if not session_id:
+                _status("no Codex session files found", RED)
+                return True
+        else:
+            match = _SESSION_ID_RE.search(target)
+            session_id = match.group(0) if match else None
+            if not session_id:
+                path = _find_session_file(target)
+                session_id = _session_id_from_path(path)
+            if not session_id:
+                _status(f"no session matching {target}", RED)
+                return True
+        _current_session_id = session_id
+        _status(f"now on thread {session_id}", GREEN)
+        _print_footer(session_id)
+        return True
+    return False
+
+
 def read_prompt() -> str | None:
     try:
         line = input(f"\n{CYAN}{BOLD}you>{RESET} ")
     except EOFError:
         return None
     command = line.strip()
-    if command in {":q", ":quit", "quit", "exit"}:
+    if command in {":q", ":quit", "quit", "exit", "/quit", "/exit"}:
         return None
-    if command == ":history":
+    if command in {":history", "/history"}:
         show_history()
         return ""
-    if command == ":full":
+    if command in {":full", "/full"}:
         show_full()
         return ""
     if command == ":paste":
@@ -514,10 +804,14 @@ def read_prompt() -> str | None:
                 break
             lines.append(item)
         return "\n".join(lines).strip()
+    if command.startswith("/"):
+        if _handle_local_command(command):
+            return ""
+        _status("not a local command; sending to Codex", DIM)
     return line.strip()
 
 
-def _parse_args(argv: list[str]) -> tuple[str | None, str, bool]:
+def _parse_args(argv: list[str]) -> tuple[str | None, str, bool, str | None]:
     parser = argparse.ArgumentParser(
         prog="codex-mobile-json",
         description="Run Codex in mobile-safe JSON transcript mode.",
@@ -527,31 +821,50 @@ def _parse_args(argv: list[str]) -> tuple[str | None, str, bool]:
         action="store_true",
         help="Pass Codex's dangerous no-approval/no-sandbox flag to codex exec.",
     )
-    parser.add_argument("args", nargs="*", help="'resume SESSION_ID [PROMPT]' or prompt text")
+    parser.add_argument(
+        "args",
+        nargs="*",
+        help="'resume SESSION_ID [PROMPT]', 'fork SESSION_ID [PROMPT]', or prompt text; "
+        "no args opens a picker of recent sessions",
+    )
     ns = parser.parse_args(argv)
     args = list(ns.args)
-    if args and args[0] == "resume":
+    if args and args[0] in {"resume", "fork"}:
         if len(args) < 2:
-            parser.error("resume requires SESSION_ID")
-        return args[1], " ".join(args[2:]).strip(), bool(ns.yolo)
+            parser.error(f"{args[0]} requires SESSION_ID")
+        if args[0] == "fork":
+            return None, " ".join(args[2:]).strip(), bool(ns.yolo), args[1]
+        return args[1], " ".join(args[2:]).strip(), bool(ns.yolo), None
     if args and args[0] == "start":
-        return None, " ".join(args[1:]).strip(), bool(ns.yolo)
-    return None, " ".join(args).strip(), bool(ns.yolo)
+        return None, " ".join(args[1:]).strip(), bool(ns.yolo), None
+    return None, " ".join(args).strip(), bool(ns.yolo), None
 
 
 def main(argv: list[str] | None = None) -> int:
-    global _current_session_id
-    session_id, initial_prompt, yolo = _parse_args(list(sys.argv[1:] if argv is None else argv))
-    _current_session_id = session_id
+    global _current_session_id, _yolo, _fork_from
+    argv = list(sys.argv[1:] if argv is None else argv)
+    session_id, initial_prompt, yolo, fork_from = _parse_args(argv)
+    _yolo = yolo
+    _fork_from = fork_from
 
     print("═" * _term_width(), flush=True)
     print(f"{BOLD}Codex mobile JSON mode{RESET}", flush=True)
+    picker = not session_id and not initial_prompt and not fork_from and sys.stdin.isatty()
+    if picker:
+        choice = _pick_session()
+        if choice == "quit":
+            return 0
+        session_id = choice
+    _current_session_id = session_id
     if session_id:
         print(f"Resuming {DIM}{session_id}{RESET}", flush=True)
+    elif fork_from:
+        print(f"Forking {DIM}{fork_from}{RESET} into a new thread", flush=True)
     else:
         print("Starting new Codex thread", flush=True)
-    print(f"{DIM}:history all · :full raw · :paste multi · :q quit{RESET}", flush=True)
+    print(f"{DIM}/status · /resume · /help · :history all · :full raw · :paste multi · :q quit{RESET}", flush=True)
     print("═" * _term_width(), flush=True)
+    _print_footer(session_id)
 
     if initial_prompt:
         session_id = run_turn(initial_prompt, session_id=session_id, yolo=yolo) or session_id
@@ -570,10 +883,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not prompt:
             continue
-        session_id = (
-            run_turn(prompt, session_id=session_id, show_user_block=False, yolo=yolo)
-            or session_id
-        )
+        run_turn(prompt, session_id=_current_session_id, show_user_block=False, yolo=_yolo)
 
 
 if __name__ == "__main__":
