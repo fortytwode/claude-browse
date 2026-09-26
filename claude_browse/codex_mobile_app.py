@@ -1177,7 +1177,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="codexmobile", description="Codex on the phone, Claude Code style.")
     parser.add_argument("--yolo", action="store_true", help="No approvals, no sandbox.")
     parser.add_argument("--legacy", action="store_true", help="Use the codex exec --json transcript mode.")
-    parser.add_argument("args", nargs="*", help="'resume ID [PROMPT]', 'fork ID [PROMPT]', 'start [PROMPT]' or prompt text")
+    parser.add_argument("--last", action="store_true", help="With resume: the most recently updated thread.")
+    parser.add_argument("args", nargs="*", help="'resume ID|--last [PROMPT]', 'fork ID [PROMPT]', 'start [PROMPT]' or prompt text")
     return parser.parse_args(argv)
 
 
@@ -1202,7 +1203,10 @@ def main(argv: list[str] | None = None) -> int:
     ns = _parse_args(argv)
     if ns.legacy:
         return legacy.main([a for a in argv if a != "--legacy"])
-    mode, target, initial_prompt = _plan(list(ns.args))
+    plan_args = list(ns.args)
+    if ns.last:
+        plan_args = ["resume", "--last", *(plan_args[1:] if plan_args[:1] == ["resume"] else plan_args)]
+    mode, target, initial_prompt = _plan(plan_args)
     binary = os.environ.get("CODEX_REAL_BINARY") or "codex"
     client = Client(yolo=bool(ns.yolo), binary=binary)
     signal.signal(signal.SIGINT, signal.default_int_handler)
@@ -1215,6 +1219,11 @@ def main(argv: list[str] | None = None) -> int:
     screen.print("═" * _width())
     screen.print(f"{BOLD}Codex mobile{RESET} {DIM}· app-server · /help for commands{RESET}")
     try:
+        if mode == "resume" and target == "--last":
+            threads = client.list_threads(1)
+            if not threads:
+                raise AppServerError("no Codex threads to resume")
+            target = str(threads[0].get("id") or "")
         if mode == "resume" and target:
             client.resume_thread(target)
             screen.print(f"Resuming {DIM}{client.thread_id}{RESET}")
