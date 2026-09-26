@@ -257,6 +257,12 @@ def _render_event(event: dict[str, Any]) -> str | None:
         _status(f"done{suffix}")
         return None
 
+    if event_type in ("error", "turn.failed"):
+        err = event.get("error") if isinstance(event.get("error"), dict) else {}
+        message = str(event.get("message") or err.get("message") or "").strip()
+        _status(f"{event_type}: {message}" if message else event_type, RED)
+        return None
+
     if event_type:
         _status(f"event {event_type}")
     return None
