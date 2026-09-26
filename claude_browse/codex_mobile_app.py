@@ -127,6 +127,7 @@ class _Screen:
         self.tty = sys.stdout.isatty()
         self._live: list[str] = []
         self._lock = threading.RLock()
+        self._last_blank = True
 
     def _erase_live(self) -> None:
         if not self._live:
@@ -143,9 +144,14 @@ class _Screen:
             if self.tty:
                 self._erase_live()
             sys.stdout.write(text + "\n")
+            self._last_blank = not _ANSI_RE.sub("", text).strip()
             if self.tty and live:
                 self._draw(live)
             sys.stdout.flush()
+
+    def block(self) -> None:
+        if not self._last_blank:
+            self.print()
 
     def _draw(self, lines: list[str]) -> None:
         width = _width()
@@ -188,7 +194,7 @@ class _Stream:
             return
         if not self.started:
             self.started = True
-            self.screen.print()
+            self.screen.block()
         self.total += delta
         self.buffer += delta
         while "\n" in self.buffer:
@@ -318,6 +324,8 @@ class Client:
         self.stream: _Stream | None = None
         self.md = _Markdown()
         self.reasoning: dict[str, str] = {}
+        self.reasoning_started = 0.0
+        self.reasoning_pending = False
         self.pending: dict[int, dict[str, Any] | None] = {}
         self.turn_error: str | None = None
         self.error_printed = False
@@ -410,6 +418,7 @@ class Client:
                 self.screen.print(f"{color}{part}{RESET}" if color else part)
 
     def error(self, text: str) -> None:
+        self.screen.block()
         self.say(text, RED)
 
     # ----- notifications ----------------------------------------------------
@@ -429,21 +438,79 @@ class Client:
     def on_item_started(self, params: dict[str, Any]) -> None:
         item = params.get("item") or {}
         kind = item.get("type")
-        if kind == "commandExecution":
+        if kind == "reasoning":
+            if not self.reasoning_started:
+                self.reasoning_started = time.time()
+            self.reasoning_pending = True
+        elif kind == "agentMessage":
+            self._collapse_reasoning()
+            self.stream = _Stream(self.screen, self.md)
+        elif kind == "commandExecution":
+            self._collapse_reasoning()
             self._finish_stream()
             command = legacy._compact_command(item.get("command"))
-            self.screen.print()
+            self.screen.block()
             self.screen.print(f"{DIM}$ {legacy._one_line(command, _width() - 2)}{RESET}")
-        elif kind == "agentMessage":
-            self.stream = _Stream(self.screen, self.md)
+        elif kind == "webSearch":
+            self._collapse_reasoning()
+            self._finish_stream()
+            self.screen.block()
+            self.screen.print(f"{DIM}🔍 Searching: {legacy._one_line(self._search_query(item), _width() - 13)}{RESET}")
+        elif kind == "mcpToolCall":
+            self._collapse_reasoning()
+            self._finish_stream()
+            self.screen.block()
+            self.screen.print(f"{DIM}⚙ {legacy._one_line(self._mcp_name(item), _width() - 2)}{RESET}")
+        elif kind not in ("userMessage", "fileChange", "plan", None):
+            self._collapse_reasoning()
+            self._finish_stream()
+            self.screen.block()
+            self.screen.print(f"{DIM}· {legacy._one_line(self._item_label(kind, item), _width() - 2)}{RESET}")
+
+    @staticmethod
+    def _search_query(item: dict[str, Any]) -> str:
+        action = item.get("action") or {}
+        query = item.get("query") or action.get("query")
+        if not query and isinstance(action.get("queries"), list):
+            query = ", ".join(str(q) for q in action["queries"])
+        if not query and action.get("url"):
+            query = str(action["url"])
+        return str(query or "web")
+
+    @staticmethod
+    def _mcp_name(item: dict[str, Any]) -> str:
+        server = str(item.get("server") or "").strip()
+        tool = str(item.get("tool") or "").strip()
+        return f"{server}.{tool}" if server else tool or "tool"
+
+    @staticmethod
+    def _item_label(kind: str, item: dict[str, Any]) -> str:
+        words = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(kind)).lower()
+        extra = item.get("tool") or item.get("path") or item.get("kind") or ""
+        return f"{words} {extra}".strip()
+
+    def _collapse_reasoning(self) -> None:
+        if not self.reasoning_pending and not self.reasoning_started:
+            return
+        elapsed = max(1, int(round(time.time() - self.reasoning_started))) if self.reasoning_started else 0
+        self.reasoning_pending = False
+        self.reasoning_started = 0.0
+        self.reasoning.clear()
+        self._finish_stream()
+        self.screen.block()
+        self.screen.print(f"{DIM}✳ Cogitated for {elapsed}s{RESET}")
 
     def on_item_agentMessage_delta(self, params: dict[str, Any]) -> None:
         if self.stream is None:
+            self._collapse_reasoning()
             self.stream = _Stream(self.screen, self.md)
         self.stream.feed(str(params.get("delta") or ""))
         self._tick()
 
     def on_item_reasoning_summaryTextDelta(self, params: dict[str, Any]) -> None:
+        if not self.reasoning_started:
+            self.reasoning_started = time.time()
+        self.reasoning_pending = True
         key = str(params.get("itemId"))
         self.reasoning[key] = self.reasoning.get(key, "") + str(params.get("delta") or "")
 
@@ -452,34 +519,75 @@ class Client:
         kind = item.get("type")
         if kind == "agentMessage":
             if self.stream is None:
+                self._collapse_reasoning()
                 self.stream = _Stream(self.screen, self.md)
             self.stream.finish(str(item.get("text") or ""))
             self.stream = None
         elif kind == "commandExecution":
             self._render_command_done(item)
         elif kind == "fileChange":
+            self._collapse_reasoning()
             self._finish_stream()
-            changes = item.get("changes") or []
-            paths = [str(c.get("path") or "") for c in changes if isinstance(c, dict)]
+            self.screen.block()
             status = str(item.get("status") or "")
-            color = RED if status == "failed" else DIM
-            label = f"✎ {len(paths)} file{'s' if len(paths) != 1 else ''} changed"
-            if status == "failed":
-                label = "✎ file change failed"
-            self.screen.print(f"{color}{label}{RESET}")
-            for path in paths[:8]:
-                self.screen.print(f"{DIM}  {legacy._truncate_width(path, _width() - 2)}{RESET}")
+            color = RED if status in ("failed", "declined") else DIM
+            changes = [c for c in (item.get("changes") or []) if isinstance(c, dict)]
+            if not changes:
+                self.screen.print(f"{color}✎ file change {status or 'done'}{RESET}")
+            for change in changes:
+                path = str(change.get("path") or "")
+                added = removed = 0
+                for line in str(change.get("diff") or "").splitlines():
+                    if line.startswith("+") and not line.startswith("+++"):
+                        added += 1
+                    elif line.startswith("-") and not line.startswith("---"):
+                        removed += 1
+                verb = {"add": "Created", "delete": "Deleted"}.get(str(change.get("kind") or "").lower(), "Edited")
+                if status in ("failed", "declined"):
+                    verb = f"{status.capitalize()} edit to"
+                counts = f" (+{added} −{removed})" if added or removed else ""
+                room = _width() - len(verb) - len(counts) - 3
+                self.screen.print(f"{color}✎ {verb} {legacy._truncate_width(path, room)}{counts}{RESET}")
+        elif kind == "webSearch":
+            results = item.get("results")
+            if isinstance(results, list) and results:
+                self.screen.print(f"{DIM}  ⎿ {len(results)} result{'s' if len(results) != 1 else ''}{RESET}")
+        elif kind == "mcpToolCall":
+            status = str(item.get("status") or "")
+            error = item.get("error")
+            if status == "failed" or error:
+                msg = str((error or {}).get("message") if isinstance(error, dict) else error or "failed")
+                self.screen.print(f"{RED}  ⎿ failed · {legacy._one_line(msg, _width() - 12)}{RESET}")
+            else:
+                result = item.get("result")
+                summary = ""
+                if isinstance(result, dict):
+                    content = result.get("content")
+                    if isinstance(content, list):
+                        summary = " ".join(str(c.get("text", "")) for c in content if isinstance(c, dict)).strip()
+                    else:
+                        summary = json.dumps(result)[:200]
+                elif result is not None:
+                    summary = str(result)
+                summary = legacy._one_line(summary, _width() - 6) if summary else "done"
+                self.screen.print(f"{DIM}  ⎿ {summary}{RESET}")
+        elif kind == "plan":
+            self._collapse_reasoning()
+            self._finish_stream()
+            self.screen.block()
+            self.screen.print(f"{DIM}☰ Plan: {legacy._one_line(str(item.get('text') or ''), _width() - 8)}{RESET}")
         elif kind == "reasoning":
-            summary = self.reasoning.pop(str(item.get("id")), "")
-            if not summary:
-                parts = item.get("summary") or []
-                summary = " ".join(
-                    str(p.get("text") if isinstance(p, dict) else p) for p in parts if p
-                ).strip()
-            if summary:
-                self._finish_stream()
-                first = legacy._one_line(summary, _width() - 2)
-                self.screen.print(f"{DIM}∴ {first}{RESET}")
+            self.reasoning_pending = True
+
+    def on_turn_plan_updated(self, params: dict[str, Any]) -> None:
+        plan = params.get("plan") or []
+        if isinstance(plan, list) and plan:
+            done = sum(1 for step in plan if isinstance(step, dict) and str(step.get("status") or "") == "completed")
+            current = next((str(step.get("step") or "") for step in plan if isinstance(step, dict) and str(step.get("status") or "") == "inProgress"), "")
+            self._finish_stream()
+            self.screen.block()
+            label = f"☰ Plan {done}/{len(plan)}" + (f" · {current}" if current else "")
+            self.screen.print(f"{DIM}{legacy._one_line(label, _width())}{RESET}")
 
     def _render_command_done(self, item: dict[str, Any]) -> None:
         status = str(item.get("status") or "")
@@ -648,6 +756,8 @@ class Client:
         self.error_printed = False
         self.error_deadline = 0.0
         self.reasoning.clear()
+        self.reasoning_started = 0.0
+        self.reasoning_pending = False
         self.md = _Markdown()
         self.stream = None
         self.interrupts = 0
@@ -698,6 +808,7 @@ class Client:
                         )
                     except AppServerError as exc:
                         self.error(str(exc))
+        self._collapse_reasoning()
         self._finish_stream()
         self.screen.clear_live()
         self.last_elapsed = time.time() - self.started_at
@@ -705,8 +816,10 @@ class Client:
         if self.turn_error:
             if self.turn_error != "interrupted" and not self.error_printed:
                 self.error(self.turn_error)
+            self.screen.block()
             self.screen.print(f"{DIM}✳ {self.turn_error if self.turn_error == 'interrupted' else 'failed'} after {self.last_elapsed:.1f}s · {_clock()}{RESET}")
         else:
+            self.screen.block()
             self.screen.print(f"{DIM}✳ done in {self.last_elapsed:.1f}s · {_clock()}{RESET}")
 
     # ----- local commands -----------------------------------------------------
@@ -850,12 +963,13 @@ class Client:
     # ----- REPL ----------------------------------------------------------------
 
     def print_user(self, text: str) -> None:
-        self.screen.print()
-        lines = text.rstrip().splitlines() or [""]
+        self.screen.block()
+        lines = text.strip().splitlines() or [""]
         for index, line in enumerate(lines):
             prefix = "> " if index == 0 else "  "
-            for part in _wrap(prefix + line, _width(), "  "):
-                self.screen.print(f"{BOLD}{part}{RESET}")
+            for part in _wrap(prefix + line.strip(), _width(), "  "):
+                self.screen.print(f"{CYAN}{BOLD}{part}{RESET}")
+        self.screen.print()
 
     def read_prompt(self) -> str | None:
         tty = self.screen.tty
