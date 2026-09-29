@@ -1,21 +1,28 @@
 """Phone-friendly Codex client on top of `codex app-server`.
 
-One persistent app-server child per run, JSON-RPC over stdio. Agent text is
-streamed and word-wrapped to the terminal width; a small live region at the
-bottom is redrawn with relative cursor moves only (no alternate screen, no
-absolute addressing), so mobile SSH clients keep normal scrollback.
+Talks JSON-RPC to the machine's shared app-server daemon through
+`codex app-server proxy` (WebSocket over the proxy's stdio), so a thread that
+is open elsewhere on the Mac can be joined and a turn keeps running when the
+phone's connection drops. Without a daemon it spawns a private
+`codex app-server` on stdio. Agent text is streamed and word-wrapped to the
+terminal width; one status row is rewritten in place (no alternate screen, no
+cursor-up, no absolute addressing), so mobile SSH clients keep scrollback.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as _dt
+import errno
 import json
 import os
 import queue
 import re
+import select
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -34,8 +41,17 @@ DIM = "\033[2m" if USE_COLOR else ""
 CYAN = "\033[36m" if USE_COLOR else ""
 GREEN = "\033[32m" if USE_COLOR else ""
 RED = "\033[31m" if USE_COLOR else ""
-CLIENT_VERSION = "2.0.0"
+CLIENT_VERSION = "2.1.0"
 FAIL_TAIL_LINES = 8
+STATE_PATH = Path.home() / ".cache" / "codexmobile" / "seen.json"
+WRITER_LOCKS = Path.home() / ".codex" / "thread-writer-locks"
+_ACTIVE_WRITER_RE = re.compile(r"already has an active writer", re.I)
+_DAEMON_BUSY_RE = re.compile(r"draining|retry after reconnecting|lost the Codex daemon|pipe closed", re.I)
+_GONE_ERRNOS = {errno.EIO, errno.EPIPE, errno.ENXIO, errno.EBADF}
+
+
+class TerminalGone(Exception):
+    """The terminal went away (dropped SSH connection, SIGHUP, SIGTERM)."""
 
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _MD_CODE_RE = re.compile(r"`([^`\n]+)`")
@@ -132,9 +148,23 @@ class _Screen:
         self._last_blank = True
         self._lock = threading.RLock()
 
+    @staticmethod
+    def _out(text: str = "", flush: bool = False) -> None:
+        try:
+            if text:
+                sys.stdout.write(text)
+            if flush:
+                sys.stdout.flush()
+        except (BrokenPipeError, ValueError) as exc:
+            raise TerminalGone(str(exc)) from exc
+        except OSError as exc:
+            if exc.errno in _GONE_ERRNOS:
+                raise TerminalGone(str(exc)) from exc
+            raise
+
     def _drop_status(self) -> None:
         if self.status_shown:
-            sys.stdout.write("\r\033[K")
+            self._out("\r\033[K")
             self.status_shown = False
             self.col = 0
 
@@ -142,17 +172,15 @@ class _Screen:
         """Append text to the current transcript line (no newline)."""
         with self._lock:
             self._drop_status()
-            sys.stdout.write(text)
+            self._out(text, flush=True)
             self.col += _visible_len(text)
-            sys.stdout.flush()
 
     def newline(self) -> None:
         with self._lock:
             self._drop_status()
-            sys.stdout.write("\n")
+            self._out("\n", flush=True)
             self._last_blank = self.col == 0
             self.col = 0
-            sys.stdout.flush()
 
     def end_line(self) -> None:
         if self.col:
@@ -162,10 +190,9 @@ class _Screen:
         with self._lock:
             self._drop_status()
             self.end_line()
-            sys.stdout.write(text + "\n")
+            self._out(text + "\n", flush=True)
             self._last_blank = not _ANSI_RE.sub("", text).strip()
             self.col = 0
-            sys.stdout.flush()
 
     def block(self) -> None:
         with self._lock:
@@ -183,14 +210,13 @@ class _Screen:
             limit = _width()
             if len(plain) > limit:
                 text = plain[: limit - 1] + "…"
-            sys.stdout.write("\r\033[K" + text)
+            self._out("\r\033[K" + text, flush=True)
             self.status_shown = True
-            sys.stdout.flush()
 
     def clear_status(self) -> None:
         with self._lock:
             self._drop_status()
-            sys.stdout.flush()
+            self._out(flush=True)
 
 
 class _Stream:
@@ -367,58 +393,226 @@ class AppServerError(RuntimeError):
 
 
 class AppServer:
-    """Minimal JSON-RPC client for `codex app-server` over stdio."""
+    """JSON-RPC to Codex. Prefers the shared daemon (`codex app-server proxy`,
+    WebSocket frames over the proxy's stdio); falls back to a private
+    `codex app-server` speaking JSON lines on stdio."""
 
-    def __init__(self, binary: str, log_path: Path) -> None:
+    def __init__(self, binary: str, log_path: Path, prefer_daemon: bool = True) -> None:
         self.binary = binary
         self.log_path = log_path
-        self.proc: subprocess.Popen[str] | None = None
+        self.prefer_daemon = prefer_daemon
+        self.mode = "private"
+        self.daemon_reason = ""
+        self.proc: subprocess.Popen[bytes] | None = None
         self.inbox: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self._next_id = 0
         self._lock = threading.Lock()
         self._log = log_path.open("a", encoding="utf-8")
+        self._closed = False
         self.stderr_path = log_path.with_suffix(".stderr")
 
+    # ----- lifecycle -------------------------------------------------------
+
     def start(self) -> None:
-        stderr = self.stderr_path.open("w", encoding="utf-8")
+        if self.prefer_daemon:
+            try:
+                self._start_daemon()
+                self.mode = "daemon"
+            except AppServerError as exc:
+                self.daemon_reason = str(exc)
+                self._stop_child()
+        if self.mode != "daemon":
+            self._start_private()
+        self._spawn_reader()
+
+    def restart_private(self, reason: str) -> None:
+        self.daemon_reason = reason
+        self._stop_child()
+        self.mode = "private"
+        self.inbox = queue.Queue()
+        self._start_private()
+        self._spawn_reader()
+
+    def reconnect_daemon(self) -> None:
+        self._stop_child(grace=0.5)
+        self.inbox = queue.Queue()
         try:
-            self.proc = subprocess.Popen(
-                [self.binary, "app-server"],
+            self._start_daemon()
+        except AppServerError:
+            self._stop_child(grace=0.5)
+            raise
+        self._spawn_reader()
+
+    def _popen(self, args: list[str]) -> subprocess.Popen[bytes]:
+        stderr = self.stderr_path.open("a", encoding="utf-8")
+        try:
+            return subprocess.Popen(
+                [self.binary, *args],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=stderr,
-                text=True,
-                bufsize=1,
+                bufsize=0,
+                start_new_session=True,
             )
         except OSError as exc:
-            raise AppServerError(f"could not start {self.binary} app-server: {exc}") from exc
-        threading.Thread(target=self._reader, daemon=True).start()
+            raise AppServerError(f"could not start {self.binary} {' '.join(args)}: {exc}") from exc
+        finally:
+            stderr.close()
 
-    def _reader(self) -> None:
-        assert self.proc and self.proc.stdout
-        for line in self.proc.stdout:
+    def _start_private(self) -> None:
+        self.proc = self._popen(["app-server"])
+
+    def _start_daemon(self) -> None:
+        proc = self.proc = self._popen(["app-server", "proxy"])
+        assert proc.stdin and proc.stdout
+        key = base64.b64encode(os.urandom(16)).decode()
+        request = (
+            "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )
+        try:
+            proc.stdin.write(request.encode())
+        except OSError as exc:
+            raise AppServerError(f"no Codex daemon to join ({exc})") from exc
+        head = b""
+        fd = proc.stdout.fileno()
+        deadline = time.time() + 5
+        while not head.endswith(b"\r\n\r\n"):
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise AppServerError("the Codex daemon did not answer")
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                continue
+            chunk = os.read(fd, 1)
+            if not chunk:
+                raise AppServerError("no Codex daemon running")
+            head += chunk
+            if len(head) > 8192:
+                raise AppServerError("unexpected reply from the Codex daemon")
+        if b" 101" not in head.split(b"\r\n", 1)[0]:
+            raise AppServerError("the Codex daemon refused the connection")
+
+    def _spawn_reader(self) -> None:
+        assert self.proc
+        target = self._read_frames if self.mode == "daemon" else self._read_lines
+        threading.Thread(target=target, args=(self.proc, self.inbox), daemon=True).start()
+
+    # ----- reading ---------------------------------------------------------
+
+    def _accept(self, text: str, inbox: queue.Queue[dict[str, Any] | None]) -> None:
+        for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
-            self._log.write("<< " + line + "\n")
-            self._log.flush()
             try:
-                self.inbox.put(json.loads(line))
+                self._log.write("<< " + line + "\n")
+                self._log.flush()
+            except ValueError:
+                pass
+            try:
+                inbox.put(json.loads(line))
             except json.JSONDecodeError:
                 continue
-        self.inbox.put(None)
 
-    def send(self, message: dict[str, Any]) -> None:
-        assert self.proc and self.proc.stdin
-        raw = json.dumps(message)
-        self._log.write(">> " + raw + "\n")
-        self._log.flush()
+    def _read_lines(self, proc: subprocess.Popen[bytes], inbox: queue.Queue[dict[str, Any] | None]) -> None:
+        assert proc.stdout
+        pending = b""
+        try:
+            while True:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
+                    break
+                pending += chunk
+                while b"\n" in pending:
+                    raw, pending = pending.split(b"\n", 1)
+                    self._accept(raw.decode("utf-8", "replace"), inbox)
+        except (OSError, ValueError):
+            pass
+        inbox.put(None)
+
+    @staticmethod
+    def _read_exact(proc: subprocess.Popen[bytes], size: int) -> bytes:
+        assert proc.stdout
+        data = b""
+        while len(data) < size:
+            chunk = proc.stdout.read(size - len(data))
+            if not chunk:
+                raise EOFError
+            data += chunk
+        return data
+
+    def _read_frames(self, proc: subprocess.Popen[bytes], inbox: queue.Queue[dict[str, Any] | None]) -> None:
+        message = b""
+        try:
+            while True:
+                first, second = self._read_exact(proc, 2)
+                opcode = first & 0x0F
+                size = second & 0x7F
+                if size == 126:
+                    size = struct.unpack(">H", self._read_exact(proc, 2))[0]
+                elif size == 127:
+                    size = struct.unpack(">Q", self._read_exact(proc, 8))[0]
+                mask = self._read_exact(proc, 4) if second & 0x80 else b""
+                data = self._read_exact(proc, size) if size else b""
+                if mask:
+                    data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+                if opcode == 0x9:
+                    try:
+                        self._send_frame(0xA, data)
+                    except AppServerError:
+                        break
+                    continue
+                if opcode == 0x8:
+                    break
+                if opcode in (0x0, 0x1, 0x2):
+                    message += data
+                    if first & 0x80:
+                        self._accept(message.decode("utf-8", "replace"), inbox)
+                        message = b""
+        except (EOFError, OSError, ValueError, struct.error):
+            pass
+        inbox.put(None)
+
+    # ----- writing ---------------------------------------------------------
+
+    def _send_frame(self, opcode: int, payload: bytes) -> None:
+        mask = os.urandom(4)
+        size = len(payload)
+        head = bytes([0x80 | opcode])
+        if size < 126:
+            head += bytes([0x80 | size])
+        elif size < 65536:
+            head += bytes([0x80 | 126]) + struct.pack(">H", size)
+        else:
+            head += bytes([0x80 | 127]) + struct.pack(">Q", size)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self._write(head + mask + masked)
+
+    def _write(self, data: bytes) -> None:
+        proc = self.proc
+        if not proc or not proc.stdin:
+            raise AppServerError("app-server is not running")
         with self._lock:
             try:
-                self.proc.stdin.write(raw + "\n")
-                self.proc.stdin.flush()
-            except (BrokenPipeError, OSError) as exc:
+                view = memoryview(data)
+                while view:
+                    written = proc.stdin.write(view)
+                    view = view[written or 0 :]
+            except (BrokenPipeError, OSError, ValueError) as exc:
                 raise AppServerError(f"app-server pipe closed: {exc}") from exc
+
+    def send(self, message: dict[str, Any]) -> None:
+        raw = json.dumps(message)
+        try:
+            self._log.write(">> " + raw + "\n")
+            self._log.flush()
+        except ValueError:
+            pass
+        if self.mode == "daemon":
+            self._send_frame(0x1, raw.encode())
+        else:
+            self._write(raw.encode() + b"\n")
 
     def request_id(self) -> int:
         with self._lock:
@@ -438,27 +632,199 @@ class AppServer:
         self._log.close()
         self._log = self.log_path.open("w", encoding="utf-8")
 
-    def close(self) -> None:
-        if not self.proc:
+    # ----- shutdown --------------------------------------------------------
+
+    def _stop_child(self, grace: float = 2.0) -> None:
+        proc, self.proc = self.proc, None
+        if not proc:
             return
         try:
-            if self.proc.stdin:
-                self.proc.stdin.close()
+            if proc.stdin:
+                proc.stdin.close()
         except OSError:
             pass
         try:
-            self.proc.wait(timeout=3)
+            proc.wait(timeout=grace)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
-        self._log.close()
+            pass
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(proc.pid, sig)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                proc.wait(timeout=2)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        for stream in (proc.stdout, proc.stdin):
+            try:
+                if stream:
+                    stream.close()
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self.mode == "daemon" and self.proc:
+            try:
+                self._send_frame(0x8, b"")
+            except AppServerError:
+                pass
+        self._stop_child()
+        try:
+            self._log.close()
+        except OSError:
+            pass
+
+
+def _load_seen() -> dict[str, Any]:
+    try:
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_seen(thread_id: str, turn_id: str | None, items: list[str]) -> None:
+    data = _load_seen()
+    data[thread_id] = {"turn": turn_id, "items": items[-400:], "at": int(time.time())}
+    if len(data) > 200:
+        for key in sorted(data, key=lambda k: data[k].get("at", 0))[: len(data) - 200]:
+            data.pop(key, None)
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_PATH.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, STATE_PATH)
+    except OSError:
+        pass
+
+
+def _ps(pid: int) -> dict[str, Any] | None:
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "pid=,ppid=,tty=,command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    parts = out.split(None, 3)
+    if len(parts) < 4:
+        return None
+    return {"pid": int(parts[0]), "ppid": int(parts[1]), "tty": parts[2], "command": parts[3]}
+
+
+def _terminal_lost(process: dict[str, Any]) -> bool:
+    """A session of ours has lost its terminal when it has no controlling tty
+    left, the tty device is gone, or the shell that ran it has exited."""
+    tty = str(process.get("tty") or "")
+    if tty in ("", "??", "?", "-"):
+        return True
+    if not os.path.exists(f"/dev/{tty}"):
+        return True
+    return process.get("ppid") == 1
+
+
+_OURS_RE = re.compile(
+    r"^\S*[Pp]ython[\d.]*\s+(?:-\S+\s+)*"
+    r"(?:\S*/(?:codexmobile|codex-mobile-json)|-m\s+claude_browse\.codex_mobile_(?:app|json))(?:\s|$)"
+)
+
+
+def _is_ours(command: str) -> bool:
+    """True only for an interpreter whose script is codexmobile itself; a
+    command line that merely mentions the name does not count."""
+    return bool(_OURS_RE.search(command))
+
+
+def _writer_holders(thread_id: str) -> list[dict[str, Any]]:
+    """Processes holding the thread's writer lock, each classified as
+    stale (ours, terminal gone), live (ours, on a terminal) or foreign."""
+    lock = WRITER_LOCKS / f"{thread_id}.lock"
+    if not lock.exists():
+        return []
+    try:
+        out = subprocess.run(["lsof", "-t", "--", str(lock)], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    holders = []
+    for token in out.split():
+        if not token.isdigit() or int(token) == os.getpid():
+            continue
+        holder = _ps(int(token))
+        if not holder:
+            continue
+        command = holder["command"]
+        parent = _ps(holder["ppid"]) if holder["ppid"] > 1 else None
+        owner = parent if parent and _is_ours(parent["command"]) else None
+        if owner and owner["pid"] == os.getpid():
+            continue
+        managed = "--managed-daemon" in command or "app-server-daemon/" in command or "--listen" in command
+        if owner:
+            gone = _terminal_lost(owner)
+            holder.update(kind="stale" if gone else "live", owner=owner["pid"], where=f"another codexmobile session on {owner['tty']}")
+        elif "/ChatGPT.app/" in command:
+            holder.update(kind="foreign", where="the Codex desktop app")
+        elif managed:
+            holder.update(kind="foreign", where="a Codex session on the Mac (desktop app or terminal)")
+        elif holder["ppid"] == 1 and re.search(r"(^|/)codex app-server\s*$", command):
+            holder.update(kind="stale", owner=None, where="a private server left by a dropped connection")
+        elif holder["tty"] not in ("??", "?", "-"):
+            holder.update(kind="foreign", where=f"a Codex terminal session on {holder['tty']}")
+        else:
+            holder.update(kind="foreign", where="a Codex session on the Mac (desktop app or terminal)")
+        holders.append(holder)
+    return holders
+
+
+def _release(holders: list[dict[str, Any]]) -> bool:
+    """Terminate stale holders of ours (owner first, then its servers)."""
+    targets: list[int] = []
+    for holder in holders:
+        if holder.get("kind") != "stale":
+            return False
+        for pid in (holder.get("owner"), holder["pid"]):
+            if pid and pid not in targets and pid != os.getpid():
+                targets.append(pid)
+    if not targets:
+        return False
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.time() + 3
+    while time.time() < deadline and any(_ps(pid) for pid in targets):
+        time.sleep(0.2)
+    for pid in targets:
+        if _ps(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    time.sleep(0.3)
+    return True
 
 
 class Client:
-    def __init__(self, yolo: bool, binary: str) -> None:
+    def __init__(self, yolo: bool, binary: str, prefer_daemon: bool = True) -> None:
         self.yolo = yolo
         self.screen = _Screen()
         log_path = Path(tempfile.mktemp(prefix="codex-mobile-app-", suffix=".log"))
-        self.server = AppServer(binary, log_path)
+        self.server = AppServer(binary, log_path, prefer_daemon=prefer_daemon)
+        self.parent_pid = os.getppid()
+        self.shown: list[str] = []
+        self.started_items: set[str] = set()
+        self.last_turn_shown: str | None = None
+        self.foreign_activity = False
+        self.joining = False
+        self.recovering = False
+        self.backlog: list[dict[str, Any]] = []
+        self.expect_thread: str | None = None
+        self.thread_active = False
         self.thread_id: str | None = None
         self.thread_path: str | None = None
         self.model: str | None = None
@@ -482,16 +848,73 @@ class Client:
 
     def start(self) -> None:
         self.server.start()
+        try:
+            self._initialize(8 if self.server.mode == "daemon" else 20)
+        except AppServerError as exc:
+            if self.server.mode != "daemon":
+                raise
+            self.server.restart_private(str(exc))
+            self._initialize(20)
+
+    def _initialize(self, timeout: float) -> None:
         result = self.request(
             "initialize",
             {"clientInfo": {"name": "codexmobile", "title": "Codex mobile", "version": CLIENT_VERSION}},
-            timeout=20,
+            timeout=timeout,
         )
         if not isinstance(result, dict):
             raise AppServerError("initialize returned no result")
         self.server.notify("initialized")
 
+    def check_terminal(self) -> None:
+        parent = os.getppid()
+        if parent != self.parent_pid and parent == 1:
+            raise TerminalGone("parent process exited")
+
     def request(self, method: str, params: dict[str, Any] | None = None, timeout: float = 120) -> Any:
+        try:
+            return self._request(method, params, timeout)
+        except AppServerError as exc:
+            mid_turn = self.busy and method != "turn/start"
+            if self.server.mode != "daemon" or self.recovering or mid_turn or not _DAEMON_BUSY_RE.search(str(exc)):
+                raise
+            reason = str(exc)
+        return self._recover(reason, method, params, timeout)
+
+    def _recover(self, reason: str, method: str, params: dict[str, Any] | None, timeout: float) -> Any:
+        """The shared daemon restarts itself for updates. Reconnect and retry;
+        if it is not back in time, carry on with a private server."""
+        opening = method in ("initialize", "thread/resume", "thread/start", "thread/fork")
+
+        def resubscribe() -> None:
+            if not opening and self.thread_id:
+                again = self._thread_params()
+                again.update(threadId=self.thread_id, excludeTurns=True)
+                self._request("thread/resume", again, 60)
+
+        self.recovering = True
+        try:
+            self.say("· the shared Codex daemon is restarting; reconnecting", DIM)
+            deadline = time.time() + 12
+            while time.time() < deadline:
+                try:
+                    self.server.reconnect_daemon()
+                    self._initialize(8)
+                    resubscribe()
+                    return self._request(method, params, timeout)
+                except AppServerError as exc:
+                    if not _DAEMON_BUSY_RE.search(str(exc)) and "daemon" not in str(exc).lower():
+                        raise
+                    time.sleep(1.0)
+            self.server.restart_private(reason)
+            self._initialize(20)
+            self.say("· it is not back yet; using a private server (a turn here stops if the connection drops)", DIM)
+            resubscribe()
+            return self._request(method, params, timeout)
+        finally:
+            self.recovering = False
+
+    def _request(self, method: str, params: dict[str, Any] | None = None, timeout: float = 120) -> Any:
         rid = self.server.request_id()
         self.pending[rid] = None
         self.server.send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
@@ -506,7 +929,7 @@ class Client:
                 self._tick()
                 continue
             if message is None:
-                raise AppServerError("app-server exited")
+                raise AppServerError("app-server exited" if self.server.mode == "private" else "lost the Codex daemon")
             if message.get("id") == rid and "method" not in message:
                 del self.pending[rid]
                 if "error" in message:
@@ -520,8 +943,17 @@ class Client:
         if not method:
             return
         params = message.get("params") or {}
+        scope = params.get("threadId") if isinstance(params, dict) else None
+        if scope is not None and scope not in (self.thread_id, self.expect_thread):
+            return
         if "id" in message:
             self.handle_server_request(message["id"], method, params)
+            return
+        if not self.busy and method.startswith(("item/", "turn/")):
+            if self.joining:
+                self.backlog.append(message)
+            elif method in ("turn/started", "item/started", "item/completed", "turn/completed"):
+                self.foreign_activity = True
             return
         handler = getattr(self, "on_" + method.replace("/", "_"), None)
         if handler:
@@ -550,6 +982,7 @@ class Client:
         return f"{DIM}{line}{RESET}"
 
     def _tick(self) -> None:
+        self.check_terminal()
         if not self.busy:
             return
         if self.screen.tty:
@@ -574,9 +1007,7 @@ class Client:
 
     def on_thread_started(self, params: dict[str, Any]) -> None:
         thread = params.get("thread") or {}
-        if thread.get("id") and not self.thread_id:
-            self.thread_id = thread["id"]
-        if thread.get("model"):
+        if thread.get("model") and thread.get("id") == self.thread_id:
             self.model = thread["model"]
 
     def on_turn_started(self, params: dict[str, Any]) -> None:
@@ -587,6 +1018,10 @@ class Client:
     def on_item_started(self, params: dict[str, Any]) -> None:
         item = params.get("item") or {}
         kind = item.get("type")
+        if item.get("id"):
+            if str(item["id"]) in self.shown:
+                return
+            self.started_items.add(str(item["id"]))
         if kind == "reasoning":
             if not self.reasoning_started:
                 self.reasoning_started = time.time()
@@ -650,6 +1085,9 @@ class Client:
         self.screen.print(f"{DIM}✳ Cogitated for {elapsed}s{RESET}")
 
     def on_item_agentMessage_delta(self, params: dict[str, Any]) -> None:
+        item_id = params.get("itemId")
+        if item_id and str(item_id) not in self.started_items:
+            return
         if self.stream is None:
             self._collapse_reasoning()
             self.stream = _Stream(self.screen)
@@ -666,6 +1104,14 @@ class Client:
     def on_item_completed(self, params: dict[str, Any]) -> None:
         item = params.get("item") or {}
         kind = item.get("type")
+        item_id = str(item.get("id") or "")
+        if item_id:
+            if item_id in self.shown:
+                return
+            quiet = ("agentMessage", "userMessage", "reasoning", "fileChange", "plan", None)
+            if item_id not in self.started_items and kind not in quiet:
+                self.on_item_started({"item": item})
+            self.shown.append(item_id)
         if kind == "agentMessage":
             if self.stream is None:
                 self._collapse_reasoning()
@@ -865,27 +1311,269 @@ class Client:
             params["model"] = self.model_override
         return params
 
-    def _adopt(self, result: dict[str, Any]) -> None:
+    def _adopt(self, result: dict[str, Any], previous: str | None) -> None:
         thread = result.get("thread") or {}
-        self.thread_id = str(thread.get("id") or self.thread_id or "")
+        self.thread_id = str(thread.get("id") or "") or None
         self.thread_path = thread.get("path")
         self.model = str(result.get("model") or thread.get("model") or self.model or "")
+        status = thread.get("status")
+        self.thread_active = isinstance(status, dict) and status.get("type") == "active"
+        if previous != self.thread_id:
+            self.shown = []
+            self.started_items = set()
+            self.last_turn_shown = None
+            self.foreign_activity = False
+            if previous and self.server.mode == "daemon":
+                try:
+                    self.request("thread/unsubscribe", {"threadId": previous}, timeout=5)
+                except AppServerError:
+                    pass
+
+    def _switch(self, method: str, params: dict[str, Any]) -> None:
+        previous = self.thread_id
+        if previous:
+            self.remember()
+        self.thread_id = None
+        try:
+            result = self.request(method, params)
+        except AppServerError:
+            self.thread_id = previous
+            raise
+        finally:
+            self.expect_thread = None
+        self._adopt(result or {}, previous)
 
     def new_thread(self) -> None:
-        self.thread_id = None
-        self._adopt(self.request("thread/start", self._thread_params()))
+        self._switch("thread/start", self._thread_params())
+        self.remember()
 
     def resume_thread(self, thread_id: str) -> None:
         params = self._thread_params()
         params["threadId"] = thread_id
-        self.thread_id = None
-        self._adopt(self.request("thread/resume", params))
+        params["excludeTurns"] = True
+        self.expect_thread = thread_id
+        self._switch("thread/resume", params)
 
     def fork_thread(self, thread_id: str) -> None:
         params = self._thread_params()
         params["threadId"] = thread_id
-        self.thread_id = None
-        self._adopt(self.request("thread/fork", params))
+        params["excludeTurns"] = True
+        self._switch("thread/fork", params)
+        self.remember()
+
+    # ----- opening a thread ---------------------------------------------------
+
+    def _choose(self, options: str, allowed: str) -> str:
+        if not sys.stdin.isatty():
+            self.say("Nothing opened (not an interactive terminal). `codexmobile fork <id>` works on a copy.", DIM)
+            return "q"
+        self.say(options, DIM)
+        self.screen.clear_status()
+        while True:
+            try:
+                reply = input(f"{CYAN}{BOLD}choose>{RESET} ").strip().lower()[:1]
+            except EOFError:
+                return "q"
+            if reply and reply in allowed:
+                return reply
+
+    def open_thread(self, target: str, fork: bool = False, in_session: bool = False) -> bool:
+        """Resume or fork a thread and catch up on it. False: nothing opened."""
+        released = False
+        leave = "q keep the current thread" if in_session else "q quit"
+        while True:
+            try:
+                if fork:
+                    self.fork_thread(target)
+                    self.screen.print(f"Forked into {DIM}{self.thread_id}{RESET}")
+                    return True
+                self.joining = True
+                self.backlog = []
+                self.resume_thread(target)
+                self.screen.print(f"Resuming {DIM}{self.thread_id}{RESET}")
+                self.replay()
+                return True
+            except AppServerError as exc:
+                self.joining = False
+                message = str(exc)
+                if self.server.proc is None or self.server.proc.poll() is not None:
+                    raise
+                if _ACTIVE_WRITER_RE.search(message):
+                    holders = _writer_holders(target)
+                    if holders and not released and _release(holders):
+                        released = True
+                        self.say("· released a stale session from a dropped connection", DIM)
+                        continue
+                    places = sorted({str(h.get("where")) for h in holders}) or ["another Codex session on the Mac"]
+                    self.screen.block()
+                    self.say(f"This thread is open in {' and '.join(places)}. Only one of them can write to it at a time.")
+                    choice = self._choose(f"f fork it into a new thread · p pick another · {leave}", "fpq")
+                else:
+                    self.error(message)
+                    choice = self._choose(f"p pick another · n new thread · {leave}", "pnq")
+            if choice == "f":
+                fork = True
+            elif choice == "n":
+                self.new_thread()
+                self.screen.print(f"New thread {DIM}{self.thread_id}{RESET}")
+                return True
+            elif choice == "p":
+                picked = self.pick_thread()
+                if picked == "quit":
+                    return False
+                if picked is None:
+                    self.new_thread()
+                    self.screen.print(f"New thread {DIM}{self.thread_id}{RESET}")
+                    return True
+                target, fork, released = picked, False, False
+            else:
+                return False
+
+    # ----- catching up ----------------------------------------------------------
+
+    def remember(self) -> None:
+        if self.thread_id:
+            _save_seen(self.thread_id, self.last_turn_shown, self.shown)
+
+    @staticmethod
+    def _stamp(epoch: Any) -> str:
+        try:
+            return _dt.datetime.fromtimestamp(float(epoch)).strftime("%-I:%M %p")
+        except (TypeError, ValueError, OSError, OverflowError):
+            return _clock()
+
+    def _replay_item(self, item: dict[str, Any]) -> None:
+        kind = item.get("type")
+        item_id = str(item.get("id") or "")
+        if kind == "userMessage":
+            parts = [str(c.get("text") or "") for c in item.get("content") or [] if isinstance(c, dict) and c.get("type") == "text"]
+            text = "\n".join(part for part in parts if part.strip())
+            if text.strip():
+                self.print_user(text)
+        elif kind == "agentMessage":
+            text = str(item.get("text") or "")
+            if text.strip():
+                stream = _Stream(self.screen)
+                stream.feed(text)
+                stream.finish()
+        else:
+            self.on_item_completed({"item": item})
+            return
+        if item_id:
+            self.shown.append(item_id)
+
+    def replay(self) -> None:
+        """Show what this client has not displayed yet on the current thread,
+        then attach to a turn that is still running."""
+        backlog, self.backlog = self.backlog, []
+        try:
+            self._replay(backlog)
+        finally:
+            self.joining = False
+            self.backlog = []
+
+    def _replay(self, backlog: list[dict[str, Any]]) -> None:
+        if not self.thread_id:
+            return
+        seen = _load_seen().get(self.thread_id) or {}
+        known = bool(seen) or bool(self.shown) or bool(self.last_turn_shown)
+        if seen and not self.shown:
+            self.shown = [str(i) for i in seen.get("items") or []]
+            self.last_turn_shown = seen.get("turn") or self.last_turn_shown
+        try:
+            result = self.request(
+                "thread/turns/list",
+                {"threadId": self.thread_id, "limit": 8, "itemsView": "full", "sortDirection": "desc"},
+                timeout=30,
+            )
+        except AppServerError:
+            return
+        backlog += self.backlog
+        self.backlog = []
+        turns = [t for t in reversed((result or {}).get("data") or []) if isinstance(t, dict)]
+        if not turns:
+            return
+        ids = [t.get("id") for t in turns]
+        older = False
+        if not known:
+            missed = turns[-1:]
+        elif self.last_turn_shown in ids:
+            missed = turns[ids.index(self.last_turn_shown) :]
+        else:
+            missed = turns[-3:]
+            older = len(turns) > 3
+        announced = False
+        for turn in missed:
+            items = [i for i in turn.get("items") or [] if isinstance(i, dict)]
+            fresh = [i for i in items if i.get("type") != "reasoning" and str(i.get("id") or "") not in self.shown]
+            running = turn.get("status") == "inProgress"
+            attach = running and turn is turns[-1] and self.thread_active
+            if not fresh and not attach:
+                if not running:
+                    self.last_turn_shown = turn.get("id")
+                continue
+            if fresh and not announced:
+                announced = True
+                self.screen.block()
+                if not known:
+                    self.say("· last turn in this thread", DIM)
+                else:
+                    self.say("· catching up on what you missed" + (" (older turns: /history)" if older else ""), DIM)
+            for item in fresh:
+                self._replay_item(item)
+            if attach:
+                self._attach(turn, backlog)
+                return
+            self.last_turn_shown = turn.get("id")
+            self.screen.block()
+            status = str(turn.get("status") or "")
+            error = turn.get("error") if isinstance(turn.get("error"), dict) else {}
+            if error.get("message"):
+                self.say(str(error["message"]), RED)
+            when = self._stamp(turn.get("completedAt") or turn.get("startedAt"))
+            took = f" in {float(turn['durationMs']) / 1000:.1f}s" if turn.get("durationMs") else ""
+            if status == "completed":
+                self.screen.print(f"{DIM}✳ done{took} · {when}{RESET}")
+            elif running:
+                self.screen.print(f"{DIM}✳ stopped when its session ended · {when}{RESET}")
+            else:
+                self.screen.print(f"{DIM}✳ {status or 'ended'}{took.replace(' in ', ' after ')} · {when}{RESET}")
+        self.remember()
+
+    def _attach(self, turn: dict[str, Any], backlog: list[dict[str, Any]]) -> None:
+        self.turn_id = turn.get("id")
+        started = turn.get("startedAt")
+        self.started_at = float(started) if started else time.time()
+        self.turn_error = None
+        self.error_printed = False
+        self.error_deadline = 0.0
+        self.reasoning.clear()
+        self.reasoning_started = 0.0
+        self.reasoning_pending = False
+        self.stream = None
+        self.interrupts = 0
+        self.screen.block()
+        self.say("· this turn is still running; following it live", DIM)
+        self.joining = False
+        self.busy = True
+        for message in backlog:
+            self.dispatch(message)
+        self._pump()
+        self._finish_turn()
+
+    def _drain_idle(self) -> None:
+        while True:
+            try:
+                message = self.server.inbox.get_nowait()
+            except queue.Empty:
+                break
+            if message is None:
+                raise AppServerError("app-server exited" if self.server.mode == "private" else "lost the Codex daemon")
+            self.dispatch(message)
+        if self.foreign_activity:
+            self.foreign_activity = False
+            self.joining = True
+            self.replay()
 
     def list_threads(self, limit: int = 10) -> list[dict[str, Any]]:
         result = self.request(
@@ -900,6 +1588,7 @@ class Client:
     def run_turn(self, text: str) -> None:
         if not self.thread_id:
             self.new_thread()
+        self._drain_idle()
         self.server.rotate_log()
         self.turn_error = None
         self.error_printed = False
@@ -923,6 +1612,21 @@ class Client:
             return
         turn = (result or {}).get("turn") or {}
         self.turn_id = self.turn_id or turn.get("id")
+        self._pump()
+        self._finish_turn()
+
+    def _interrupt(self) -> None:
+        if self.thread_id and self.turn_id:
+            self.server.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": self.server.request_id(),
+                    "method": "turn/interrupt",
+                    "params": {"threadId": self.thread_id, "turnId": self.turn_id},
+                }
+            )
+
+    def _pump(self) -> None:
         while self.busy:
             try:
                 try:
@@ -934,7 +1638,10 @@ class Client:
                     continue
                 if message is None:
                     self.busy = False
-                    self.error("app-server exited during the turn")
+                    if self.server.mode == "daemon":
+                        self.error("lost the Codex daemon; the turn may still be running. Reopen the thread to catch up.")
+                    else:
+                        self.error("app-server exited during the turn")
                     break
                 self.dispatch(message)
             except KeyboardInterrupt:
@@ -944,23 +1651,19 @@ class Client:
                     self.screen.clear_status()
                     raise
                 self.screen.print(f"{DIM}[interrupting… press Ctrl-C again to quit]{RESET}")
-                if self.thread_id and self.turn_id:
-                    try:
-                        self.server.send(
-                            {
-                                "jsonrpc": "2.0",
-                                "id": self.server.request_id(),
-                                "method": "turn/interrupt",
-                                "params": {"threadId": self.thread_id, "turnId": self.turn_id},
-                            }
-                        )
-                    except AppServerError as exc:
-                        self.error(str(exc))
+                try:
+                    self._interrupt()
+                except AppServerError as exc:
+                    self.error(str(exc))
+
+    def _finish_turn(self) -> None:
         self._collapse_reasoning()
         self._finish_stream()
         self.screen.clear_status()
         self.last_elapsed = time.time() - self.started_at
         self.turn_count += 1
+        self.last_turn_shown = self.turn_id or self.last_turn_shown
+        self.remember()
         if self.turn_error:
             if self.turn_error != "interrupted" and not self.error_printed:
                 self.error(self.turn_error)
@@ -980,6 +1683,7 @@ class Client:
         lines.append(f"{BOLD}cwd{RESET}      {_display_cwd()}")
         lines.append(f"{BOLD}turns{RESET}    {self.turn_count} this run · last {self.last_elapsed:.1f}s")
         lines.append(f"{BOLD}yolo{RESET}     {'on' if self.yolo else 'off'}")
+        lines.append(f"{BOLD}via{RESET}      {'shared Codex daemon' if self.server.mode == 'daemon' else 'private server'}")
         lines.append(f"{BOLD}log{RESET}      {self.server.log_path}")
         for line in lines:
             for part in _wrap(line, _width(), "         "):
@@ -1058,12 +1762,8 @@ class Client:
                 if not target:
                     self.error(f"no thread matching {parts[1]}")
                     return True
-                if name == "/resume":
-                    self.resume_thread(target)
-                    self.say(f"now on thread {self.thread_id}", GREEN)
-                else:
-                    self.fork_thread(target)
-                    self.say(f"forked into thread {self.thread_id}", GREEN)
+                if not self.open_thread(target, fork=name == "/fork", in_session=True):
+                    self.say(f"staying on thread {self.thread_id or '(none)'}", DIM)
             except AppServerError as exc:
                 self.error(str(exc))
             return True
@@ -1088,14 +1788,14 @@ class Client:
             rows = legacy._recent_sessions()
         if not rows:
             return None
-        width = _width()
+        self.screen.block()
         self.screen.print(f"{BOLD}Recent Codex threads{RESET}")
         for index, (tid, age, title) in enumerate(rows, start=1):
-            meta = f"{age} · {_short_id(tid)}"
-            room = max(10, width - len(meta) - 6)
-            self.screen.print(f"{index:>2}. {legacy._one_line(title, room):<{room}} {DIM}{meta}{RESET}")
+            for line in legacy._picker_lines(index, title, f"{age} · {_short_id(tid)}", _width()):
+                self.screen.print(line)
         self.screen.print(f"{DIM} n. new thread   q. quit{RESET}")
         while True:
+            self.screen.clear_status()
             try:
                 choice = input(f"{CYAN}{BOLD}pick>{RESET} ").strip().lower()
             except EOFError:
@@ -1127,8 +1827,11 @@ class Client:
         try:
             line = input(f"{CYAN}{BOLD}> {RESET}")
         except EOFError:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
+            try:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            except (OSError, ValueError):
+                pass
             return None
         self.screen.col = 0
         self.screen._last_blank = False
@@ -1198,6 +1901,48 @@ def _fallback(reason: str, argv: list[str]) -> int:
     return legacy.main([a for a in argv if a != "--legacy"])
 
 
+def _on_hangup(signum: int, _frame: Any) -> None:
+    raise TerminalGone(f"signal {signum}")
+
+
+def _terminal_error(exc: BaseException) -> bool:
+    if isinstance(exc, (TerminalGone, BrokenPipeError)):
+        return True
+    return isinstance(exc, OSError) and exc.errno in _GONE_ERRNOS
+
+
+def _leave(client: Client, gone: bool) -> None:
+    """Release everything. With the terminal gone a turn on the shared daemon
+    keeps running there; on a private server it is interrupted first."""
+    for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, signal.SIG_IGN)
+        except (OSError, ValueError):
+            pass
+    if gone:
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, 1)
+            os.dup2(devnull, 2)
+        except OSError:
+            pass
+    else:
+        try:
+            client.screen.clear_status()
+        except (TerminalGone, OSError):
+            pass
+    try:
+        client.remember()
+    except OSError:
+        pass
+    if client.busy and client.server.mode == "private":
+        try:
+            client._interrupt()
+        except AppServerError:
+            pass
+    client.server.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     ns = _parse_args(argv)
@@ -1208,36 +1953,51 @@ def main(argv: list[str] | None = None) -> int:
         plan_args = ["resume", "--last", *(plan_args[1:] if plan_args[:1] == ["resume"] else plan_args)]
     mode, target, initial_prompt = _plan(plan_args)
     binary = os.environ.get("CODEX_REAL_BINARY") or "codex"
-    client = Client(yolo=bool(ns.yolo), binary=binary)
+    client = Client(yolo=bool(ns.yolo), binary=binary, prefer_daemon=not os.environ.get("CODEX_MOBILE_PRIVATE"))
     signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGHUP, _on_hangup)
+    signal.signal(signal.SIGTERM, _on_hangup)
+    gone = False
     try:
-        client.start()
-    except AppServerError as exc:
-        return _fallback(str(exc), argv)
+        try:
+            client.start()
+        except AppServerError as exc:
+            client.server.close()
+            return _fallback(str(exc), argv)
+        return _run(client, mode, target, initial_prompt)
+    except KeyboardInterrupt:
+        return 0
+    except BaseException as exc:
+        if not _terminal_error(exc):
+            raise
+        gone = True
+        return 129
+    finally:
+        _leave(client, gone)
 
+
+def _run(client: Client, mode: str, target: str | None, initial_prompt: str) -> int:
     screen = client.screen
     screen.print("═" * _width())
-    screen.print(f"{BOLD}Codex mobile{RESET} {DIM}· app-server · /help for commands{RESET}")
+    via = "shared daemon" if client.server.mode == "daemon" else "private server"
+    screen.print(f"{BOLD}Codex mobile{RESET} {DIM}· {via} · /help{RESET}")
+    if client.server.mode != "daemon" and client.server.prefer_daemon:
+        client.say(f"· no shared Codex daemon ({client.server.daemon_reason}); a turn here stops if the connection drops", DIM)
     try:
+        opened = True
         if mode == "resume" and target == "--last":
             threads = client.list_threads(1)
             if not threads:
                 raise AppServerError("no Codex threads to resume")
             target = str(threads[0].get("id") or "")
-        if mode == "resume" and target:
-            client.resume_thread(target)
-            screen.print(f"Resuming {DIM}{client.thread_id}{RESET}")
-        elif mode == "fork" and target:
-            client.fork_thread(target)
-            screen.print(f"Forked into {DIM}{client.thread_id}{RESET}")
+        if mode in ("resume", "fork") and target:
+            opened = client.open_thread(target, fork=mode == "fork")
         elif mode == "auto" and not initial_prompt and sys.stdin.isatty():
             choice = client.pick_thread()
             if choice == "quit":
-                client.server.close()
                 return 0
             if choice:
-                client.resume_thread(choice)
-                screen.print(f"Resuming {DIM}{client.thread_id}{RESET}")
+                opened = client.open_thread(choice)
             else:
                 client.new_thread()
                 screen.print(f"New thread {DIM}{client.thread_id}{RESET}")
@@ -1245,31 +2005,26 @@ def main(argv: list[str] | None = None) -> int:
             client.new_thread()
             screen.print(f"New thread {DIM}{client.thread_id}{RESET}")
     except AppServerError as exc:
-        client.server.close()
-        return _fallback(str(exc), argv)
+        client.error(str(exc))
+        return 1
+    if not opened:
+        return 0 if sys.stdin.isatty() else 1
+    screen.block()
     screen.print("═" * _width())
 
-    code = 0
-    try:
-        if initial_prompt:
-            client.print_user(initial_prompt)
-            client.run_turn(initial_prompt)
-            if not sys.stdin.isatty():
-                return 1 if client.turn_error else 0
-        elif not sys.stdin.isatty():
-            piped = sys.stdin.read().strip()
-            if piped:
-                client.print_user(piped)
-                client.run_turn(piped)
-                return 1 if client.turn_error else 0
-            return 0
-        code = client.repl()
-    except KeyboardInterrupt:
-        code = 0
-    finally:
-        client.screen.clear_status()
-        client.server.close()
-    return code
+    if initial_prompt:
+        client.print_user(initial_prompt)
+        client.run_turn(initial_prompt)
+        if not sys.stdin.isatty():
+            return 1 if client.turn_error else 0
+    elif not sys.stdin.isatty():
+        piped = sys.stdin.read().strip()
+        if piped:
+            client.print_user(piped)
+            client.run_turn(piped)
+            return 1 if client.turn_error else 0
+        return 0
+    return client.repl()
 
 
 if __name__ == "__main__":

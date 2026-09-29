@@ -686,6 +686,17 @@ def _recent_sessions(limit: int = 10) -> list[tuple[str, str, str]]:
     return rows
 
 
+def _picker_lines(index: int, title: str, meta: str, width: int) -> list[str]:
+    """One picker row that never exceeds `width`: title cut with an ellipsis,
+    age and id beside it when they fit, else on an indented second row."""
+    prefix = f"{index:>2}. "
+    room = width - len(prefix) - len(meta) - 2
+    if room >= 20:
+        return [f"{prefix}{_one_line(title, room):<{room}}  {DIM}{meta}{RESET}"]
+    first = prefix + _one_line(title, max(8, width - len(prefix)))
+    return [first, f"{' ' * len(prefix)}{DIM}{_one_line(meta, max(8, width - len(prefix)))}{RESET}"]
+
+
 def _pick_session() -> str | None:
     """Interactive startup picker. Returns a session id, None for a new thread,
     or "quit"."""
@@ -694,7 +705,8 @@ def _pick_session() -> str | None:
         return None
     print(f"{BOLD}Recent Codex sessions{RESET}", flush=True)
     for index, (session_id, age, title) in enumerate(rows, start=1):
-        print(f"{index:>2}. {title:<60}  {DIM}{age} · {_short_id(session_id)}{RESET}", flush=True)
+        for line in _picker_lines(index, title, f"{age} · {_short_id(session_id)}", _term_width() - 1):
+            print(line, flush=True)
     print(f"{DIM} n. new thread   q. quit{RESET}", flush=True)
     while True:
         try:
