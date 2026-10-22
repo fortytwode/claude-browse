@@ -1191,11 +1191,32 @@ def _codex_mobile_cmd(*args: str, yolo: bool) -> list[str]:
 
 def _board_managed_title_cmd(cmd: list[str], provider: str) -> list[str]:
     """Disable Codex's OSC title producer for a Board-managed process only."""
+    if provider == "codex":
+        cmd = _codex_daemon_fallback_cmd(cmd)
     if (
         provider == "codex"
         and os.environ.get("AGENT_BOARD_MANAGED_TERMINAL_TITLE") == "1"
     ):
         return [cmd[0], "-c", "tui.terminal_title=[]", *cmd[1:]]
+    return cmd
+
+
+def _codex_daemon_fallback_cmd(cmd: list[str]) -> list[str]:
+    """Bypass a deleted daemon endpoint without killing its active sessions."""
+    if any(arg in ("--no-daemon", "--remote") or arg.startswith("--remote=") for arg in cmd[1:]):
+        return cmd
+    codex_home = os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")
+    endpoint = os.path.join(codex_home, "app-server-control", "app-server-control.sock")
+    # An absent endpoint is normal before first startup. A dangling link means
+    # the managed daemon's temporary socket was deleted while it was running;
+    # Codex keeps finding that live process and cannot recreate its listener.
+    if os.path.islink(endpoint) and not os.path.exists(endpoint):
+        print(
+            "Codex daemon socket is missing; using a private server "
+            "(--no-daemon) and leaving active sessions running.",
+            file=sys.stderr,
+        )
+        return [cmd[0], "--no-daemon", *cmd[1:]]
     return cmd
 
 

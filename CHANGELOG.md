@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Codex launches survive a deleted daemon socket.** When the shared daemon's
+  socket symlink points to a missing temporary file, browser launches use
+  `--no-daemon` automatically, preserving active sessions and saved threads.
+  Explicit remote/private connection choices remain unchanged.
+
 ## [1.4.1] - 2026-09-25
 
 ### Fixed
