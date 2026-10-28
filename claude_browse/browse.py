@@ -1155,8 +1155,6 @@ def _join_with_or(values: list[str]) -> str:
 
 
 def _require_binary(provider: str) -> None:
-    if _use_codex_mobile_mode(provider):
-        return
     binary = get_provider(provider).binary
     if shutil.which(binary):
         return
@@ -1164,38 +1162,58 @@ def _require_binary(provider: str) -> None:
     sys.exit(1)
 
 
-def _codex_mobile_binary() -> str:
-    return shutil.which("codexmobile") or os.path.expanduser("~/.local/bin/codexmobile")
-
-
-def _use_codex_mobile_mode(provider: str) -> bool:
-    binary = _codex_mobile_binary()
+def _use_codex_inline_mode(provider: str) -> bool:
     return (
         provider == "codex"
         and bool(os.environ.get("SSH_CONNECTION"))
         and not os.environ.get("CODEX_BROWSE_MOBILE_DISABLE")
+        and not os.environ.get("CODEX_NO_MOBILE")
         and sys.stdin.isatty()
         and sys.stdout.isatty()
-        and os.path.exists(binary)
-        and os.access(binary, os.X_OK)
     )
 
 
-def _codex_mobile_cmd(*args: str, yolo: bool) -> list[str]:
-    cmd = [_codex_mobile_binary()]
-    if yolo:
-        cmd.append("--yolo")
-    cmd.extend(args)
-    return cmd
-
-
 def _board_managed_title_cmd(cmd: list[str], provider: str) -> list[str]:
-    """Disable Codex's OSC title producer for a Board-managed process only."""
+    """Add Codex terminal compatibility options while preserving Board titles."""
+    if provider == "codex":
+        cmd = _codex_daemon_fallback_cmd(cmd)
+    if _use_codex_inline_mode(provider):
+        # Inline partial scroll regions aren't reliable scrollback on phones.
+        # Codex must own the complete transcript and handle scroll events.
+        # Compact presentation collapses tool dumps without removing answers.
+        # Later explicit config arguments retain precedence.
+        cmd = [
+            cmd[0],
+            "-c", 'tui.alternate_screen="always"',
+            "-c", "tui.fullscreen_transcript=true",
+            "-c", "tui.raw_output_mode=false",
+            *cmd[1:],
+        ]
     if (
         provider == "codex"
         and os.environ.get("AGENT_BOARD_MANAGED_TERMINAL_TITLE") == "1"
+        and not any(cmd[index : index + 2] == ["-c", "tui.terminal_title=[]"] for index in range(len(cmd)))
     ):
         return [cmd[0], "-c", "tui.terminal_title=[]", *cmd[1:]]
+    return cmd
+
+
+def _codex_daemon_fallback_cmd(cmd: list[str]) -> list[str]:
+    """Bypass a deleted daemon endpoint without killing its active sessions."""
+    if any(arg in ("--no-daemon", "--remote") or arg.startswith("--remote=") for arg in cmd[1:]):
+        return cmd
+    codex_home = os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")
+    endpoint = os.path.join(codex_home, "app-server-control", "app-server-control.sock")
+    # An absent endpoint is normal before first startup. A dangling link means
+    # the managed daemon's temporary socket was deleted while it was running;
+    # Codex keeps finding that live process and cannot recreate its listener.
+    if os.path.islink(endpoint) and not os.path.exists(endpoint):
+        print(
+            "Codex daemon socket is missing; using a private server "
+            "(--no-daemon) and leaving active sessions running.",
+            file=sys.stderr,
+        )
+        return [cmd[0], "--no-daemon", *cmd[1:]]
     return cmd
 
 
@@ -1264,6 +1282,15 @@ def _native_resume(
     _require_binary(provider)
     spec = get_provider(provider)
 
+    # Codex can retain state and user history after its rollout is removed.
+    # Native fork and resume both require the rollout.
+    if provider == "codex" and session.get("path") and not os.path.isfile(session["path"]):
+        print("CodeX rollout is missing; starting a continuation from saved history...")
+        _continue_in_provider(
+            session, "codex", "codex", cwd, prefixes, yolo, relocate=True,
+        )
+        return
+
     # CodeX's native fork materializes the parent transcript.  It is the
     # right semantic default for ordinary threads, but a multi-gigabyte parent
     # can leave the terminal apparently hung for minutes.  Keep the policy
@@ -1284,17 +1311,6 @@ def _native_resume(
             session, "codex", "codex", cwd, prefixes, yolo,
             relocate=True, compact_continuation=True,
         )
-        return
-
-    if _use_codex_mobile_mode(provider):
-        action = "fork" if fork else "resume"
-        cmd = _codex_mobile_cmd(action, session_id, yolo=yolo)
-        mode = " (yolo)" if yolo else ""
-        print(
-            f"{action.capitalize()}{mode}ing in {spec.display_name} mobile mode "
-            f"({folder_name(cwd, prefixes)})..."
-        )
-        os.execvp(cmd[0], cmd)
         return
 
     holder = None if fork is False else _session_holder(session_id, spec.binary)
@@ -1385,7 +1401,7 @@ def _continue_in_provider(
     if relocate:
         transcript_path = session.get("path") or ""
         transcript_dir = os.path.dirname(transcript_path) if transcript_path else ""
-        if transcript_dir:
+        if transcript_dir and (source_provider != "codex" or os.path.isfile(transcript_path)):
             extra_dirs = (transcript_dir,)
 
     if target_spec.handoff_via_file:
@@ -1443,19 +1459,14 @@ def _continue_in_provider(
                 "the original opening prompt, then continue the work in this "
                 f"directory.\n\n{import_markdown}"
             )
-    if _use_codex_mobile_mode(target_provider):
-        cmd = _codex_mobile_cmd("start", prompt, yolo=yolo)
-    else:
-        cmd = target_spec.handoff_cmd(import_dir, prompt, yolo, extra_dirs=extra_dirs)
+    cmd = target_spec.handoff_cmd(import_dir, prompt, yolo, extra_dirs=extra_dirs)
     mode = " (yolo)" if yolo else ""
     action = "Re-entering topic" if reenter_topic else (
         "Starting compact continuation" if compact_continuation else "Continuing"
     )
     print(f"{action}{mode} in {target_name} from {folder_name(cwd, prefixes)}...")
-    if not _use_codex_mobile_mode(target_provider):
-        cmd = _board_managed_title_cmd(cmd, target_provider)
-    exec_binary = cmd[0] if _use_codex_mobile_mode(target_provider) else target_spec.binary
-    os.execvp(exec_binary, cmd)
+    cmd = _board_managed_title_cmd(cmd, target_provider)
+    os.execvp(target_spec.binary, cmd)
 
 
 def _open_in_target_provider(

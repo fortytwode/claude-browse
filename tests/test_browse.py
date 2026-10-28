@@ -609,7 +609,7 @@ def test_default_target_provider_supports_dynamic_plugin_shims(monkeypatch):
     assert browse._default_target_provider("/tmp/mystery-browse") == "mystery"
 
 
-def test_native_resume_forks_with_codexmobile_on_mobile_ssh(monkeypatch, tmp_path):
+def test_native_resume_forks_with_codex_inline_mode_on_mobile_ssh(monkeypatch):
     class Tty:
         def isatty(self) -> bool:
             return True
@@ -620,16 +620,15 @@ def test_native_resume_forks_with_codexmobile_on_mobile_ssh(monkeypatch, tmp_pat
         def flush(self) -> None:
             return None
 
-    codexmobile = tmp_path / "codexmobile"
-    codexmobile.write_text("#!/bin/sh\n", encoding="utf-8")
-    codexmobile.chmod(0o755)
     captured: dict[str, object] = {}
 
     monkeypatch.setenv("SSH_CONNECTION", "1 2 3 4")
     monkeypatch.delenv("CODEX_BROWSE_MOBILE_DISABLE", raising=False)
+    monkeypatch.delenv("CODEX_NO_MOBILE", raising=False)
     monkeypatch.setattr(browse.sys, "stdin", Tty())
     monkeypatch.setattr(browse.sys, "stdout", Tty())
-    monkeypatch.setattr(browse, "_codex_mobile_binary", lambda: str(codexmobile))
+    monkeypatch.setattr(browse.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(browse, "_session_holder", lambda *args: None)
 
     def fake_execvp(binary: str, cmd: list[str]) -> None:
         captured["binary"] = binary
@@ -641,8 +640,19 @@ def test_native_resume_forks_with_codexmobile_on_mobile_ssh(monkeypatch, tmp_pat
     with pytest.raises(SystemExit):
         browse._native_resume(_info(provider="codex"), "codex", "abc-123", "/tmp/proj", (), True)
 
-    assert captured["binary"] == str(codexmobile)
-    assert captured["cmd"] == [str(codexmobile), "--yolo", "fork", "abc-123"]
+    assert captured["binary"] == "codex"
+    assert captured["cmd"] == [
+        "codex",
+        "-c",
+        'tui.alternate_screen="always"',
+        "-c",
+        "tui.fullscreen_transcript=true",
+        "-c",
+        "tui.raw_output_mode=false",
+        "fork",
+        "abc-123",
+        "--dangerously-bypass-approvals-and-sandbox",
+    ]
 
 
 def test_native_resume_keeps_codex_native_when_mobile_disabled(monkeypatch):
@@ -671,8 +681,72 @@ def test_native_resume_keeps_codex_native_when_mobile_disabled(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize(
+    ("ssh", "tty", "disabled", "no_mobile", "expected"),
+    [
+        (False, True, False, False, False),
+        (True, False, False, False, False),
+        (True, True, True, False, False),
+        (True, True, False, True, False),
+        (True, True, False, False, True),
+    ],
+)
+def test_codex_inline_mode_requires_mobile_ssh_tty_and_no_disable_flags(
+    monkeypatch, ssh, tty, disabled, no_mobile, expected
+):
+    class Stream:
+        def isatty(self):
+            return tty
+
+    if ssh:
+        monkeypatch.setenv("SSH_CONNECTION", "1 2 3 4")
+    else:
+        monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    if disabled:
+        monkeypatch.setenv("CODEX_BROWSE_MOBILE_DISABLE", "1")
+    else:
+        monkeypatch.delenv("CODEX_BROWSE_MOBILE_DISABLE", raising=False)
+    if no_mobile:
+        monkeypatch.setenv("CODEX_NO_MOBILE", "1")
+    else:
+        monkeypatch.delenv("CODEX_NO_MOBILE", raising=False)
+    monkeypatch.setattr(browse.sys, "stdin", Stream())
+    monkeypatch.setattr(browse.sys, "stdout", Stream())
+
+    assert browse._use_codex_inline_mode("codex") is expected
+    assert browse._use_codex_inline_mode("claude") is False
+
+
+def test_board_title_override_and_codex_inline_option_compose(monkeypatch):
+    class Tty:
+        def isatty(self):
+            return True
+
+    monkeypatch.setenv("SSH_CONNECTION", "1 2 3 4")
+    monkeypatch.delenv("CODEX_BROWSE_MOBILE_DISABLE", raising=False)
+    monkeypatch.delenv("CODEX_NO_MOBILE", raising=False)
+    monkeypatch.setenv("AGENT_BOARD_MANAGED_TERMINAL_TITLE", "1")
+    monkeypatch.setattr(browse.sys, "stdin", Tty())
+    monkeypatch.setattr(browse.sys, "stdout", Tty())
+
+    assert browse._board_managed_title_cmd(["codex", "resume", "abc-123"], "codex") == [
+        "codex",
+        "-c",
+        "tui.terminal_title=[]",
+        "-c",
+        'tui.alternate_screen="always"',
+        "-c",
+        "tui.fullscreen_transcript=true",
+        "-c",
+        "tui.raw_output_mode=false",
+        "resume",
+        "abc-123",
+    ]
+
+
 def test_board_managed_codex_launch_disables_dynamic_terminal_titles(monkeypatch):
     monkeypatch.setenv("AGENT_BOARD_MANAGED_TERMINAL_TITLE", "1")
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
 
     assert browse._board_managed_title_cmd(
         ["codex", "resume", "abc-123"], "codex"
@@ -1504,10 +1578,7 @@ def test_continue_in_provider_from_claude_execs_cursor_with_inline_context(
     assert "Continue the imported Claude session context below." in captured["cmd"][2]
 
 
-def test_continue_in_provider_to_codex_uses_codexmobile_on_mobile_ssh(
-    monkeypatch,
-    tmp_path,
-):
+def test_continue_in_provider_to_codex_uses_native_inline_handoff_with_add_dir(monkeypatch):
     class Tty:
         def isatty(self) -> bool:
             return True
@@ -1518,17 +1589,15 @@ def test_continue_in_provider_to_codex_uses_codexmobile_on_mobile_ssh(
         def flush(self) -> None:
             return None
 
-    session = _info(path="/tmp/session.jsonl")
-    codexmobile = tmp_path / "codexmobile"
-    codexmobile.write_text("#!/bin/sh\n", encoding="utf-8")
-    codexmobile.chmod(0o755)
+    session = _info(path="/archive/client/session.jsonl")
     captured: dict[str, object] = {}
 
     monkeypatch.setenv("SSH_CONNECTION", "1 2 3 4")
     monkeypatch.delenv("CODEX_BROWSE_MOBILE_DISABLE", raising=False)
+    monkeypatch.delenv("CODEX_NO_MOBILE", raising=False)
     monkeypatch.setattr(browse.sys, "stdin", Tty())
     monkeypatch.setattr(browse.sys, "stdout", Tty())
-    monkeypatch.setattr(browse, "_codex_mobile_binary", lambda: str(codexmobile))
+    monkeypatch.setattr(browse.shutil, "which", lambda binary: f"/usr/bin/{binary}")
     monkeypatch.setattr(
         browse,
         "write_import_file",
@@ -1553,11 +1622,25 @@ def test_continue_in_provider_to_codex_uses_codexmobile_on_mobile_ssh(
             (),
             True,
             "",
+            relocate=True,
         )
 
-    assert captured["binary"] == str(codexmobile)
-    assert captured["cmd"][:3] == [str(codexmobile), "--yolo", "start"]
-    assert "Continue the imported Claude session context from" in captured["cmd"][3]
+    assert captured["binary"] == "codex"
+    assert captured["cmd"][:11] == [
+        "codex",
+        "-c",
+        'tui.alternate_screen="always"',
+        "-c",
+        "tui.fullscreen_transcript=true",
+        "-c",
+        "tui.raw_output_mode=false",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--add-dir",
+        "/tmp",
+        "--add-dir",
+    ]
+    assert captured["cmd"][11] == "/archive/client"
+    assert "Continue the imported Claude session context from" in captured["cmd"][-1]
 
 
 def test_continue_in_provider_errors_when_target_binary_missing(monkeypatch):
@@ -1923,6 +2006,7 @@ def test_native_resume_uses_compact_continuation_for_oversized_codex(monkeypatch
     )
     session = _info(provider="codex", path="/tmp/huge.jsonl")
     session["source_size"] = 129 * 1024 * 1024
+    monkeypatch.setattr(browse.os.path, "isfile", lambda path: True)
 
     browse._native_resume(session, "codex", "abc-123", "/proj", (), True)
 
@@ -1930,6 +2014,22 @@ def test_native_resume_uses_compact_continuation_for_oversized_codex(monkeypatch
     assert handoff["kwargs"]["compact_continuation"] is True
     assert handoff["kwargs"]["relocate"] is True
     assert "compact continuation" in capsys.readouterr().out
+
+
+def test_native_resume_missing_codex_rollout_uses_history_continuation(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(browse, "_require_binary", lambda p: None)
+    handoff = {}
+    monkeypatch.setattr(
+        browse, "_continue_in_provider",
+        lambda *args, **kwargs: handoff.update(args=args, kwargs=kwargs),
+    )
+    session = _info(provider="codex", path=str(tmp_path / "removed.jsonl"))
+
+    browse._native_resume(session, "codex", "abc-123", str(tmp_path), (), True)
+
+    assert handoff["args"][:3] == (session, "codex", "codex")
+    assert handoff["kwargs"]["relocate"] is True
+    assert "rollout is missing" in capsys.readouterr().out
 
 
 def test_native_resume_no_fork_flag_skips_collision_check(monkeypatch):

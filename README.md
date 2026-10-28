@@ -88,6 +88,47 @@ claude-browse --no-canonicalize   # accepted for compatibility; canonicalization
 claude-browse --web         # open a local browser tab to read full past transcripts and scan sessions
 ```
 
+### SSH and mobile terminals
+
+Over SSH, `codex-browse` opens the real Codex CLI with
+`tui.alternate_screen="always"`, `tui.fullscreen_transcript=true`, and
+`tui.raw_output_mode=false` (verified with 0.160.0). Codex retains the complete
+transcript and handles terminal mouse-wheel events itself. Compact presentation
+collapses large tool dumps while keeping complete assistant answers reachable.
+The native composer, approvals, and saved threads remain available. This is
+not a natural-language-only filter: short tool previews still appear, and
+assistant Markdown is formatted rather than displayed verbatim.
+
+In an already-open raw session, Alt+R (or `/raw`) switches to compact
+presentation without restarting or interrupting the running task. A native
+read-only check reduced a 24-line tool dump to a four-line preview and kept
+the full assistant answer visible. The launcher checks also replayed every
+sentence of the 40-line test and the earlier tango response sections.
+
+`--no-alt-screen` is deliberately not injected: its partial scrolling regions
+can leave Termius with only the last screenful and no reachable scrollback.
+`/raw` changes presentation, but cannot change the transcript mode of a running
+session. Quit and resume to apply the fullscreen mode. In Codex 0.160.0,
+Page Up/Page Down scroll this viewport; Alt+< / Alt+> (or Ctrl+Home / Ctrl+End)
+jump to its beginning/end. Ctrl+T toggles detailed presentation in place;
+it does not open a pager in this mode. Up recalls prompts, and Ctrl+B does
+not scroll. These bindings were checked against the installed native CLI.
+
+Mouse-wheel replay passing does not establish that a Termius iOS touch swipe
+sends the same input. Ordinary touch scrolling still needs on-device
+verification; do not treat the launch flags alone as proof of swipe support.
+
+For the same behavior when typing `codex` directly, source
+`shell/codex-inline.zsh` from `~/.zshrc`. Local terminals keep their defaults.
+After reconnecting, `codex resume --last` resumes the latest saved thread in
+the current directory; `codex resume` opens the native picker. No tmux setup
+is required for saved conversation recovery.
+
+`CODEX_NO_MOBILE=1` disables the SSH override; `CODEX_BROWSE_MOBILE_DISABLE=1`
+disables it in the browser. Existing `codexmobile` commands are compatibility
+aliases for native Codex's scrollable transcript. `codex-mobile-json` remains an explicit
+legacy transcript tool and is never an automatic fallback.
+
 ### Web viewer
 
 ```bash
