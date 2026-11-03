@@ -96,3 +96,14 @@ direction for higher numbers first. Unnumbered threads stay last within each
 reminder group. Due reminders remain first and future snoozes remain last;
 explicit numeric sorting takes precedence over stars. Editing priority does
 not change the thread's conversation activity time.
+
+## Session folders
+
+Rows show the repository, innermost conversation folder, and current provider
+(Claude or CodeX). Hover the folder to see the full saved path. At the repository
+root the duplicate folder label is omitted.
+
+Reopening an ordinary thread after restarting the board uses its saved session
+folder, including nested paths such as `team-operations/clients/krafton`.
+Switching providers uses the same folder. If you explicitly move a task into a
+list linked to another working directory, that list's destination applies.
