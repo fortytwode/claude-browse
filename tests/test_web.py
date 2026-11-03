@@ -488,14 +488,16 @@ def test_star_and_snooze_patch_persist_without_activity_or_presence_changes(web_
 
     _status, response = _mutate_json(
         base + f"/api/tasks/{task['task_id']}", "PATCH",
-        {"starred": True, "snoozed_until": until},
+        {"starred": True, "snoozed_until": until, "priority_number": 0.1},
     )
     assert response["task"]["starred"] is True
     assert response["task"]["snoozed_until"] == pytest.approx(until)
+    assert response["task"]["priority_number"] == pytest.approx(0.1)
     _status, board = _get_json(base + "/api/board")
     updated = next(row for row in board["tasks"] if row["task_id"] == task["task_id"])
     assert updated["starred"] is True
     assert updated["snoozed_until"] == pytest.approx(until)
+    assert updated["priority_number"] == pytest.approx(0.1)
     assert updated["work_status"] == "active"
     assert updated["terminal_presence"] == prior["terminal_presence"]
     assert updated["last_active_at"] == prior["last_active_at"]
@@ -508,6 +510,8 @@ def test_star_and_snooze_patch_persist_without_activity_or_presence_changes(web_
     for body in (
         {"starred": 1}, {"starred": None}, {"snoozed_until": True},
         {"snoozed_until": "tomorrow"}, {"snoozed_until": float("nan")},
+        {"priority_number": True}, {"priority_number": "0.1"},
+        {"priority_number": -1}, {"priority_number": float("inf")},
     ):
         with pytest.raises(urllib.error.HTTPError) as exc:
             _mutate_json(base + f"/api/tasks/{task['task_id']}", "PATCH", body)
@@ -515,6 +519,8 @@ def test_star_and_snooze_patch_persist_without_activity_or_presence_changes(web_
 
     _mutate_json(base + f"/api/tasks/{task['task_id']}", "PATCH", {"snoozed_until": None})
     assert work_items.get(task["task_id"])["snoozed_until"] is None
+    _mutate_json(base + f"/api/tasks/{task['task_id']}", "PATCH", {"priority_number": None})
+    assert work_items.get(task["task_id"])["priority_number"] is None
 
 
 def test_closed_indexed_task_preferences_keep_activity_and_closed_state(web_server):
@@ -537,6 +543,7 @@ def test_closed_indexed_task_preferences_keep_activity_and_closed_state(web_serv
     after = next(row for row in board["tasks"] if row["task_id"] == task["task_id"])
     assert after["work_status"] == "done"
     assert after["starred"] is True
+    assert after["priority_number"] is None
     assert after["snoozed_until"] == pytest.approx(response["task"]["snoozed_until"])
 
 
@@ -1070,11 +1077,13 @@ def test_history_launch_uses_canonical_task_intent_and_preserves_history(
     work_items.mutate(
         task["task_id"], starred=True,
         snoozed_until=datetime.now().timestamp() + 3600,
+        priority_number=0.1,
     )
     workspace.move_task(task["task_id"], listing["list_key"], task["project_key"])
     moved = work_items.get(task["task_id"])
     assert moved["starred"] is True
     assert moved["snoozed_until"] is not None
+    assert moved["priority_number"] == pytest.approx(0.1)
     monkeypatch.setattr(web, "_provider_available", lambda _provider: True)
     monkeypatch.setattr(web.launches, "_available", lambda _provider: True)
     opened = []

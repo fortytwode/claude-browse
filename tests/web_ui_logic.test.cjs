@@ -93,6 +93,10 @@ class FakeElement {
     return null;
   }
   focus() { this._documentFor().activeElement = this; }
+  blur() {
+    this.blurred = true;
+    if (this._documentFor().activeElement === this) this._documentFor().activeElement = null;
+  }
   select() {}
   showModal() { this.open = true; }
   close() { this.open = false; }
@@ -836,6 +840,28 @@ test("filter popover closes on outside click and stays open inside", () => {
   assert.equal(popover.open, true);
   api.closeFilterPopover({ target: document.createElement("div") });
   assert.equal(popover.open, false);
+});
+
+test("Sort and Filters popovers both dismiss on outside click and Escape", () => {
+  const { api, document, elementFor } = loadApp({ initialize: true });
+  const sort = elementFor("sort-popover"), filters = elementFor("filter-popover");
+  sort.className = filters.className = "popover";
+  sort.open = filters.open = true;
+  const insideSort = document.createElement("button");
+  sort.appendChild(insideSort);
+  document.dispatch("click", { target: insideSort });
+  assert.equal(sort.open, true, "clicking inside Sort keeps it open");
+  assert.equal(filters.open, false, "the unrelated Filters popover closes");
+
+  sort.open = filters.open = true;
+  document.dispatch("click", { target: document.createElement("button") });
+  assert.equal(sort.open, false);
+  assert.equal(filters.open, false);
+
+  sort.open = filters.open = true;
+  document.dispatch("keydown", { key: "Escape" });
+  assert.equal(sort.open, false);
+  assert.equal(filters.open, false);
 });
 
 test("lifecycle status intersects Today and retains the selected List", () => {
@@ -1603,6 +1629,21 @@ test("a completed older snooze save does not close or overwrite a newer snooze d
   assert.equal(elementFor("snooze-time").value, newerInputValue);
 });
 
+test("snooze dialog X closes without saving its edited time", () => {
+  const requests = [];
+  const { api, elementFor } = loadApp({ desktop: true, fetchImpl: (url, options) => {
+    requests.push({ url, options });
+    return Promise.resolve({ ok: true, json: async () => ({ task: activeTask() }) });
+  }});
+  const row = api.renderDesktopThread(activeTask());
+  findByClass(row, "desktop-thread-snooze").click();
+  const dialog = elementFor("snooze-dialog");
+  elementFor("snooze-time").value = "2030-01-02T12:15";
+  findByClass(dialog, "snooze-close").click();
+  assert.equal(dialog.open, false);
+  assert.equal(requests.length, 0);
+});
+
 test("clearing a snooze PATCHes a null reminder", async () => {
   const now = Date.UTC(2026, 10, 3, 12, 0, 0) / 1000;
   const requests = [];
@@ -1687,6 +1728,128 @@ test("compact defaults to latest activity in Open, All threads and Today", () =>
     assert.equal(api.getState().sortDirection, "desc");
     assert.ok(api.taskComparator(activeTask({ last_active_at: 20, last_activity_at: 1 }), activeTask({ last_active_at: 10, last_activity_at: 100 })) < 0);
   }
+});
+
+test("desktop priority-number sorting handles decimals, missing values in either direction, and priority buckets", () => {
+  const now = Date.UTC(2026, 10, 3, 12) / 1000;
+  const { api } = loadApp({ desktop: true, DateImpl: fixedDate(now * 1000) });
+  api.setState({ sortBy: "priority_number", sortDirection: "asc" });
+  const items = [
+    activeTask({ task_id: "missing-null", priority_number: null }),
+    activeTask({ task_id: "starred-nine", priority_number: 9, starred: true }),
+    activeTask({ task_id: "decimal", priority_number: 2.5 }),
+    activeTask({ task_id: "due", priority_number: 50, snoozed_until: now - 1 }),
+    activeTask({ task_id: "one", priority_number: 1 }),
+    activeTask({ task_id: "future-snooze", priority_number: 0, snoozed_until: now + 60 }),
+    activeTask({ task_id: "missing-undefined" }),
+  ];
+  assert.deepEqual(items.slice().sort(api.taskComparator).map((task) => task.task_id), [
+    "due", "one", "decimal", "starred-nine", "missing-null", "missing-undefined", "future-snooze",
+  ]);
+  api.setState({ sortDirection: "desc" });
+  assert.deepEqual(items.slice().sort(api.taskComparator).map((task) => task.task_id), [
+    "due", "starred-nine", "decimal", "one", "missing-null", "missing-undefined", "future-snooze",
+  ]);
+});
+
+test("desktop priority-number edits persist decimals, reject invalid values, and restore on failure", async () => {
+  const requests = [];
+  const task = activeTask({ priority_number: 4 });
+  const { api, elementFor } = loadApp({ desktop: true, fetchImpl: (url, options) => {
+    requests.push({ url, method: options.method, body: JSON.parse(options.body) });
+    if (requests.length === 1)
+      return Promise.resolve({ ok: true, json: async () => ({ task: { ...task, priority_number: requests[0].body.priority_number } }) });
+    return Promise.resolve({ ok: false, json: async () => ({ error: "Priority save failed" }) });
+  }});
+  api.setState({ latestBoard: { tasks: [task], projects: [], folders: [] } });
+  const row = api.renderDesktopThread(task);
+  const input = findByClass(row, "desktop-thread-priority");
+
+  input.value = "-0.25";
+  input.dispatch("change");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 0);
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+
+  input.value = "2.75";
+  input.dispatch("change");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "/api/tasks/task-1");
+  assert.equal(requests[0].method, "PATCH");
+  assert.equal(requests[0].body.priority_number, 2.75);
+  assert.equal(task.priority_number, 2.75);
+
+  input.value = "3.5";
+  input.dispatch("change");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 2);
+  assert.equal(task.priority_number, 2.75);
+  assert.equal(input.value, "2.75");
+  assert.match(elementFor("toast").textContent, /Priority save failed/);
+});
+
+test("a completed star save preserves a different focused priority draft", async () => {
+  let resolveSave;
+  const first = activeTask({ task_id: "first", title: "First", terminal_presence: "open", starred: false });
+  const second = activeTask({ task_id: "second", title: "Second", terminal_presence: "open", priority_number: 3 });
+  const board = { tasks: [first, second], projects: [], folders: [] };
+  const { api, document } = loadApp({ desktop: true, fetchImpl: () => new Promise((resolve) => { resolveSave = resolve; }) });
+  api.setState({ latestBoard: board });
+  api.renderBoard(board);
+  const rows = findAllByClass(document.getElementById("task-groups"), "desktop-thread");
+  const firstRow = rows.find((row) => findByClass(row, "desktop-thread-name").textContent === "First");
+  const secondRow = rows.find((row) => findByClass(row, "desktop-thread-name").textContent === "Second");
+  findByClass(firstRow, "desktop-thread-star").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof resolveSave, "function", "the star PATCH is in flight");
+
+  const priorityInput = findByClass(secondRow, "desktop-thread-priority");
+  priorityInput.focus();
+  priorityInput.value = "unfinished 8.25";
+  resolveSave({ ok: true, json: async () => ({ task: { ...first, starred: true } }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(findByClass(document.getElementById("task-groups"), "desktop-thread"), rows[0]);
+  assert.equal(findByClass(secondRow, "desktop-thread-priority"), priorityInput);
+  assert.equal(document.activeElement, priorityInput);
+  assert.equal(priorityInput.value, "unfinished 8.25");
+});
+
+test("desktop priority-number edit keeps focused input draft through a board refresh, and Enter blurs", async () => {
+  const task = activeTask({ priority_number: 6, terminal_presence: "open" });
+  const board = { tasks: [task], projects: [], folders: [] };
+  const { api, document } = loadApp({ desktop: true, fetchImpl: () => Promise.resolve({ ok: true, json: async () => board }) });
+  api.setState({ latestBoard: board });
+  api.renderBoard(board);
+  const input = findByClass(document.getElementById("task-groups"), "desktop-thread-priority");
+  input.focus();
+  input.value = "6.25";
+  await api.fetchBoard(true);
+  assert.equal(input.value, "6.25");
+  assert.equal(document.activeElement, input);
+  input.dispatch("keydown", { key: "Enter", preventDefault() {} });
+  assert.equal(input.blurred, true);
+  assert.equal(document.activeElement, null);
+});
+
+test("desktop sort preference restores per scope and defaults to latest updated otherwise", () => {
+  const values = new Map();
+  const storage = { getItem: (key) => values.get(key) || null, setItem: (key, value) => values.set(key, value) };
+  const { api } = loadApp({ desktop: true, storage });
+  api.setState({ queueMode: "open", sortBy: "priority_number", sortDirection: "desc" });
+  api.storeViewSettings();
+  api.setState({ queueMode: "all", sortBy: "updated", sortDirection: "desc" });
+  api.storeViewSettings();
+  api.setState({ queueMode: "open" });
+  api.restoreViewSettings();
+  assert.equal(api.getState().sortBy, "priority_number");
+  assert.equal(api.getState().sortDirection, "desc");
+  api.setState({ queueMode: "today" });
+  api.restoreViewSettings();
+  assert.equal(api.getState().sortBy, "updated");
+  assert.equal(api.getState().sortDirection, "desc");
 });
 
 test("compact thread displays repo beneath the title with the actual root as tooltip", () => {

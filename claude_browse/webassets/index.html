@@ -154,6 +154,10 @@
                 autocomplete="off"
               />
             </div>
+            <details id="sort-popover" class="popover desktop-sort">
+              <summary>Sort</summary>
+              <div class="popover-panel"></div>
+            </details>
             <details id="filter-popover" class="popover">
               <summary id="filter-summary">Filters</summary>
               <div class="popover-panel">
@@ -241,13 +245,14 @@
               </select></label
             ><label
               >Sort<select id="sort-by">
-                <option value="manual">Manual</option>
+                <option value="updated">Latest updated</option>
+                <option value="priority_number">Priority number</option>
                 <option value="name">Name</option>
-                <option value="updated">Last update</option>
+                <option value="priority">Priority level</option>
                 <option value="due">Due date</option>
-                <option value="priority">Priority</option>
                 <option value="terminal">Terminal state</option>
                 <option value="agent">Agent</option>
+                <option value="manual">Manual</option>
               </select></label
             ><button id="sort-direction" class="sort-direction" type="button" aria-label="Sort descending">↓ Newest first</button>
           </div>

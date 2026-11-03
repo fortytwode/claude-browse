@@ -85,3 +85,14 @@ renaming is tested with isolated metadata and API fixtures; real user threads
 are not renamed as test data. Automated coverage includes stale process IDs,
 subagents, ambiguous writers, missing history, HTTP mutation guards, backend
 shutdown, shell arguments, and rename synchronization failures.
+
+## Sorting and numeric priority
+
+Filters and Sort are separate buttons beside search. Latest updated remains
+the default. Enter an optional priority number in each identified thread's
+`#` field; decimals such as `0.1` work, and clearing the field removes the number.
+Choose **Sort → Priority number** for lower numbers first, or reverse the
+direction for higher numbers first. Unnumbered threads stay last within each
+reminder group. Due reminders remain first and future snoozes remain last;
+explicit numeric sorting takes precedence over stars. Editing priority does
+not change the thread's conversation activity time.

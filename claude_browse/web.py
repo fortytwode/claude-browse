@@ -289,7 +289,8 @@ class _Handler(BaseHTTPRequestHandler):
                 edit_client = body.pop("_edit_client", None)
                 edit_revision = body.pop("_edit_revision", None)
                 unknown = set(body) - {
-                    "title", "status", "due_date", "priority", "starred", "snoozed_until"
+                    "title", "status", "due_date", "priority", "starred", "snoozed_until",
+                    "priority_number",
                 }
                 if unknown:
                     raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
