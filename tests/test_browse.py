@@ -673,10 +673,11 @@ def test_native_resume_keeps_codex_native_when_mobile_disabled(monkeypatch):
 
 def test_board_managed_codex_launch_disables_dynamic_terminal_titles(monkeypatch):
     monkeypatch.setenv("AGENT_BOARD_MANAGED_TERMINAL_TITLE", "1")
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
 
     assert browse._board_managed_title_cmd(
         ["codex", "resume", "abc-123"], "codex"
-    ) == ["codex", "-c", "tui.terminal_title=[]", "resume", "abc-123"]
+    ) == ["codex", "-c", "tui.terminal_title=[]", "--no-daemon", "resume", "abc-123"]
     assert browse._board_managed_title_cmd(["claude", "--resume", "abc-123"], "claude") == [
         "claude", "--resume", "abc-123"
     ]
@@ -1899,7 +1900,7 @@ def test_native_resume_forks_when_thread_already_open(monkeypatch, capsys):
 
     browse._native_resume({}, "codex", "abc-123", "/proj", (), True)
 
-    assert execd and execd[0][:3] == ["codex", "fork", "abc-123"]
+    assert execd and execd[0][:4] == ["codex", "--no-daemon", "fork", "abc-123"]
     assert "already open in ttys010" in capsys.readouterr().out
 
 
@@ -1911,7 +1912,7 @@ def test_native_resume_forks_by_default_even_without_collision(monkeypatch):
 
     browse._native_resume({}, "codex", "abc-123", "/proj", (), True)
 
-    assert execd and execd[0][:3] == ["codex", "fork", "abc-123"]
+    assert execd and execd[0][:4] == ["codex", "--no-daemon", "fork", "abc-123"]
 
 
 def test_native_resume_uses_compact_continuation_for_oversized_codex(monkeypatch, capsys):
@@ -1954,7 +1955,7 @@ def test_native_resume_no_fork_flag_skips_collision_check(monkeypatch):
     browse._native_resume({}, "codex", "abc-123", "/proj", (), True, fork=False)
 
     assert not called
-    assert execd and execd[0][:3] == ["codex", "resume", "abc-123"]
+    assert execd and execd[0][:4] == ["codex", "--no-daemon", "resume", "abc-123"]
 
 
 def test_native_resume_forks_when_an_attach_launch_is_already_reserved(monkeypatch):
@@ -1970,7 +1971,7 @@ def test_native_resume_forks_when_an_attach_launch_is_already_reserved(monkeypat
 
     browse._native_resume({}, "codex", "abc-123", "/proj", (), True, fork=None)
 
-    assert execd and execd[0][:3] == ["codex", "fork", "abc-123"]
+    assert execd and execd[0][:4] == ["codex", "--no-daemon", "fork", "abc-123"]
 
 
 def test_native_fork_does_not_acquire_attach_reservation(monkeypatch):

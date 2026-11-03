@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_browse.board import commands, hook, projects, store, sync, work_items
+from claude_browse.board import commands, hook, projects, store, sync, terminal_bindings, work_items
 
 
 @pytest.fixture(autouse=True)
@@ -527,6 +527,9 @@ def test_automatic_capture_is_content_agnostic_concurrent_and_does_not_run_git(
 ):
     nested = tmp_path / "repo" / "nested"
     nested.mkdir(parents=True)
+    # Process proof has separate tests; task capture itself still performs no
+    # git discovery or content-based naming in this concurrent hook path.
+    monkeypatch.setattr(terminal_bindings, "record_hook", lambda *_args: False)
     monkeypatch.setattr(
         projects.subprocess,
         "run",

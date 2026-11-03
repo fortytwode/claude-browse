@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from claude_browse.board import terminal_focus
 
 
@@ -171,20 +173,26 @@ def test_set_session_title_reports_a_disappearing_verified_tab(monkeypatch):
     }
 
 
-def test_set_session_title_warns_for_an_existing_unmanaged_codex_terminal(monkeypatch):
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+@pytest.mark.parametrize("row", [None, {"terminal_title_managed": 0}])
+def test_set_session_title_updates_verified_existing_unmanaged_terminal(monkeypatch, provider, row):
+    calls = []
     monkeypatch.setattr(
-        terminal_focus.store, "get", lambda _session_id: {"terminal_title_managed": 0}
+        terminal_focus.store, "get", lambda _session_id: row
     )
     monkeypatch.setattr(
         terminal_focus.presence,
         "verified_terminal_tty",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("must not inspect Terminal")),
+        lambda session_id, actual_provider: ("ttys004", "")
+        if (session_id, actual_provider) == ("session-id", provider) else (None, "No proof"),
+    )
+    monkeypatch.setattr(
+        terminal_focus.subprocess, "run",
+        lambda argv, **_kwargs: calls.append(argv)
+        or SimpleNamespace(returncode=0, stdout="updated\n"),
     )
 
-    assert terminal_focus.set_session_title("session-id", "codex", "Renamed") == {
-        "updated": False,
-        "reason": (
-            "This terminal was opened before managed titles were enabled. "
-            "Reopen it through Agent Board to use its saved title."
-        ),
+    assert terminal_focus.set_session_title("session-id", provider, "Renamed") == {
+        "updated": True, "reason": "",
     }
+    assert calls[0][-3:] == ["--", "ttys004", "Renamed"]

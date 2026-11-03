@@ -26,18 +26,19 @@ def test_broken_daemon_socket_uses_private_server(endpoint, capsys):
     assert "active sessions" in capsys.readouterr().err
 
 
-def test_missing_endpoint_keeps_normal_daemon_startup(endpoint):
+def test_missing_endpoint_uses_terminal_owned_local_session(endpoint, capsys):
     command = ["codex", "resume", "saved-thread"]
-    assert browse._board_managed_title_cmd(command, "codex") == command
+    assert browse._board_managed_title_cmd(command, "codex") == ["codex", "--no-daemon", *command[1:]]
+    assert "socket is missing" not in capsys.readouterr().err
 
 
-def test_working_daemon_symlink_is_unchanged(endpoint):
+def test_working_daemon_symlink_still_uses_terminal_owned_local_session(endpoint):
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="cb-") as directory, socket.socket(socket.AF_UNIX) as server:
         target = Path(directory) / "live.sock"
         server.bind(str(target))
         endpoint.symlink_to(target)
         command = ["codex", "resume", "saved-thread"]
-        assert browse._board_managed_title_cmd(command, "codex") == command
+        assert browse._board_managed_title_cmd(command, "codex") == ["codex", "--no-daemon", *command[1:]]
 
 
 @pytest.mark.parametrize("options", [["--no-daemon"], ["--remote", "unix://elsewhere"], ["--remote=unix://elsewhere"]])

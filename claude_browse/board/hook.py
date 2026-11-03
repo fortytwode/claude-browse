@@ -257,6 +257,10 @@ def dispatch(payload: dict, provider: str = store.DEFAULT_PROVIDER) -> bool:
     session_id = payload.get("session_id")
     if not session_id:
         return False
+    if event in {"SessionStart", "UserPromptSubmit"}:
+        from claude_browse.board import terminal_bindings
+
+        terminal_bindings.record_hook(payload, provider)
     cwd = payload.get("cwd")
     row = store.get(session_id)
     model_id = _model_id(payload, row)

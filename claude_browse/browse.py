@@ -1193,6 +1193,14 @@ def _board_managed_title_cmd(cmd: list[str], provider: str) -> list[str]:
     """Disable Codex's OSC title producer for a Board-managed process only."""
     if provider == "codex":
         cmd = _codex_daemon_fallback_cmd(cmd)
+        # Keep local interactive launches in their terminal process so Agent
+        # Board can associate each session with the terminal that started it.
+        # SSH and explicit remote/daemon choices retain their selected backend.
+        if not os.environ.get("SSH_CONNECTION") and not any(
+            arg in ("--no-daemon", "--remote") or arg.startswith("--remote=")
+            for arg in cmd[1:]
+        ):
+            cmd = [cmd[0], "--no-daemon", *cmd[1:]]
     if (
         provider == "codex"
         and os.environ.get("AGENT_BOARD_MANAGED_TERMINAL_TITLE") == "1"
