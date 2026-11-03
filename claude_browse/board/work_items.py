@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sqlite3
 import threading
@@ -42,7 +43,9 @@ CREATE TABLE IF NOT EXISTS work_items (
     session_cwd      TEXT,
     priority         TEXT NOT NULL DEFAULT 'normal',
     position         INTEGER NOT NULL,
-    project_resolved INTEGER NOT NULL DEFAULT 0
+    project_resolved INTEGER NOT NULL DEFAULT 0,
+    starred         INTEGER NOT NULL DEFAULT 0,
+    snoozed_until   REAL
 )
 """
 
@@ -302,8 +305,46 @@ def _conn():
         _migrate_overlay(conn)
         _migrate_planning(conn)
         _migrate_sidebar(conn)
+        _migrate_task_preferences(conn)
         _ensure_planning_schema(conn)
     return conn
+
+
+def _migrate_task_preferences(conn: sqlite3.Connection) -> None:
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(work_items)").fetchall()
+    }
+    if {"starred", "snoozed_until"} <= columns:
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Another process may have completed the additive migration after the
+        # optimistic check, so recheck only after reserving the writer.
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(work_items)").fetchall()
+        }
+        if {"starred", "snoozed_until"} <= columns:
+            conn.commit()
+            return
+        if "starred" not in columns:
+            conn.execute(
+                "ALTER TABLE work_items ADD COLUMN starred INTEGER NOT NULL DEFAULT 0"
+            )
+        if "snoozed_until" not in columns:
+            conn.execute("ALTER TABLE work_items ADD COLUMN snoozed_until REAL")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _task_record(row) -> dict:
+    task = dict(row)
+    task["starred"] = bool(task.get("starred", False))
+    task["snoozed_until"] = (
+        float(task["snoozed_until"]) if task.get("snoozed_until") is not None else None
+    )
+    return task
 
 
 def _text(value: object, field: str, *, limit: int, required: bool = False) -> str:
@@ -467,7 +508,7 @@ def _ensure_for_session(
         (session_id, result["task_id"], provider, cwd, now),
     )
     _ensure_project_setting(conn, result["project_key"])
-    return dict(result)
+    return _task_record(result)
 
 
 def capture_discovered_session(session_id: str) -> bool:
@@ -614,7 +655,7 @@ def get(task_id: str) -> dict | None:
         row = conn.execute(
             "SELECT * FROM work_items WHERE task_id = ?", (task_id,)
         ).fetchone()
-    return dict(row) if row is not None else None
+    return _task_record(row) if row is not None else None
 
 
 def get_for_session(session_id: str) -> dict | None:
@@ -626,7 +667,7 @@ def get_for_session(session_id: str) -> dict | None:
                LIMIT 1""",
             (session_id, session_id),
         ).fetchone()
-    return dict(row) if row is not None else None
+    return _task_record(row) if row is not None else None
 
 
 def attach_continuation(
@@ -692,7 +733,7 @@ def attach_continuation(
             (new_session_id, provider, cwd, now, key),
         )
         result = conn.execute("SELECT * FROM work_items WHERE task_id = ?", (key,)).fetchone()
-    return dict(result)
+    return _task_record(result)
 
 
 def get_session_history(task_id: str) -> list[dict]:
@@ -754,7 +795,7 @@ def list_items(*, include_done: bool = False) -> list[dict]:
                   position,
                   task_id"""
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [_task_record(row) for row in rows]
 
 
 def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
@@ -763,7 +804,7 @@ def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
     The returned session id is publication work for the caller to start only
     after this function's transaction has committed.
     """
-    allowed = {"title", "status", "due_date", "priority"}
+    allowed = {"title", "status", "due_date", "priority", "starred", "snoozed_until"}
     unknown = set(changes) - allowed
     if unknown:
         raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
@@ -784,7 +825,28 @@ def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
         values["due_date_source"] = "manual"
     if "priority" in changes:
         values["priority"] = _priority(changes["priority"])
-    values["updated_at"] = time.time()
+    if "starred" in changes:
+        if type(changes["starred"]) is not bool:
+            raise ValueError("starred must be a boolean")
+        values["starred"] = int(changes["starred"])
+    if "snoozed_until" in changes:
+        snoozed_until = changes["snoozed_until"]
+        if snoozed_until is not None:
+            try:
+                timestamp = float(snoozed_until)
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError(
+                    "snoozed_until must be a finite timestamp or null"
+                ) from None
+            if isinstance(snoozed_until, bool) or not isinstance(
+                snoozed_until, (int, float)
+            ) or not math.isfinite(timestamp):
+                raise ValueError("snoozed_until must be a finite timestamp or null")
+        else:
+            timestamp = None
+        values["snoozed_until"] = timestamp
+    if {"title", "status", "due_date", "priority"} & changes.keys():
+        values["updated_at"] = time.time()
 
     assignments = ", ".join(f"{field} = ?" for field in values)
     publish_session: str | None = None
@@ -835,7 +897,7 @@ def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
         result = conn.execute(
             "SELECT * FROM work_items WHERE task_id = ?", (task_id,)
         ).fetchone()
-    return (dict(result) if result is not None else None), publish_session
+    return (_task_record(result) if result is not None else None), publish_session
 
 
 def finish_turn(
@@ -920,7 +982,7 @@ def reorder_tasks(
         result = conn.execute(
             f"SELECT * FROM work_items WHERE task_id IN ({placeholders})", ids
         ).fetchall()
-    result_by_id = {row["task_id"]: dict(row) for row in result}
+    result_by_id = {row["task_id"]: _task_record(row) for row in result}
     return [result_by_id[task_id] for task_id in ids]
 
 

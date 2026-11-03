@@ -4,6 +4,18 @@ A compact macOS menu-bar app for the existing local Agent Board. It shows a
 scrollable thread list with repo names, status, search, filters, and Claude and
 CodeX actions. Open terminals, All threads, and Today default to latest activity.
 
+Each identified thread shows its last conversation activity, a star, and a snooze
+clock. Stars move threads above ordinary entries. Snooze offers 15 minutes,
+one hour, three hours, tomorrow at 9am, or a local date and time.
+
+Future snoozes move to the bottom. If their terminal closes, they remain in
+All threads until the reminder is due, then return to Open terminals and Today
+with a **Reminder due** label and their actual terminal status. This does not
+launch a terminal. Due reminders appear above starred threads until dismissed
+or snoozed again. Preferences survive app restarts; reminders refresh with the
+board while it is running and appear on reopening if their time has passed.
+Completed and archived tasks do not resurface as reminders.
+
 ## Install and run
 
 From a checkout with the Python package available:

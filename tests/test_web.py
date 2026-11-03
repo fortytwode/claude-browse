@@ -475,6 +475,71 @@ def test_automatic_thread_update_and_board_roundtrip(web_server):
     assert [item["title"] for item in board["tasks"]] == ["Ship it"]
 
 
+def test_star_and_snooze_patch_persist_without_activity_or_presence_changes(web_server):
+    base, _server = web_server
+    task = _board_thread("task-preferences", cwd="/w/home")
+    store.upsert("task-preferences", working_since=1_700_000_000.0, paused_at=1_700_000_100.0)
+    index_conn = fts.open_db()
+    _seed(index_conn, "task-preferences", cwd="/w/home")
+    index_conn.close()
+    _status, before = _get_json(base + "/api/board")
+    prior = next(row for row in before["tasks"] if row["task_id"] == task["task_id"])
+    until = datetime.now().timestamp() + 7200
+
+    _status, response = _mutate_json(
+        base + f"/api/tasks/{task['task_id']}", "PATCH",
+        {"starred": True, "snoozed_until": until},
+    )
+    assert response["task"]["starred"] is True
+    assert response["task"]["snoozed_until"] == pytest.approx(until)
+    _status, board = _get_json(base + "/api/board")
+    updated = next(row for row in board["tasks"] if row["task_id"] == task["task_id"])
+    assert updated["starred"] is True
+    assert updated["snoozed_until"] == pytest.approx(until)
+    assert updated["work_status"] == "active"
+    assert updated["terminal_presence"] == prior["terminal_presence"]
+    assert updated["last_active_at"] == prior["last_active_at"]
+    assert updated["last_activity_at"] == prior["last_activity_at"]
+    assert updated["sort_key"] == prior["sort_key"]
+    assert response["task"]["last_active_at"] == prior["last_active_at"]
+    assert response["task"]["last_activity_at"] == prior["last_activity_at"]
+    assert [row["task_id"] for row in work_items.list_items()] == [task["task_id"]]
+
+    for body in (
+        {"starred": 1}, {"starred": None}, {"snoozed_until": True},
+        {"snoozed_until": "tomorrow"}, {"snoozed_until": float("nan")},
+    ):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _mutate_json(base + f"/api/tasks/{task['task_id']}", "PATCH", body)
+        assert exc.value.code == 400
+
+    _mutate_json(base + f"/api/tasks/{task['task_id']}", "PATCH", {"snoozed_until": None})
+    assert work_items.get(task["task_id"])["snoozed_until"] is None
+
+
+def test_closed_indexed_task_preferences_keep_activity_and_closed_state(web_server):
+    base, _server = web_server
+    task = _board_thread("closed-preferences", cwd="/w/home")
+    index_conn = fts.open_db()
+    _seed(index_conn, "closed-preferences", cwd="/w/home")
+    index_conn.close()
+    work_items.mutate(task["task_id"], status="done")
+    _, board = _get_json(base + "/api/board")
+    before = next(row for row in board["tasks"] if row["task_id"] == task["task_id"])
+
+    _, response = _mutate_json(
+        base + f"/api/tasks/{task['task_id']}", "PATCH",
+        {"starred": True, "snoozed_until": datetime.now().timestamp() + 3600},
+    )
+    assert response["task"]["work_status"] == "done"
+    assert response["task"]["last_active_at"] == before["last_active_at"]
+    _, board = _get_json(base + "/api/board")
+    after = next(row for row in board["tasks"] if row["task_id"] == task["task_id"])
+    assert after["work_status"] == "done"
+    assert after["starred"] is True
+    assert after["snoozed_until"] == pytest.approx(response["task"]["snoozed_until"])
+
+
 def test_board_search_matches_full_history_from_an_earlier_continuation(web_server):
     base, _server = web_server
     conn = fts.open_db(fts.DB_PATH)
@@ -1002,7 +1067,14 @@ def test_history_launch_uses_canonical_task_intent_and_preserves_history(
     task = work_items.ensure_for_session(store.get("home1"))
     space = workspace.snapshot()["spaces"][0]
     listing = workspace.create_list("Destination", space["space_id"], working_directory=str(destination))
+    work_items.mutate(
+        task["task_id"], starred=True,
+        snoozed_until=datetime.now().timestamp() + 3600,
+    )
     workspace.move_task(task["task_id"], listing["list_key"], task["project_key"])
+    moved = work_items.get(task["task_id"])
+    assert moved["starred"] is True
+    assert moved["snoozed_until"] is not None
     monkeypatch.setattr(web, "_provider_available", lambda _provider: True)
     monkeypatch.setattr(web.launches, "_available", lambda _provider: True)
     opened = []

@@ -94,8 +94,8 @@ class FakeElement {
   }
   focus() { this._documentFor().activeElement = this; }
   select() {}
-  showModal() {}
-  close() {}
+  showModal() { this.open = true; }
+  close() { this.open = false; }
 }
 
 function matchesSelector(node, selector) {
@@ -211,6 +211,10 @@ globalThis.testApi = {
   isDueTodayOrOverdue,
   renderTaskRow,
   renderDesktopThread,
+  activityAge,
+  reminderDue,
+  localDateTimeValue,
+  openSnooze,
   renderTurnBody,
   moveProject,
   workspacePosition,
@@ -1458,6 +1462,191 @@ test("compact list distinguishes unknown terminal presence from closed", () => {
   const { api } = loadApp();
   const row = api.renderDesktopThread(activeTask({ terminal_presence: "unknown" }));
   assert.equal(findByClass(row, "desktop-thread-status").textContent, "Unknown");
+});
+
+test("desktop activity age uses conversation activity and handles future and missing timestamps", () => {
+  const now = Date.UTC(2026, 10, 3, 12, 0, 0);
+  const { api } = loadApp({ desktop: true, DateImpl: fixedDate(now) });
+  const nowSeconds = now / 1000;
+  assert.equal(api.activityAge(activeTask({ last_active_at: nowSeconds - 30 })), "Updated just now");
+  assert.equal(api.activityAge(activeTask({ last_active_at: nowSeconds - 59 * 60 })), "Updated 59 min ago");
+  assert.equal(api.activityAge(activeTask({ last_active_at: nowSeconds - 3 * 3600 })), "Updated 3h ago");
+  assert.equal(api.activityAge(activeTask({ last_active_at: nowSeconds - 2 * 86400 })), "Updated 2d ago");
+  assert.equal(api.activityAge(activeTask({ last_active_at: nowSeconds + 60 })), "Updated just now");
+  assert.equal(api.activityAge(activeTask({})), "Update time unknown");
+});
+
+test("desktop ordering puts due reminders first, starred next, and future snoozes last", () => {
+  const now = Date.UTC(2026, 10, 3, 12) / 1000;
+  const { api } = loadApp({ desktop: true, DateImpl: fixedDate(now * 1000) });
+  api.setState({ sortBy: "updated", sortDirection: "desc" });
+  const tasks = [
+    activeTask({ task_id: "snoozed", snoozed_until: now + 3600 }),
+    activeTask({ task_id: "plain" }),
+    activeTask({ task_id: "starred", starred: true }),
+    activeTask({ task_id: "due", snoozed_until: now - 60 }),
+  ];
+  assert.deepEqual(tasks.sort(api.taskComparator).map((task) => task.task_id), ["due", "starred", "plain", "snoozed"]);
+  assert.equal(api.reminderDue(tasks[0]), true);
+});
+
+test("closed threads enter Open only when their snooze reminder is due, and done or archived reminders stay out", () => {
+  const now = Date.UTC(2026, 10, 3, 12) / 1000;
+  const { api } = loadApp({ desktop: true, DateImpl: fixedDate(now * 1000) });
+  api.setState({ queueMode: "open", statusFilter: "active" });
+  const closedFuture = activeTask({ terminal_presence: "closed", snoozed_until: now + 60 });
+  const closedDue = activeTask({ terminal_presence: "closed", snoozed_until: now - 60 });
+  const doneDue = activeTask({ terminal_presence: "closed", work_status: "done", snoozed_until: now - 60 });
+  const archivedDue = activeTask({ terminal_presence: "closed", work_status: "archived", snoozed_until: now - 60 });
+  assert.equal(api.taskMatches(closedFuture), false);
+  assert.equal(api.taskMatches(closedDue), true);
+  api.setState({ queueMode: "today" });
+  assert.equal(api.taskMatches(closedDue), true, "a due reminder is shown in Today");
+  assert.equal(api.taskMatches(doneDue), false);
+  assert.equal(api.taskMatches(archivedDue), false);
+  assert.equal(api.reminderDue(doneDue), false);
+  assert.equal(api.reminderDue(archivedDue), false);
+});
+
+test("due reminder row says Reminder due today and terminal presence remains truthful", () => {
+  const now = Date.UTC(2026, 10, 3, 12) / 1000;
+  const { api } = loadApp({ desktop: true, DateImpl: fixedDate(now * 1000) });
+  const row = api.renderDesktopThread(activeTask({ terminal_presence: "closed", terminal_runtime_state: "working", snoozed_until: now - 1 }));
+  assert.equal(findByClass(row, "desktop-thread-status").textContent, "Closed");
+  assert.equal(findByClass(row, "desktop-thread-reminder").textContent, "Reminder due");
+  const openRow = api.renderDesktopThread(activeTask({ terminal_presence: "open", terminal_runtime_state: "working" }));
+  assert.equal(findByClass(openRow, "desktop-thread-status").textContent, "Working");
+  const unknownRow = api.renderDesktopThread(activeTask({ terminal_presence: "unknown", terminal_runtime_state: "working" }));
+  assert.equal(findByClass(unknownRow, "desktop-thread-status").textContent, "Unknown");
+});
+
+test("desktop star action PATCHes the starred preference", async () => {
+  const requests = [];
+  const task = activeTask({ starred: false });
+  const { api } = loadApp({ desktop: true, fetchImpl: (url, options) => {
+    requests.push({ url, method: options.method, body: JSON.parse(options.body) });
+    return Promise.resolve({ ok: true, json: async () => ({ task: { ...task, starred: requests.at(-1).body.starred } }) });
+  }});
+  api.setState({ latestBoard: { tasks: [task], projects: [], folders: [] } });
+  const row = api.renderDesktopThread(task);
+  findByClass(row, "desktop-thread-star").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "/api/tasks/task-1");
+  assert.equal(requests[0].method, "PATCH");
+  assert.equal(requests[0].body.starred, true);
+  assert.equal(task.starred, true);
+  findByClass(row, "desktop-thread-star").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].body.starred, false);
+  assert.equal(task.starred, false);
+});
+
+test("snooze rejects a nonfuture time and PATCHes a future reminder as a number", async () => {
+  const now = Date.UTC(2026, 10, 3, 12, 0, 0);
+  const requests = [];
+  const task = activeTask();
+  const { api, elementFor } = loadApp({ desktop: true, DateImpl: fixedDate(now), fetchImpl: (url, options) => {
+    requests.push({ url, method: options.method, body: JSON.parse(options.body) });
+    return Promise.resolve({ ok: true, json: async () => ({ task: { ...task, snoozed_until: requests.at(-1).body.snoozed_until } }) });
+  }});
+  const row = api.renderDesktopThread(task);
+  findByClass(row, "desktop-thread-snooze").click();
+  const input = elementFor("snooze-time");
+  input.value = api.localDateTimeValue(new Date(now - 60000));
+  findByClass(elementFor("snooze-dialog"), "snooze-save").click();
+  assert.equal(requests.length, 0);
+  assert.match(findByClass(elementFor("snooze-dialog"), "field-error").textContent, /future/);
+  input.value = "2030-01-02T12:15";
+  findByClass(elementFor("snooze-dialog"), "snooze-save").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, "PATCH");
+  assert.equal(requests[0].body.snoozed_until, new Date(input.value).getTime() / 1000);
+  assert.equal(typeof requests[0].body.snoozed_until, "number");
+  assert.equal(task.snoozed_until, requests[0].body.snoozed_until);
+  assert.equal(elementFor("snooze-dialog").open, false);
+});
+
+test("a completed older snooze save does not close or overwrite a newer snooze dialog", async () => {
+  const now = Date.UTC(2026, 10, 3, 12, 0, 0);
+  let resolveSave;
+  const task = activeTask();
+  const { api, elementFor } = loadApp({
+    desktop: true,
+    DateImpl: fixedDate(now),
+    fetchImpl: () => new Promise((resolve) => { resolveSave = resolve; }),
+  });
+  api.setState({ latestBoard: { tasks: [task], projects: [], folders: [] } });
+  const row = api.renderDesktopThread(task);
+  const snoozeButton = findByClass(row, "desktop-thread-snooze");
+  snoozeButton.click();
+  const dialog = elementFor("snooze-dialog");
+  const input = elementFor("snooze-time");
+  input.value = "2030-01-02T12:15";
+  findByClass(dialog, "snooze-save").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof resolveSave, "function", "the first snooze PATCH is in flight");
+
+  snoozeButton.click();
+  const newerInputValue = "2031-04-05T09:30";
+  elementFor("snooze-time").value = newerInputValue;
+  resolveSave({
+    ok: true,
+    json: async () => ({ task: { ...task, snoozed_until: new Date("2030-01-02T12:15").getTime() / 1000 } }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(dialog.open, true);
+  assert.equal(elementFor("snooze-time").value, newerInputValue);
+});
+
+test("clearing a snooze PATCHes a null reminder", async () => {
+  const now = Date.UTC(2026, 10, 3, 12, 0, 0) / 1000;
+  const requests = [];
+  const task = activeTask({ snoozed_until: now + 3600 });
+  const { api, elementFor } = loadApp({ desktop: true, DateImpl: fixedDate(now * 1000), fetchImpl: (url, options) => {
+    requests.push({ url, method: options.method, body: JSON.parse(options.body) });
+    return Promise.resolve({ ok: true, json: async () => ({ task: { ...task, snoozed_until: null } }) });
+  }});
+  api.setState({ latestBoard: { tasks: [task], projects: [], folders: [] } });
+  const row = api.renderDesktopThread(task);
+  findByClass(row, "desktop-thread-snooze").click();
+  findByClass(elementFor("snooze-dialog"), "snooze-clear").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "/api/tasks/task-1");
+  assert.equal(requests[0].method, "PATCH");
+  assert.equal(requests[0].body.snoozed_until, null);
+  assert.equal(task.snoozed_until, null);
+  assert.equal(elementFor("snooze-dialog").open, false);
+});
+
+test("canceling desktop rename preserves star and snooze preference controls", async () => {
+  const { api } = loadApp({ desktop: true });
+  const row = api.renderDesktopThread(activeTask({ starred: true, snoozed_until: 1900000000 }));
+  const star = findByClass(row, "desktop-thread-star");
+  const snooze = findByClass(row, "desktop-thread-snooze");
+  assert.equal(star.textContent, "★");
+  assert.equal(star.getAttribute("aria-pressed"), "true");
+  await findByClass(row, "desktop-thread-rename").dispatch("click");
+  const editor = findByClass(row, "inline-rename");
+  editor.value = "Uncommitted title";
+  await editor.dispatch("keydown", { key: "Escape", preventDefault() {} });
+  assert.equal(findByClass(row, "desktop-thread-name").textContent, "Task one");
+  assert.equal(findByClass(row, "desktop-thread-star"), star);
+  assert.equal(findByClass(row, "desktop-thread-star").textContent, "★");
+  assert.equal(findByClass(row, "desktop-thread-star").getAttribute("aria-pressed"), "true");
+  assert.equal(findByClass(row, "desktop-thread-snooze"), snooze);
+});
+
+test("virtual terminal-window rows do not expose star or snooze preferences", () => {
+  const { api } = loadApp({ desktop: true });
+  const row = api.renderDesktopThread(activeTask({ terminal_window: { pid: 123, provider: "codex" } }));
+  assert.equal(findByClass(row, "desktop-thread-star"), null);
+  assert.equal(findByClass(row, "desktop-thread-snooze"), null);
 });
 
 

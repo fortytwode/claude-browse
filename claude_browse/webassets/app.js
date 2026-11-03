@@ -602,8 +602,8 @@
     var status = task.work_status === "done" ? "completed" : task.work_status;
     if (queueMode === "all" && statusFilter !== "all" && status !== statusFilter)
       return false;
-    if (queueMode === "open" && taskPresence(task) !== "open") return false;
-    if (queueMode === "today" && !(desktopMode && task.active_today !== undefined ? task.active_today : task.in_today)) return false;
+    if (queueMode === "open" && taskPresence(task) !== "open" && !(desktopMode && reminderDue(task))) return false;
+    if (queueMode === "today" && !(desktopMode && reminderDue(task)) && !(desktopMode && task.active_today !== undefined ? task.active_today : task.in_today)) return false;
     var query = $("work-search").value.trim().toLowerCase();
     var serverMatch = Boolean(
       query &&
@@ -656,7 +656,31 @@
   function activityTime(task) {
     return Number(desktopMode && task.last_active_at !== undefined ? task.last_active_at : task.last_activity_at) || 0;
   }
+  function isSnoozed(task) {
+    return Number(task.snoozed_until) > Date.now() / 1000;
+  }
+  function reminderDue(task) {
+    return Boolean(Number(task.snoozed_until) > 0 && !isSnoozed(task)
+      && task.work_status !== "done" && task.work_status !== "archived");
+  }
+  function activityAge(task) {
+    var timestamp = activityTime(task);
+    if (!timestamp) return "Update time unknown";
+    var minutes = Math.max(0, Math.floor((Date.now() / 1000 - timestamp) / 60));
+    if (minutes < 1) return "Updated just now";
+    if (minutes < 60) return "Updated " + minutes + " min ago";
+    if (minutes < 1440) return "Updated " + Math.floor(minutes / 60) + "h ago";
+    return "Updated " + Math.floor(minutes / 1440) + "d ago";
+  }
   function taskComparator(a, b) {
+    if (desktopMode) {
+      var snoozeOrder = Number(isSnoozed(a)) - Number(isSnoozed(b));
+      if (snoozeOrder) return snoozeOrder;
+      var reminderOrder = Number(reminderDue(b)) - Number(reminderDue(a));
+      if (reminderOrder) return reminderOrder;
+      var starOrder = Number(Boolean(b.starred)) - Number(Boolean(a.starred));
+      if (starOrder) return starOrder;
+    }
     var priorityRank = { urgent: 0, high: 1, normal: 2, low: 3 };
     var terminalRank = { "needs-input": 0, working: 1, idle: 2, ended: 3, gone: 4, unknown: 5 };
     var comparison;
@@ -1300,12 +1324,12 @@
     return select;
   }
   function inlineRename(task, identity, crumb, title, pencil) {
-    var input = el("input", "inline-rename");
+    var input = el("input", "inline-rename"), original = Array.prototype.slice.call(identity.children);
     input.value = task.title || ""; input.maxLength = 500; input.setAttribute("aria-label", "Rename " + (task.title || "task"));
     input.title = "Enter to save · Escape to cancel";
     identity.replaceChildren(crumb, input);
     input.focus(); input.select();
-    function cancel() { identity.replaceChildren(crumb, title, pencil); pencil.focus(); }
+    function cancel() { identity.replaceChildren.apply(identity, original); pencil.focus(); }
     function save() {
       if (input.disabled) return;
       var next = input.value.trim();
@@ -1977,6 +2001,85 @@
       }
     });
   }
+  function saveDesktopPreference(task, field, value) {
+    return saveTask(task, field, value).then(function (saved) {
+      Object.assign(task, saved);
+      if (latestBoard) renderBoard(latestBoard);
+      return saved;
+    });
+  }
+  function localDateTimeValue(date) {
+    function pad(number) { return String(number).padStart(2, "0"); }
+    return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate())
+      + "T" + pad(date.getHours()) + ":" + pad(date.getMinutes());
+  }
+  var snoozeDialogGeneration = 0;
+  function openSnooze(task) {
+    if (task.terminal_window) return;
+    var generation = ++snoozeDialogGeneration;
+    var dialog = $("snooze-dialog"), heading = el("h2", "", "Snooze thread"),
+      name = el("p", "snooze-thread-title", task.title || "Untitled thread"),
+      presets = el("div", "snooze-presets"), label = el("label", "", "Remind me at (local time)"),
+      input = el("input", "snooze-time"), actions = el("div", "dialog-actions"),
+      cancel = el("button", "", "Cancel"), save = el("button", "primary-button snooze-save", "Snooze"),
+      error = el("p", "field-error"), saving = false;
+    heading.id = "snooze-title";
+    input.id = "snooze-time";
+    input.type = "datetime-local";
+    input.step = "60";
+    input.min = localDateTimeValue(new Date());
+    input.value = localDateTimeValue(new Date(isSnoozed(task) ? Number(task.snoozed_until) * 1000 : Date.now() + 3600000));
+    input.setAttribute("aria-label", "Snooze until, local time");
+    label.setAttribute("for", input.id);
+    error.hidden = true;
+    [["15 min", 15], ["1 hour", 60], ["3 hours", 180], ["Tomorrow 9am", "tomorrow"]].forEach(function (preset) {
+      var button = el("button", "snooze-preset", preset[0]);
+      button.type = "button";
+      button.addEventListener("click", function () {
+        if (saving) return;
+        var date = new Date();
+        if (preset[1] === "tomorrow") { date.setDate(date.getDate() + 1); date.setHours(9, 0, 0, 0); }
+        else date = new Date(Date.now() + preset[1] * 60000);
+        input.value = localDateTimeValue(date);
+        error.hidden = true;
+      });
+      presets.appendChild(button);
+    });
+    function persist(value) {
+      if (saving) return;
+      saving = true;
+      save.disabled = true;
+      return saveDesktopPreference(task, "snoozed_until", value).then(function () {
+        if (generation === snoozeDialogGeneration) dialog.close();
+        toast(value === null ? "Reminder cleared" : "Snoozed until " + new Date(value * 1000).toLocaleString());
+      }).catch(function (failure) {
+        error.textContent = failure.message;
+        error.hidden = false;
+      }).finally(function () { saving = false; save.disabled = false; });
+    }
+    cancel.type = save.type = "button";
+    cancel.addEventListener("click", function () { dialog.close(); });
+    save.addEventListener("click", function () {
+      var timestamp = new Date(input.value).getTime() / 1000;
+      if (!Number.isFinite(timestamp) || timestamp <= Date.now() / 1000) {
+        error.textContent = "Choose a future date and time.";
+        error.hidden = false;
+        input.focus();
+        return;
+      }
+      return persist(timestamp);
+    });
+    if (task.snoozed_until) {
+      var clear = el("button", "snooze-clear", isSnoozed(task) ? "Unsnooze" : "Dismiss reminder");
+      clear.type = "button";
+      clear.addEventListener("click", function () { return persist(null); });
+      actions.appendChild(clear);
+    }
+    actions.append(cancel, save);
+    dialog.replaceChildren(heading, name, presets, label, input, error, actions);
+    dialog.showModal();
+    input.focus();
+  }
   function renderDesktopThread(task) {
     var row = el("div", "desktop-thread"),
       isOpen = taskPresence(task) === "open",
@@ -1988,6 +2091,7 @@
       repo = el("span", "desktop-thread-repo", task.repo_name || task.project_name || "Unknown repo"),
       status = el("span", "desktop-thread-status state-" + (isOpen ? runtime : "unknown"),
         task.terminal_window ? "Thread unidentified" : isOpen ? (TERMINAL_LABELS[runtime] || "Open") : taskPresence(task) === "closed" ? "Closed" : "Unknown"),
+      age = el("span", "desktop-thread-age", activityAge(task)),
       controls = [], busy = false;
     function available(provider) {
       return (isOpen && provider === task.session_provider) || launchAction(task.actions, provider, "Continue").available;
@@ -2024,6 +2128,23 @@
       pencil.setAttribute("aria-label", "Rename " + (task.title || "thread"));
       pencil.addEventListener("click", function () { inlineRename(task, identity, crumb, title, pencil); });
       identity.appendChild(pencil);
+      var star = el("button", "desktop-thread-star", task.starred ? "★" : "☆"),
+        snooze = el("button", "desktop-thread-snooze", "◷");
+      star.type = snooze.type = "button";
+      star.setAttribute("aria-label", (task.starred ? "Unstar " : "Star ") + (task.title || "thread"));
+      star.setAttribute("aria-pressed", String(Boolean(task.starred)));
+      star.title = task.starred ? "Remove star" : "Star this thread";
+      star.addEventListener("click", function () {
+        if (star.disabled) return;
+        star.disabled = true;
+        return saveDesktopPreference(task, "starred", !task.starred)
+          .catch(function (error) { toast(error.message, true); })
+          .finally(function () { star.disabled = false; });
+      });
+      snooze.title = task.snoozed_until ? "Change or clear reminder" : "Snooze thread";
+      snooze.setAttribute("aria-label", "Snooze " + (task.title || "thread"));
+      snooze.addEventListener("click", function () { openSnooze(task); });
+      identity.append(star, snooze);
     }
     ["claude", "codex"].forEach(function (provider) {
       var action = launchAction(task.actions, provider, "Continue"),
@@ -2039,7 +2160,14 @@
     });
     updateControls();
     repo.title = task.repo_path || task.session_cwd || "";
-    metadata.append(repo, status);
+    age.title = activityTime(task) ? new Date(activityTime(task) * 1000).toLocaleString() : "No conversation activity timestamp is available.";
+    metadata.append(repo, status, age);
+    row.classList.toggle("is-snoozed", isSnoozed(task));
+    if (task.snoozed_until) {
+      var reminder = el("span", "desktop-thread-reminder", reminderDue(task) ? "Reminder due" : isSnoozed(task) ? "Snoozed" : "Reminder inactive");
+      reminder.title = "Reminder: " + new Date(Number(task.snoozed_until) * 1000).toLocaleString();
+      metadata.appendChild(reminder);
+    }
     if (task.transcript_available === false) {
       var warning = el("span", "desktop-thread-history-warning", "History missing");
       warning.title = "The saved thread name exists, but its conversation file is missing on this Mac. Switching agents requires that history.";

@@ -1557,3 +1557,23 @@ dialog::backdrop {
 .desktop-thread-rename { flex-shrink: 0; padding: 2px 4px; border: 0; background: transparent; color: var(--muted); font-size: 13px; }
 .desktop-thread-rename:hover { color: var(--purple); }
 .desktop-thread-identity .inline-rename { width: 100%; min-width: 0; font-size: 13px; background: var(--surface); color: var(--ink); }
+.desktop-thread-star, .desktop-thread-snooze { flex-shrink: 0; padding: 2px 3px; border: 0; background: transparent; color: var(--muted); font-size: 14px; }
+.desktop-thread-star[aria-pressed="true"] { color: #efbb63; }
+.desktop-thread-snooze:hover, .desktop-thread-star:hover { color: var(--purple); }
+.desktop-thread-age { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.desktop-thread-meta { flex-wrap: wrap; column-gap: 7px; row-gap: 2px; }
+.desktop-thread-repo { max-width: 125px; }
+.desktop-thread-reminder { font-size: 10px; color: #efbb63; }
+.desktop-thread.is-snoozed .desktop-thread-name { color: var(--muted); }
+#snooze-dialog { width: min(340px, calc(100vw - 32px)); box-sizing: border-box; padding: 18px; }
+#snooze-dialog h2 { margin: 0; font-size: 17px; }
+.snooze-thread-title { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.snooze-presets { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0; }
+.snooze-presets button { padding: 5px 8px; font-size: 12px; }
+#snooze-dialog label { display: block; font-size: 12px; margin-bottom: 6px; }
+.snooze-time { width: 100%; box-sizing: border-box; }
+#snooze-dialog .dialog-actions { flex-wrap: wrap; margin-top: 16px; gap: 6px; }
+#snooze-dialog .dialog-actions button { font-size: 12px; }
+.desktop-compact #snooze-dialog { background: var(--bg); color: var(--ink); border-color: var(--line); color-scheme: dark; }
+.desktop-compact #snooze-dialog button { background: var(--hover); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; }
+.desktop-compact #snooze-dialog .primary-button { background: var(--purple); color: #19151f; }

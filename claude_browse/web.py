@@ -288,7 +288,9 @@ class _Handler(BaseHTTPRequestHandler):
                 task_id = unquote(parsed.path[len("/api/tasks/") :])
                 edit_client = body.pop("_edit_client", None)
                 edit_revision = body.pop("_edit_revision", None)
-                unknown = set(body) - {"title", "status", "due_date", "priority"}
+                unknown = set(body) - {
+                    "title", "status", "due_date", "priority", "starred", "snoozed_until"
+                }
                 if unknown:
                     raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
                 if (edit_client is None) != (edit_revision is None):
@@ -338,7 +340,19 @@ class _Handler(BaseHTTPRequestHandler):
                     from .board.hook import _spawn_sync
 
                     _spawn_sync(publish_session)
-                public_task = self._task_to_json(task)
+                indexed_session = None
+                if task.get("session_id"):
+                    try:
+                        index_conn = fts.open_db(read_only=True)
+                        try:
+                            indexed_session = fts.get_by_sid(
+                                index_conn, str(task["session_id"])
+                            )
+                        finally:
+                            index_conn.close()
+                    except (OSError, sqlite3.Error):
+                        pass
+                public_task = self._task_to_json(task, indexed_session)
                 if session_name_result is not None:
                     public_task["session_name_updated"] = bool(session_name_result["updated"])
                     public_task["session_name_reason"] = str(session_name_result["reason"])
