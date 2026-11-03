@@ -355,7 +355,7 @@
     if (sortBy !== "manual")
       return (
         "Manual reordering is disabled while sorted by " +
-        ({ name: "Name", updated: "Last update", due: "Due date", priority: "Priority", terminal: "Terminal state", agent: "Agent" }[sortBy] || sortBy) +
+        ({ name: "Name", updated: "Last update", due: "Due date", priority: "Priority", priority_number: "Priority number", terminal: "Terminal state", agent: "Agent" }[sortBy] || sortBy) +
         "."
       );
     return "Drag a handle, or use Move up and Move down from the row menu.";
@@ -389,6 +389,7 @@
       updated: ["Oldest first", "Newest first"],
       due: ["Earliest first", "Latest first"],
       priority: ["Highest first", "Lowest first"],
+      priority_number: ["Lowest number first", "Highest number first"],
       terminal: ["State A to Z", "State Z to A"],
       agent: ["Agent A to Z", "Agent Z to A"],
     };
@@ -462,8 +463,10 @@
     refreshCustomSelect(id);
   }
   function closeFilterPopover(event) {
-    var popover = $("filter-popover");
-    if (popover && popover.open && !(event.target && event.target.closest && event.target.closest("#filter-popover"))) popover.open = false;
+    ["filter-popover", "sort-popover"].forEach(function (id) {
+      var popover = $(id);
+      if (popover && popover.open && !(event.target && event.target.closest && event.target.closest("#" + id))) popover.open = false;
+    });
   }
   function selectedProjectData() {
     return (
@@ -481,12 +484,17 @@
         $("project-description").value !== (project.description || ""),
     );
   }
+  function hasFocusedPriority() {
+    return Boolean(document.activeElement && document.activeElement.classList
+      && document.activeElement.classList.contains("desktop-thread-priority"));
+  }
   function hasProtectedWorkControls() {
     return (
       projectDescriptionDirty() ||
       Object.keys(rowMutationTails).length > 0 ||
       activePointerGesture ||
       Boolean(document.querySelector(".inline-rename")) ||
+      hasFocusedPriority() ||
       Boolean(document.querySelector("details[open], dialog[open]"))
     );
   }
@@ -679,11 +687,19 @@
       var reminderOrder = Number(reminderDue(b)) - Number(reminderDue(a));
       if (reminderOrder) return reminderOrder;
       var starOrder = Number(Boolean(b.starred)) - Number(Boolean(a.starred));
-      if (starOrder) return starOrder;
+      if (starOrder && sortBy !== "priority_number") return starOrder;
     }
     var priorityRank = { urgent: 0, high: 1, normal: 2, low: 3 };
     var terminalRank = { "needs-input": 0, working: 1, idle: 2, ended: 3, gone: 4, unknown: 5 };
     var comparison;
+    if (sortBy === "priority_number") {
+      var missingA = a.priority_number === null || a.priority_number === undefined,
+        missingB = b.priority_number === null || b.priority_number === undefined;
+      if (missingA !== missingB) return missingA ? 1 : -1;
+      var numberOrder = Number(a.priority_number) - Number(b.priority_number);
+      return (sortDirection === "desc" ? -numberOrder : numberOrder)
+        || activityTime(b) - activityTime(a) || String(a.task_id).localeCompare(String(b.task_id));
+    }
     if (sortBy === "name") comparison = String(a.title || "").localeCompare(String(b.title || ""));
     else if (sortBy === "priority") comparison = (priorityRank[a.priority] === undefined ? 99 : priorityRank[a.priority]) - (priorityRank[b.priority] === undefined ? 99 : priorityRank[b.priority]);
     else if (sortBy === "terminal") comparison = (terminalRank[a.terminal_runtime_state || a.terminal_state] === undefined ? 99 : terminalRank[a.terminal_runtime_state || a.terminal_state]) - (terminalRank[b.terminal_runtime_state || b.terminal_state] === undefined ? 99 : terminalRank[b.terminal_runtime_state || b.terminal_state]);
@@ -2004,7 +2020,7 @@
   function saveDesktopPreference(task, field, value) {
     return saveTask(task, field, value).then(function (saved) {
       Object.assign(task, saved);
-      if (latestBoard) renderBoard(latestBoard);
+      if (latestBoard && !hasFocusedPriority()) renderBoard(latestBoard);
       return saved;
     });
   }
@@ -2023,6 +2039,11 @@
       input = el("input", "snooze-time"), actions = el("div", "dialog-actions"),
       cancel = el("button", "", "Cancel"), save = el("button", "primary-button snooze-save", "Snooze"),
       error = el("p", "field-error"), saving = false;
+    var close = el("button", "snooze-close", "×"), header = el("div", "snooze-header");
+    close.type = "button";
+    close.setAttribute("aria-label", "Close snooze dialog");
+    close.addEventListener("click", function () { dialog.close(); });
+    header.append(heading, close);
     heading.id = "snooze-title";
     input.id = "snooze-time";
     input.type = "datetime-local";
@@ -2076,7 +2097,7 @@
       actions.appendChild(clear);
     }
     actions.append(cancel, save);
-    dialog.replaceChildren(heading, name, presets, label, input, error, actions);
+    dialog.replaceChildren(header, name, presets, label, input, error, actions);
     dialog.showModal();
     input.focus();
   }
@@ -2145,6 +2166,38 @@
       snooze.setAttribute("aria-label", "Snooze " + (task.title || "thread"));
       snooze.addEventListener("click", function () { openSnooze(task); });
       identity.append(star, snooze);
+      var priorityLabel = el("label", "desktop-priority-label", "#"),
+        priorityInput = el("input", "desktop-thread-priority");
+      priorityInput.type = "number";
+      priorityInput.min = "0";
+      priorityInput.step = "any";
+      priorityInput.placeholder = "—";
+      priorityInput.value = task.priority_number == null ? "" : String(task.priority_number);
+      priorityInput.title = "Priority number · lower numbers first";
+      priorityInput.setAttribute("aria-label", "Priority number for " + (task.title || "thread"));
+      priorityInput.addEventListener("change", function () {
+        var raw = priorityInput.value.trim(), value = raw === "" ? null : Number(raw);
+        if ((priorityInput.validity && priorityInput.validity.badInput) || (value !== null && (!Number.isFinite(value) || value < 0))) {
+          priorityInput.setAttribute("aria-invalid", "true");
+          toast("Use a priority number of 0 or higher.", true);
+          return;
+        }
+        priorityInput.disabled = true;
+        return saveDesktopPreference(task, "priority_number", value).catch(function (error) {
+          priorityInput.value = task.priority_number == null ? "" : String(task.priority_number);
+          toast(error.message, true);
+        }).finally(function () { priorityInput.disabled = false; priorityInput.removeAttribute("aria-invalid"); });
+      });
+      priorityInput.addEventListener("keydown", function (event) {
+        if (event.key === "Enter") { event.preventDefault(); priorityInput.blur(); }
+        if (event.key === "Escape") {
+          priorityInput.value = task.priority_number == null ? "" : String(task.priority_number);
+          priorityInput.removeAttribute("aria-invalid");
+          priorityInput.blur();
+        }
+      });
+      priorityLabel.appendChild(priorityInput);
+      metadata.appendChild(priorityLabel);
     }
     ["claude", "codex"].forEach(function (provider) {
       var action = launchAction(task.actions, provider, "Continue"),
@@ -2343,7 +2396,7 @@
         ? snapshot.group
         : "priority";
     sortBy =
-      ["manual", "name", "updated", "due", "priority", "terminal", "agent"].indexOf(snapshot.sort) >= 0
+      ["manual", "name", "updated", "due", "priority", "priority_number", "terminal", "agent"].indexOf(snapshot.sort) >= 0
         ? snapshot.sort
         : "manual";
     sortDirection = snapshot.sortDirection === "desc" ? "desc" : "asc";
@@ -2400,7 +2453,7 @@
       if (!saved || typeof saved !== "object" || Array.isArray(saved)) return;
       var settings = (saved.views || {})[(selectedProject || queueMode) + ""] || {};
       if (!settings || typeof settings !== "object" || Array.isArray(settings)) settings = {};
-      if (["manual", "name", "updated", "due", "priority", "terminal", "agent"].indexOf(settings.sort) >= 0) sortBy = settings.sort;
+      if (["manual", "name", "updated", "due", "priority", "priority_number", "terminal", "agent"].indexOf(settings.sort) >= 0) sortBy = settings.sort;
       if (settings.sortDirection === "desc" || settings.sortDirection === "asc") sortDirection = settings.sortDirection;
       columnOrder = normalizedColumns(settings.columns);
       if (settings.widths && typeof settings.widths === "object") Object.keys(settings.widths).forEach(function (column) { if (DATA_COLUMNS.indexOf(column) >= 0) setColumnWidth(column, settings.widths[column]); });
@@ -2659,7 +2712,10 @@
     Array.prototype.forEach.call(document.querySelectorAll(".priority-menu[open]"), function (menu) { menu.open = false; });
   });
   document.addEventListener("keydown", function (event) {
-    if (event.key === "Escape" && $("filter-popover").open) $("filter-popover").open = false;
+    if (event.key === "Escape") {
+      $("filter-popover").open = false;
+      $("sort-popover").open = false;
+    }
   });
   Array.prototype.forEach.call(
     document.querySelectorAll(".scope-tab"),
@@ -2885,8 +2941,8 @@
     });
   });
   if (desktopMode) {
-    var panel = document.querySelector("#filter-popover .popover-panel");
-    document.querySelector('#sort-by option[value="updated"]').textContent = "Latest activity";
+    var panel = document.querySelector("#sort-popover .popover-panel");
+    document.querySelector('#sort-by option[value="updated"]').textContent = "Latest updated";
     panel.prepend($("sort-by").closest("label"), $("sort-direction"));
   }
   restoreViewSettings();

@@ -1507,7 +1507,7 @@ dialog::backdrop {
 .desktop-compact #sidebar-resize,
 .desktop-compact #project-detail,
 .desktop-compact .board-toolbar > div:first-child,
-.desktop-compact .toolbar-controls > :not(.search-field):not(#filter-popover),
+.desktop-compact .toolbar-controls > :not(.search-field):not(#filter-popover):not(#sort-popover),
 .desktop-compact #reorder-reason { display: none; }
 .desktop-compact .board-page { display: block; }
 .desktop-compact .work-main { padding: 0; }
@@ -1538,7 +1538,7 @@ dialog::backdrop {
 .desktop-compact #work-search { width: 100%; }
 .desktop-compact .popover summary { height: 30px; font-size: 11px; padding: 4px 8px; background: #28212f; border-color: #4a3c55; }
 .desktop-compact .popover-panel { width: min(365px, calc(100vw - 24px)); max-height: calc(100vh - 155px); overflow-y: auto; top: 36px; padding: 12px; gap: 8px; background: #241d2c; border-color: #4a3c55; }
-.desktop-compact .popover-panel::before { content: "Filter & sort threads"; font-size: 13px; }
+.desktop-compact .popover-panel::before { content: "Filter threads"; font-size: 13px; }
 .desktop-compact .popover-panel label { font-size: 11px; }
 .desktop-compact .popover-panel select,
 .desktop-compact .popover-panel input,
@@ -1553,7 +1553,7 @@ dialog::backdrop {
 
 .desktop-thread-history-warning { color: #d9ac68; font-size: 10px; white-space: nowrap; }
 .desktop-thread-identity { grid-area: name; display: flex; align-items: center; gap: 5px; min-width: 0; }
-.desktop-thread-identity .desktop-thread-name { min-width: 0; }
+.desktop-thread-identity .desktop-thread-name { min-width: 0; flex: 1; }
 .desktop-thread-rename { flex-shrink: 0; padding: 2px 4px; border: 0; background: transparent; color: var(--muted); font-size: 13px; }
 .desktop-thread-rename:hover { color: var(--purple); }
 .desktop-thread-identity .inline-rename { width: 100%; min-width: 0; font-size: 13px; background: var(--surface); color: var(--ink); }
@@ -1577,3 +1577,23 @@ dialog::backdrop {
 .desktop-compact #snooze-dialog { background: var(--bg); color: var(--ink); border-color: var(--line); color-scheme: dark; }
 .desktop-compact #snooze-dialog button { background: var(--hover); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; }
 .desktop-compact #snooze-dialog .primary-button { background: var(--purple); color: #19151f; }
+
+.desktop-sort { display: none; }
+.desktop-compact .desktop-sort { display: block; order: 2; }
+.desktop-compact #filter-popover { order: 1; }
+.desktop-compact #sort-popover .popover-panel::before { content: "Sort threads"; }
+.desktop-compact #sort-popover .popover-panel { width: min(265px, calc(100vw - 24px)); }
+.desktop-thread-rename, .desktop-thread-star, .desktop-thread-snooze { width: 18px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
+.desktop-priority-label { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); font-size: 10px; }
+.desktop-thread-priority { width: 40px; height: 20px; box-sizing: border-box; padding: 1px 3px; border: 1px solid #54445f; border-radius: 4px; background: #241d2c; color: var(--ink); font: inherit; appearance: textfield; }
+.desktop-thread-priority::-webkit-inner-spin-button, .desktop-thread-priority::-webkit-outer-spin-button { appearance: none; margin: 0; }
+.desktop-thread-priority:focus { outline: 2px solid var(--purple); }
+.desktop-thread-priority[aria-invalid="true"] { outline: 2px solid #ff8794; }
+.desktop-compact #snooze-dialog { background: #302638; border: 1px solid #917ba2; box-shadow: 0 18px 70px #000b; }
+.desktop-compact #snooze-dialog::backdrop { background: #08050ebd; }
+.snooze-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.desktop-compact #snooze-dialog .snooze-close { width: 26px; height: 26px; padding: 0; font-size: 22px; line-height: 1; background: transparent; border-color: transparent; }
+.desktop-compact #snooze-dialog .snooze-close:hover { background: #4a3a57; }
+.desktop-compact #snooze-dialog .snooze-thread-title { color: #d5c5df; }
+.desktop-compact #sort-popover .popover-panel label { grid-template-columns: 40px minmax(0, 1fr); }
+.desktop-compact #sort-popover .toolbar-select-button { white-space: nowrap; }

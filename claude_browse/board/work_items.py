@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS work_items (
     position         INTEGER NOT NULL,
     project_resolved INTEGER NOT NULL DEFAULT 0,
     starred         INTEGER NOT NULL DEFAULT 0,
-    snoozed_until   REAL
+    snoozed_until   REAL,
+    priority_number REAL
 )
 """
 
@@ -314,7 +315,7 @@ def _migrate_task_preferences(conn: sqlite3.Connection) -> None:
     columns = {
         row[1] for row in conn.execute("PRAGMA table_info(work_items)").fetchall()
     }
-    if {"starred", "snoozed_until"} <= columns:
+    if {"starred", "snoozed_until", "priority_number"} <= columns:
         return
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -323,7 +324,7 @@ def _migrate_task_preferences(conn: sqlite3.Connection) -> None:
         columns = {
             row[1] for row in conn.execute("PRAGMA table_info(work_items)").fetchall()
         }
-        if {"starred", "snoozed_until"} <= columns:
+        if {"starred", "snoozed_until", "priority_number"} <= columns:
             conn.commit()
             return
         if "starred" not in columns:
@@ -332,6 +333,8 @@ def _migrate_task_preferences(conn: sqlite3.Connection) -> None:
             )
         if "snoozed_until" not in columns:
             conn.execute("ALTER TABLE work_items ADD COLUMN snoozed_until REAL")
+        if "priority_number" not in columns:
+            conn.execute("ALTER TABLE work_items ADD COLUMN priority_number REAL")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -343,6 +346,10 @@ def _task_record(row) -> dict:
     task["starred"] = bool(task.get("starred", False))
     task["snoozed_until"] = (
         float(task["snoozed_until"]) if task.get("snoozed_until") is not None else None
+    )
+    task["priority_number"] = (
+        float(task["priority_number"])
+        if task.get("priority_number") is not None else None
     )
     return task
 
@@ -804,7 +811,10 @@ def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
     The returned session id is publication work for the caller to start only
     after this function's transaction has committed.
     """
-    allowed = {"title", "status", "due_date", "priority", "starred", "snoozed_until"}
+    allowed = {
+        "title", "status", "due_date", "priority", "starred", "snoozed_until",
+        "priority_number",
+    }
     unknown = set(changes) - allowed
     if unknown:
         raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
@@ -825,6 +835,24 @@ def mutate(task_id: str, **changes: object) -> tuple[dict | None, str | None]:
         values["due_date_source"] = "manual"
     if "priority" in changes:
         values["priority"] = _priority(changes["priority"])
+    if "priority_number" in changes:
+        priority_number = changes["priority_number"]
+        if priority_number is None:
+            values["priority_number"] = None
+        else:
+            if isinstance(priority_number, bool) or not isinstance(
+                priority_number, (int, float)
+            ):
+                raise ValueError("priority_number must be a finite number >= 0 or null")
+            try:
+                number = float(priority_number)
+            except (ValueError, OverflowError):
+                raise ValueError(
+                    "priority_number must be a finite number >= 0 or null"
+                ) from None
+            if not math.isfinite(number) or number < 0:
+                raise ValueError("priority_number must be a finite number >= 0 or null")
+            values["priority_number"] = number
     if "starred" in changes:
         if type(changes["starred"]) is not bool:
             raise ValueError("starred must be a boolean")

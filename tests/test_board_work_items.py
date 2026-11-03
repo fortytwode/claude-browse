@@ -152,7 +152,8 @@ def test_preferences_migration_fast_path_does_not_wait_for_wal_writer(tmp_path):
     setup = sqlite3.connect(db)
     setup.execute("PRAGMA journal_mode=WAL")
     setup.execute(
-        "CREATE TABLE work_items (starred INTEGER NOT NULL DEFAULT 0, snoozed_until REAL)"
+        "CREATE TABLE work_items (starred INTEGER NOT NULL DEFAULT 0, "
+        "snoozed_until REAL, priority_number REAL)"
     )
     setup.commit()
     setup.close()
@@ -727,6 +728,7 @@ def test_legacy_overlay_migration_is_idempotent_and_preserves_sessionless_rows(
     assert linked["priority"] == "normal"
     assert linked["starred"] is False
     assert linked["snoozed_until"] is None
+    assert linked["priority_number"] is None
     assert linked["position"] == 1_000_000
     assert work_items.get("legacy-note")["position"] == 2_000_000
     assert work_items.list_items(include_done=True) == [linked]
@@ -793,12 +795,18 @@ def test_star_and_snooze_persist_validate_and_survive_continuation_and_move(tmp_
     task = work_items.ensure_for_session(store.get("prefs"))
     until = time.time() + 3600
     changed, publish = work_items.mutate(
-        task["task_id"], starred=True, snoozed_until=until
+        task["task_id"], starred=True, snoozed_until=until,
+        priority_number=0.1,
     )
     assert publish is None
     assert changed["starred"] is True
     assert changed["snoozed_until"] == pytest.approx(until)
+    assert changed["priority_number"] == pytest.approx(0.1)
+    assert changed["priority"] == task["priority"]
     assert work_items.get(task["task_id"])["starred"] is True
+    for invalid in (True, "0.1", -0.1, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="priority_number"):
+            work_items.mutate(task["task_id"], priority_number=invalid)
 
     for invalid in (1, 0, "true", None):
         with pytest.raises(ValueError, match="starred must"):
@@ -814,10 +822,13 @@ def test_star_and_snooze_persist_validate_and_survive_continuation_and_move(tmp_
     )
     assert continued["starred"] is True
     assert continued["snoozed_until"] == pytest.approx(until)
+    assert continued["priority_number"] == pytest.approx(0.1)
     assert work_items.get(task["task_id"])["starred"] is True
     cleared, _ = work_items.mutate(task["task_id"], snoozed_until=None)
     assert cleared["snoozed_until"] is None
     assert cleared["starred"] is True
+    cleared_number, _ = work_items.mutate(task["task_id"], priority_number=None)
+    assert cleared_number["priority_number"] is None
 
 
 def test_overlay_migration_failure_rolls_back_and_backup_preserves_legacy_rows(
