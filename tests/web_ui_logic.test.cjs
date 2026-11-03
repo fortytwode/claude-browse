@@ -1854,9 +1854,27 @@ test("desktop sort preference restores per scope and defaults to latest updated 
 
 test("compact thread displays repo beneath the title with the actual root as tooltip", () => {
   const { api } = loadApp({ desktop: true });
-  const row = api.renderDesktopThread(activeTask({ repo_name: "team-operations", repo_path: "/repos/team-operations", project_name: "sales" }));
+  const row = api.renderDesktopThread(activeTask({ repo_name: "team-operations", repo_path: "/repos/team-operations", project_name: "sales", session_cwd: "/repos/team-operations/clients/launcher", session_provider: "claude" }));
   assert.equal(findByClass(row, "desktop-thread-repo").textContent, "team-operations");
-  assert.equal(findByClass(row, "desktop-thread-repo").title, "/repos/team-operations");
+  assert.equal(findByClass(row, "desktop-thread-folder").textContent, "launcher");
+  assert.equal(findByClass(row, "desktop-thread-folder").title, "/repos/team-operations/clients/launcher");
+  assert.equal(findByClass(row, "desktop-thread-provider-label").textContent, "Claude");
+});
+
+test("compact metadata suppresses only the actual repo root and shows missing cwd and CodeX", () => {
+  const { api } = loadApp({ desktop: true });
+  const root = api.renderDesktopThread(activeTask({ repo_name: "Renamed project", repo_path: "/repos/team-operations/", session_cwd: "/repos/team-operations/", session_provider: "codex" }));
+  assert.equal(findByClass(root, "desktop-thread-folder").textContent, "");
+  assert.equal(findByClass(root, "desktop-thread-repo").title, "/repos/team-operations/");
+  assert.equal(findByClass(root, "desktop-thread-provider-label").textContent, "CodeX");
+  const nestedSameName = api.renderDesktopThread(activeTask({ repo_name: "team-operations", repo_path: "/repos/team-operations", session_cwd: "/repos/team-operations/clients/repo/", session_provider: "claude" }));
+  assert.equal(findByClass(nestedSameName, "desktop-thread-folder").textContent, "repo");
+  const renamedRoot = api.renderDesktopThread(activeTask({ repo_name: "Renamed project", repo_path: "/repos/team-operations", session_cwd: "/repos/team-operations/", session_provider: "claude" }));
+  assert.equal(findByClass(renamedRoot, "desktop-thread-folder").textContent, "");
+  const missing = api.renderDesktopThread(activeTask({ repo_name: "team-operations", session_cwd: null, session_provider: "claude" }));
+  assert.equal(findByClass(missing, "desktop-thread-folder").textContent, "");
+  assert.equal(findByClass(missing, "desktop-thread-repo").title, activeTask({ session_cwd: null }).session_cwd || "");
+  assert.equal(findByClass(missing, "desktop-thread-provider-label").textContent, "Claude");
 });
 
 test("compact Today uses conversation activity rather than task edits", () => {

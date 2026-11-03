@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import subprocess
 
 import pytest
 
@@ -150,6 +151,54 @@ def test_cli_uses_effective_cwd_and_existing_provider_policy(tmp_path, monkeypat
     assert launches.TOKEN_ENV not in os.environ
     assert "AGENT_BOARD_MANAGED_TERMINAL_TITLE" not in os.environ
     assert "CLAUDE_CODE_DISABLE_TERMINAL_TITLE" not in os.environ
+
+
+@pytest.mark.parametrize("source,target", [
+    ("claude", "claude"), ("codex", "codex"),
+    ("claude", "codex"), ("codex", "claude"),
+])
+def test_reopened_nested_thread_executes_in_its_saved_folder(tmp_path, monkeypatch, source, target):
+    from claude_browse import browse
+
+    repo = tmp_path / "team-operations"
+    nested = repo / "clients" / "krafton"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    transcript = tmp_path / "conversation.jsonl"
+    transcript.write_text('{"type":"user","message":{"content":"Continue work"}}\n')
+    store.upsert("nested-thread", provider=source, cwd=str(nested),
+                 name="Client work", transcript_path=str(transcript))
+    task = work_items.ensure_for_session(store.get("nested-thread"))
+    work_items.reconcile_sessions()
+    task = work_items.get(task["task_id"])
+    assert task["project_path"] == str(repo)
+    assert workspace.context_for_task(task)["working_directory"] == str(nested)
+
+    # Reopen the persisted store as a restarted board would, then follow the
+    # real prepare -> execute -> provider argv path without launching an agent.
+    store.get_conn().close()
+    store._conn_cache = None
+    token = prepare_task(work_items.get(task["task_id"]), target)
+    assert launches.get(token)["working_directory"] == str(nested)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(browse, "_require_binary", lambda _provider: None)
+    monkeypatch.setattr(browse, "_session_holder", lambda *_args: None)
+    monkeypatch.setattr(browse, "_use_codex_mobile_mode", lambda _provider: False)
+    monkeypatch.setattr(browse, "build_import_markdown", lambda *_args, **_kwargs: "Prior conversation")
+    import_file = tmp_path / "import.md"
+    import_file.write_text("Prior conversation")
+    monkeypatch.setattr(browse, "write_import_file", lambda *_args, **_kwargs: str(import_file))
+    calls = []
+    monkeypatch.setattr(os, "execvp", lambda binary, argv: calls.append((binary, argv, os.getcwd())))
+
+    launches.execute(token)
+
+    assert len(calls) == 1
+    binary, argv, executed_cwd = calls[0]
+    assert binary == target
+    assert executed_cwd == str(nested)
+    if source == target:
+        assert "nested-thread" in argv
 
 
 def test_exec_failure_keeps_original_task_and_records_failure(tmp_path, monkeypatch):

@@ -2110,6 +2110,11 @@
       runtime = task.terminal_runtime_state || task.terminal_state || "unknown",
       metadata = el("div", "desktop-thread-meta"),
       repo = el("span", "desktop-thread-repo", task.repo_name || task.project_name || "Unknown repo"),
+      cwd = String(task.session_cwd || "").replace(/[\\/]+$/, ""),
+      repoPath = String(task.repo_path || "").replace(/[\\/]+$/, ""),
+      folderName = cwd ? cwd.split(/[\\/]/).pop() : "",
+      folder = el("span", "desktop-thread-folder", folderName && !(repoPath && cwd === repoPath) ? folderName : ""),
+      provider = el("span", "desktop-thread-provider-label", providerName(task.session_provider)),
       status = el("span", "desktop-thread-status state-" + (isOpen ? runtime : "unknown"),
         task.terminal_window ? "Thread unidentified" : isOpen ? (TERMINAL_LABELS[runtime] || "Open") : taskPresence(task) === "closed" ? "Closed" : "Unknown"),
       age = el("span", "desktop-thread-age", activityAge(task)),
@@ -2213,8 +2218,9 @@
     });
     updateControls();
     repo.title = task.repo_path || task.session_cwd || "";
+    folder.title = cwd;
     age.title = activityTime(task) ? new Date(activityTime(task) * 1000).toLocaleString() : "No conversation activity timestamp is available.";
-    metadata.append(repo, status, age);
+    metadata.append(repo, folder, provider, status, age);
     row.classList.toggle("is-snoozed", isSnoozed(task));
     if (task.snoozed_until) {
       var reminder = el("span", "desktop-thread-reminder", reminderDue(task) ? "Reminder due" : isSnoozed(task) ? "Snoozed" : "Reminder inactive");
