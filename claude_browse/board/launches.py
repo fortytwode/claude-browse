@@ -101,7 +101,7 @@ def action_status(session: dict | None, context: dict, provider: str, *, availab
     elif not (availability_check or _available)(provider):
         reason = f"{spec.display_name} is not installed on this Mac."
     elif mode == "handoff" and not os.path.isfile(str(session.get("path") or "")):
-        reason = "The original transcript is unavailable for a handoff. Your task and history are unchanged."
+        reason = "Conversation history is missing on this Mac, so it cannot be transferred to another agent. The saved thread entry is unchanged."
     return {"label": label, "available": reason is None, "reason": reason, "mode": mode}
 
 
@@ -246,7 +246,9 @@ def execute(token: str) -> None:
             spec = get_provider(provider)
             argv = [spec.binary]
             if provider == "codex":
-                argv.extend(["-c", "tui.terminal_title=[]"])
+                from claude_browse import browse
+
+                argv = browse._board_managed_title_cmd(argv, provider)
             if intent["full_access"] and spec.handoff_yolo_flag:
                 argv.append(spec.handoff_yolo_flag)
             os.execvp(spec.binary, argv)

@@ -75,6 +75,9 @@ include = [
     "CHANGELOG.md",
     "CONTRIBUTING.md",
     "ROADMAP.md",
+    "scripts/install_desktop.py",
+    "docs/agent-board-desktop.md",
+    "shell/codex-inline.zsh",
     "pyproject.toml",
 ]
 

@@ -28,7 +28,7 @@ METADATA_SCAN_BYTES = 64 * 1024
 
 @dataclass(frozen=True)
 class _Scan:
-    """Result of one complete provider-root scan.
+    """Result of a provider-root scan, including verified partial evidence.
 
     ``uncertain`` is intentionally separate from ``open``: a descriptor that
     almost matches is evidence that guessing closed would be unsafe.
@@ -38,6 +38,7 @@ class _Scan:
     open_ids: frozenset[str] = frozenset()
     uncertain_ids: frozenset[str] = frozenset()
     live: tuple[_LiveSession, ...] = ()
+    verified_ttys: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class _LiveSession:
 
 
 _cache: dict[tuple[str, str], tuple[float, _Scan]] = {}
+_terminal_cache: tuple[tuple[str, str], float, list[dict]] | None = None
 
 
 def _hostname() -> str:
@@ -79,7 +81,9 @@ def _run(args: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
 
 def _clear_cache() -> None:
     """Test-only cache reset; production refreshes through the TTL."""
+    global _terminal_cache
     _cache.clear()
+    _terminal_cache = None
 
 
 def _remaining(deadline: float) -> float:
@@ -147,9 +151,11 @@ def _same_start(recorded: object, observed: str) -> bool:
 
 
 def _scan_claude(root: Path, deadline: float) -> _Scan:
+    complete = True
     open_ids: set[str] = set()
     uncertain: set[str] = set()
     live: dict[str, _LiveSession] = {}
+    ttys: dict[str, set[str]] = {}
     try:
         try:
             entries = list(root.iterdir())
@@ -160,7 +166,8 @@ def _scan_claude(root: Path, deadline: float) -> _Scan:
 
         for path in entries:
             if time.monotonic() >= deadline:
-                return _Scan(False, frozenset(open_ids), frozenset(uncertain))
+                complete = False
+                break
             if path.suffix != ".json" or not path.stem.isdecimal():
                 continue
             try:
@@ -169,20 +176,27 @@ def _scan_claude(root: Path, deadline: float) -> _Scan:
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                 # The filename carries no session identity, so this makes the
                 # scan incomplete rather than declaring unrelated rows closed.
-                return _Scan(False, frozenset(open_ids), frozenset(uncertain))
+                complete = False
+                continue
             if not isinstance(payload, dict):
-                return _Scan(False, frozenset(open_ids), frozenset(uncertain))
+                complete = False
+                continue
             sid = payload.get("sessionId")
             pid = payload.get("pid")
             if not isinstance(sid, str) or not sid or not isinstance(pid, int):
-                return _Scan(False, frozenset(open_ids), frozenset(uncertain))
+                complete = False
+                if isinstance(sid, str) and sid:
+                    uncertain.add(sid)
+                continue
             if pid != int(path.stem):
                 uncertain.add(sid)
                 continue
             try:
                 output = _claude_pid_command(pid, deadline)
             except (OSError, RuntimeError, TimeoutError, subprocess.TimeoutExpired):
-                return _Scan(False, frozenset(open_ids), frozenset(uncertain))
+                complete = False
+                uncertain.add(sid)
+                continue
             if output is None:
                 continue
             process = next((
@@ -203,18 +217,20 @@ def _scan_claude(root: Path, deadline: float) -> _Scan:
                 uncertain.add(sid)
                 continue
             open_ids.add(sid)
+            ttys.setdefault(sid, set()).add(tty)
             cwd = payload.get("cwd")
             live[sid] = _LiveSession(
                 sid, "claude", cwd if isinstance(cwd, str) else ""
             )
     except (OSError, TimeoutError):
-        return _Scan(False, frozenset(open_ids), frozenset(uncertain))
+        complete = False
     open_ids.difference_update(uncertain)
     return _Scan(
-        True,
+        complete,
         frozenset(open_ids),
         frozenset(uncertain),
         tuple(candidate for sid, candidate in live.items() if sid in open_ids),
+        frozenset(tty for sid in open_ids for tty in ttys[sid]),
     )
 
 
@@ -298,52 +314,81 @@ def _codex_descriptor_identity(
     return filename_sid, False, None
 
 
+def _codex_process_candidates(pid: str, root: Path, deadline: float, binding=None):
+    """A hook identifies an interaction, never disambiguates cached writers.
+
+    A silent /resume to an already loaded thread may emit no selection hook.
+    Even the latest binding cannot safely choose among multiple writers.
+    """
+    lsof = _command(["lsof", "-n", "-P", "-Ffan", "-p", pid], deadline)
+    candidates = []
+    for access, raw_path in _lsof_descriptors(lsof):
+        path = Path(raw_path)
+        if path.suffix != ".jsonl" or not _within_root(path, root):
+            continue
+        identity = _codex_descriptor_identity(path, deadline)
+        if identity is not None:
+            candidates.append((access, path, identity))
+    writers = [item for item in candidates if item[0] in {"w", "u"} and item[2][1]]
+    for access, path, (sid, valid, enrollment) in candidates:
+        selected = (
+            binding is not None and sid == binding.session_id
+            and path.resolve() == Path(binding.path).resolve()
+        )
+        proven = valid and access in {"w", "u"} and len(writers) == 1
+        if binding is not None and not selected:
+            proven = False
+        if proven and selected:
+            enrollment = _LiveSession(sid, "codex", binding.cwd, str(path))
+        yield sid, proven, enrollment
+
+
 def _scan_codex(root: Path, deadline: float) -> _Scan:
+    from claude_browse.board import terminal_bindings
+
     open_counts: dict[str, int] = {}
     uncertain: set[str] = set()
     live: dict[str, _LiveSession] = {}
+    ttys: dict[str, str] = {}
+
+    def result(complete: bool) -> _Scan:
+        uncertain.update(sid for sid, count in open_counts.items() if count != 1)
+        open_ids = {sid for sid in open_counts if sid not in uncertain}
+        return _Scan(
+            complete,
+            frozenset(open_ids),
+            frozenset(uncertain),
+            tuple(candidate for sid, candidate in live.items() if sid in open_ids),
+            frozenset(ttys[sid] for sid in open_ids),
+        )
+
     try:
         output = _command(["ps", "-axo", "pid=,tty=,comm="], deadline)
         processes = _parse_processes(output)
+        bindings = terminal_bindings.read_verified("codex", deadline)
     except (OSError, RuntimeError, TimeoutError, subprocess.TimeoutExpired):
         return _Scan(False)
 
     for pid, tty, command in processes:
         if time.monotonic() >= deadline:
-            return _Scan(False, frozenset(open_counts), frozenset(uncertain))
+            return result(False)
         if not _terminal_tty(tty) or not _command_is(command, "codex"):
             continue
         try:
-            lsof = _command(["lsof", "-n", "-P", "-Ffan", "-p", pid], deadline)
+            candidates = list(_codex_process_candidates(pid, root, deadline, bindings.get(int(pid))))
         except (OSError, RuntimeError, TimeoutError, subprocess.TimeoutExpired):
-            return _Scan(False, frozenset(open_counts), frozenset(uncertain))
-        for access, raw_path in _lsof_descriptors(lsof):
-            if time.monotonic() >= deadline:
-                return _Scan(False, frozenset(open_counts), frozenset(uncertain))
-            path = Path(raw_path)
-            if path.suffix != ".jsonl" or not _within_root(path, root):
-                continue
-            try:
-                identity = _codex_descriptor_identity(path, deadline)
-            except TimeoutError:
-                return _Scan(False, frozenset(open_counts), frozenset(uncertain))
-            if identity is None:
-                continue
-            sid, valid_identity, enrollment = identity
-            if access not in {"w", "u"} or not valid_identity:
+            return result(False)
+        for sid, proven, enrollment in candidates:
+            if not proven:
                 uncertain.add(sid)
                 continue
             open_counts[sid] = open_counts.get(sid, 0) + 1
+            ttys[sid] = tty
+            if open_counts[sid] > 1:
+                uncertain.add(sid)
             if enrollment is not None:
                 live[sid] = enrollment
-    open_ids = {sid for sid, count in open_counts.items() if count == 1 and sid not in uncertain}
-    uncertain.update(sid for sid, count in open_counts.items() if count != 1)
-    return _Scan(
-        True,
-        frozenset(open_ids),
-        frozenset(uncertain),
-        tuple(candidate for sid, candidate in live.items() if sid in open_ids),
-    )
+    return result(True)
 
 
 def _scan_cached(provider: str, root: Path, deadline: float) -> _Scan:
@@ -392,10 +437,12 @@ def snapshot(rows: list[dict]) -> dict[str, Presence]:
         root = _claude_sessions_root() if provider == "claude" else _codex_sessions_root()
         scan = _scan_cached(provider, root, deadline)
         for sid in ids:
-            if sid in scan.uncertain_ids or not scan.complete:
+            if sid in scan.uncertain_ids:
                 result[sid] = "unknown"
             elif sid in scan.open_ids:
                 result[sid] = "open"
+            elif not scan.complete:
+                result[sid] = "unknown"
             else:
                 result[sid] = "closed"
     return result
@@ -405,9 +452,9 @@ def live_sessions() -> list[dict[str, str]]:
     """Return verified local user conversations from cached native evidence.
 
     FTS and board runtime rows are deliberately not consulted: they may enrich
-    a later task, but cannot establish that a terminal is alive.  Partial
-    scans are withheld from enrollment so a failed aggregate scan cannot
-    expand persistent board state.
+    a later task, but cannot establish that a terminal is alive.  Verified
+    candidates survive partial scans; unverified or conflicting identities
+    are withheld by the scanner even when other records cannot be checked.
     """
     records: list[dict[str, str]] = []
     deadline = time.monotonic() + TOTAL_SCAN_TIMEOUT_S
@@ -416,8 +463,6 @@ def live_sessions() -> list[dict[str, str]]:
         ("codex", _codex_sessions_root()),
     ):
         scan = _scan_cached(provider, root, deadline)
-        if not scan.complete:
-            continue
         for session in scan.live:
             record = {
                 "session_id": session.session_id,
@@ -428,6 +473,102 @@ def live_sessions() -> list[dict[str, str]]:
                 record["path"] = session.path
             records.append(record)
     return sorted(records, key=lambda record: (record["provider"], record["session_id"]))
+
+
+def unidentified_terminals() -> list[dict]:
+    """List local provider terminals whose current conversation is unproven.
+
+    A live process is enough to show a window, never enough to enroll a
+    conversation. In particular, fork/resume argv and daemon-loaded threads
+    do not identify the thread currently selected by a terminal client.
+    """
+    global _terminal_cache
+    roots = (_claude_sessions_root(), _codex_sessions_root())
+    key = tuple(str(root.resolve()) for root in roots)
+    now = time.monotonic()
+    if _terminal_cache and _terminal_cache[0] == key and now - _terminal_cache[1] < CACHE_TTL_S:
+        return [dict(window) for window in _terminal_cache[2]]
+
+    deadline = now + TOTAL_SCAN_TIMEOUT_S
+    try:
+        output = _command(["ps", "-axo", "pid=,tty=,comm=,lstart="], deadline)
+    except (OSError, RuntimeError, TimeoutError, subprocess.TimeoutExpired):
+        # Do not cache a failed inventory as a verified absence of windows.
+        return []
+
+    verified_ttys = set().union(*(
+        _scan_cached(provider, root, deadline).verified_ttys
+        for provider, root in zip(("claude", "codex"), roots)
+    ))
+    seen: set[tuple[str, str]] = set()
+    windows: list[dict] = []
+    for line in output.splitlines():
+        process = _parse_ps_line(line, 4)
+        if process is None:
+            continue
+        pid, tty, command, started = process
+        provider = Path(command).name
+        if (
+            provider not in {"claude", "codex"} or not pid.isdecimal() or int(pid) <= 0
+            or not _terminal_tty(tty) or tty in verified_ttys or (provider, tty) in seen
+        ):
+            continue
+        seen.add((provider, tty))
+        cwd = ""
+        try:
+            lsof = _command(["lsof", "-n", "-P", "-Ffan", "-p", pid], deadline)
+            descriptor = ""
+            for field in lsof.splitlines():
+                if field.startswith("f"):
+                    descriptor = field[1:]
+                elif descriptor == "cwd" and field.startswith("n/"):
+                    cwd = field[1:]
+                    break
+        except (OSError, RuntimeError, TimeoutError, subprocess.TimeoutExpired):
+            # CWD enrichment failing must not hide an observed live terminal.
+            pass
+        windows.append({
+            "pid": int(pid), "tty": tty, "provider": provider,
+            "cwd": cwd, "started": started,
+        })
+    windows.sort(key=lambda window: (window["tty"], window["provider"], window["pid"]))
+    _terminal_cache = (key, now, windows)
+    return [dict(window) for window in windows]
+
+
+def verified_process_tty(pid: int, provider: str, started: str) -> tuple[str | None, str]:
+    """Fresh process proof for focusing a window with no conversation identity.
+
+    The start clock must be the exact local ``ps lstart`` value returned by
+    ``unidentified_terminals``. Never accept a missing clock or a reused PID.
+    This deliberately proves no session identity and cannot authorize transfer.
+    """
+    if (
+        type(pid) is not int or pid <= 0 or not isinstance(provider, str)
+        or provider not in {"claude", "codex"}
+        or not isinstance(started, str) or not started.strip()
+    ):
+        return None, "The terminal has no valid process identity."
+    try:
+        datetime.strptime(started, "%a %b %d %H:%M:%S %Y")
+    except ValueError:
+        return None, "The terminal has no valid process start time."
+    try:
+        output = _claude_pid_command(pid, time.monotonic() + TOTAL_SCAN_TIMEOUT_S)
+        processes = [
+            parsed for line in (output or "").splitlines()
+            if (parsed := _parse_ps_line(line, 4)) is not None
+        ]
+        if len(processes) == 1:
+            actual_pid, tty, command, observed = processes[0]
+            if (
+                actual_pid == str(pid) and _command_is(command, provider)
+                and _terminal_tty(tty) and " ".join(observed.split()) == " ".join(started.split())
+            ):
+                return tty, ""
+        return None, "The terminal exited or its process identity changed."
+    except (OSError, RuntimeError, TimeoutError, subprocess.TimeoutExpired):
+        return None, "Terminal verification was unavailable; no window was focused."
 
 
 def verified_terminal_tty(session_id: str, provider: str) -> tuple[str | None, str]:
@@ -489,23 +630,22 @@ def verified_terminal_tty(session_id: str, provider: str) -> tuple[str | None, s
                 return None, "No uniquely verified Claude terminal is open for this task."
             return matches.pop(), ""
 
+        from claude_browse.board import terminal_bindings
+
         output = _command(["ps", "-axo", "pid=,tty=,comm="], deadline)
+        bindings = terminal_bindings.read_verified("codex", deadline)
         matches: set[tuple[str, str]] = set()
         uncertain = False
         root = _codex_sessions_root()
         for pid, tty, command in _parse_processes(output):
             if not _terminal_tty(tty) or not _command_is(command, "codex"):
                 continue
-            lsof = _command(["lsof", "-n", "-P", "-Ffan", "-p", pid], deadline)
-            for access, raw_path in _lsof_descriptors(lsof):
-                path = Path(raw_path)
-                if path.suffix != ".jsonl" or not _within_root(path, root):
+            for sid, proven, _enrollment in _codex_process_candidates(
+                pid, root, deadline, bindings.get(int(pid))
+            ):
+                if sid != session_id:
                     continue
-                identity = _codex_descriptor_identity(path, deadline)
-                if identity is None or identity[0] != session_id:
-                    continue
-                _sid, valid_identity, _enrollment = identity
-                if access not in {"w", "u"} or not valid_identity:
+                if not proven:
                     uncertain = True
                 else:
                     matches.add((pid, tty))

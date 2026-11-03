@@ -78,17 +78,9 @@ def set_session_title(session_id: str, provider: str, title: str) -> dict[str, o
     with _title_locks_guard:
         title_lock = _title_locks.setdefault(session_id, threading.Lock())
     with title_lock:
-        current = store.get(session_id)
-        if provider in {"claude", "codex"} and not bool(
-            (current or {}).get("terminal_title_managed")
-        ):
-            return {
-                "updated": False,
-                "reason": (
-                    "This terminal was opened before managed titles were enabled. "
-                    "Reopen it through Agent Board to use its saved title."
-                ),
-            }
+        # The persistent custom-title property is independent of provider OSC
+        # titles. Exact session/TTY proof is required even for older terminals;
+        # the launch-time managed-title flag is not an ownership check.
         tty, reason = presence.verified_terminal_tty(session_id, provider)
         if not tty:
             return {"updated": False, "reason": reason}
@@ -124,6 +116,18 @@ def focus_session(session_id: str, provider: str) -> dict[str, object]:
     tty, reason = presence.verified_terminal_tty(session_id, provider)
     if not tty:
         return {"focused": False, "reason": reason}
+    return _focus_tty(tty)
+
+
+def focus_process(pid: int, provider: str, started: str) -> dict[str, object]:
+    """Focus a verified live process without claiming a conversation identity."""
+    tty, reason = presence.verified_process_tty(pid, provider, started)
+    if not tty:
+        return {"focused": False, "reason": reason}
+    return _focus_tty(tty)
+
+
+def _focus_tty(tty: str) -> dict[str, object]:
     try:
         result = subprocess.run(  # noqa: S603 - fixed native inspection command
             ["osascript", "-e", _FOCUS_SCRIPT, "--", tty],

@@ -103,7 +103,7 @@ def test_moved_task_requires_handoff_even_for_same_provider(tmp_path):
     session.pop("path")
     blocked = launches.action_status(session, context, "claude")
     assert not blocked["available"]
-    assert "transcript" in blocked["reason"]
+    assert "history is missing" in blocked["reason"]
 
 
 def test_original_native_resume_does_not_need_transcript(tmp_path):
@@ -230,3 +230,15 @@ def test_list_start_exec_argv_full_access_opt_in(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "execvp", lambda binary, argv: calls.append((binary, argv)))
     launches.execute(token)
     assert calls == [target["working_directory"], ("claude", ["claude"])]
+
+
+def test_new_local_codex_uses_terminal_owned_session(tmp_path, monkeypatch):
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    target = destination(tmp_path)
+    context = workspace.context_for_list(target["list_key"])
+    token = launches.prepare("list", target["list_key"], "codex", full_access=False, launch_revision=context["launch_revision"])
+    calls = []
+    monkeypatch.setattr(os, "chdir", lambda cwd: None)
+    monkeypatch.setattr(os, "execvp", lambda binary, argv: calls.append((binary, argv)))
+    launches.execute(token)
+    assert calls == [("codex", ["codex", "-c", "tui.terminal_title=[]", "--no-daemon"])]

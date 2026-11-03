@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_browse.board import commands, hook, projects, store, sync, work_items
+from claude_browse.board import commands, hook, projects, store, sync, terminal_bindings, work_items
 
 
 @pytest.fixture(autouse=True)
@@ -122,7 +122,6 @@ def test_priority_defaults_validates_and_survives_hook_updates(tmp_path):
     with pytest.raises(ValueError, match="priority must"):
         work_items.mutate(task["task_id"], title="must roll back", priority="later")
     assert work_items.get(task["task_id"])["title"] == "Prioritize"
-
     hook.dispatch(
         {
             "hook_event_name": "UserPromptSubmit",
@@ -135,6 +134,39 @@ def test_priority_defaults_validates_and_survives_hook_updates(tmp_path):
     assert preserved["priority"] == "urgent"
     assert preserved["position"] == task["position"]
 
+
+def test_empty_mutation_returns_task_without_updating_activity(tmp_path):
+    store.upsert("empty-mutation", cwd=str(tmp_path), name="No-op", provider="claude")
+    task = work_items.ensure_for_session(store.get("empty-mutation"))
+    before = work_items.get(task["task_id"])
+
+    unchanged, publish_session = work_items.mutate(task["task_id"])
+
+    assert unchanged == before
+    assert publish_session is None
+    assert work_items.get(task["task_id"])["updated_at"] == before["updated_at"]
+
+
+def test_preferences_migration_fast_path_does_not_wait_for_wal_writer(tmp_path):
+    db = tmp_path / "migration-lock.db"
+    setup = sqlite3.connect(db)
+    setup.execute("PRAGMA journal_mode=WAL")
+    setup.execute(
+        "CREATE TABLE work_items (starred INTEGER NOT NULL DEFAULT 0, snoozed_until REAL)"
+    )
+    setup.commit()
+    setup.close()
+
+    writer = sqlite3.connect(db, timeout=0.1)
+    reader = sqlite3.connect(db, timeout=0.1)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("UPDATE work_items SET starred = 1")
+        work_items._migrate_task_preferences(reader)
+    finally:
+        reader.close()
+        writer.rollback()
+        writer.close()
 
 def test_task_reorder_is_atomic_bounded_and_project_scoped(tmp_path, monkeypatch):
     monkeypatch.setattr(
@@ -527,6 +559,9 @@ def test_automatic_capture_is_content_agnostic_concurrent_and_does_not_run_git(
 ):
     nested = tmp_path / "repo" / "nested"
     nested.mkdir(parents=True)
+    # Process proof has separate tests; task capture itself still performs no
+    # git discovery or content-based naming in this concurrent hook path.
+    monkeypatch.setattr(terminal_bindings, "record_hook", lambda *_args: False)
     monkeypatch.setattr(
         projects.subprocess,
         "run",
@@ -690,6 +725,8 @@ def test_legacy_overlay_migration_is_idempotent_and_preserves_sessionless_rows(
     assert linked["session_cwd"] == "/repo/exact/nested"
     assert linked["due_date"] == "2026-09-08"
     assert linked["priority"] == "normal"
+    assert linked["starred"] is False
+    assert linked["snoozed_until"] is None
     assert linked["position"] == 1_000_000
     assert work_items.get("legacy-note")["position"] == 2_000_000
     assert work_items.list_items(include_done=True) == [linked]
@@ -749,6 +786,38 @@ def test_planning_migration_failure_rolls_back_and_keeps_new_backup(
     backup = sqlite3.connect(work_items.planning_migration_backup_path())
     assert backup.execute("SELECT * FROM work_items").fetchall() == original
     backup.close()
+
+
+def test_star_and_snooze_persist_validate_and_survive_continuation_and_move(tmp_path):
+    store.upsert("prefs", cwd=str(tmp_path), name="Preferences", provider="codex")
+    task = work_items.ensure_for_session(store.get("prefs"))
+    until = time.time() + 3600
+    changed, publish = work_items.mutate(
+        task["task_id"], starred=True, snoozed_until=until
+    )
+    assert publish is None
+    assert changed["starred"] is True
+    assert changed["snoozed_until"] == pytest.approx(until)
+    assert work_items.get(task["task_id"])["starred"] is True
+
+    for invalid in (1, 0, "true", None):
+        with pytest.raises(ValueError, match="starred must"):
+            work_items.mutate(task["task_id"], starred=invalid)
+    for invalid in (True, "123", float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="snoozed_until"):
+            work_items.mutate(task["task_id"], snoozed_until=invalid)
+
+    continued = work_items.attach_continuation(
+        task["task_id"],
+        {"session_id": "prefs-next", "provider": "codex", "cwd": str(tmp_path)},
+        "prefs",
+    )
+    assert continued["starred"] is True
+    assert continued["snoozed_until"] == pytest.approx(until)
+    assert work_items.get(task["task_id"])["starred"] is True
+    cleared, _ = work_items.mutate(task["task_id"], snoozed_until=None)
+    assert cleared["snoozed_until"] is None
+    assert cleared["starred"] is True
 
 
 def test_overlay_migration_failure_rolls_back_and_backup_preserves_legacy_rows(

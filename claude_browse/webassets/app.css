@@ -1499,3 +1499,81 @@ dialog::backdrop {
   border-left: 2px solid var(--line);
   color: #66666d;
 }
+
+/* Compact desktop list. Full editing remains in Open in Browser. */
+.desktop-compact { --bg: #19151f; --ink: #f0e8f4; --muted: #a99ab4; --line: #342c3b; --hover: #28212f; --purple: #ce8fe4; color-scheme: dark; }
+.desktop-compact #topbar,
+.desktop-compact #work-sidebar,
+.desktop-compact #sidebar-resize,
+.desktop-compact #project-detail,
+.desktop-compact .board-toolbar > div:first-child,
+.desktop-compact .toolbar-controls > :not(.search-field):not(#filter-popover),
+.desktop-compact #reorder-reason { display: none; }
+.desktop-compact .board-page { display: block; }
+.desktop-compact .work-main { padding: 0; }
+.desktop-compact .view-tabs { margin: 0; padding: 0 10px; gap: 14px; min-height: 35px; }
+.desktop-compact .scope-tab { font-size: 12px; padding: 10px 0 8px; }
+.desktop-compact #unknown-count { display: none; }
+.desktop-compact .board-toolbar { margin: 0; padding: 8px 10px; }
+.desktop-compact .toolbar-controls,
+.desktop-compact .search-field { width: 100%; }
+.desktop-compact #work-search { height: 30px; font-size: 12px; background: #241d2c; border-color: var(--line); color: var(--ink); }
+.desktop-compact .desktop-thread { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name actions" "meta actions"; align-items: center; column-gap: 9px; row-gap: 3px; min-height: 47px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.desktop-compact .desktop-thread:hover { background: var(--hover); }
+.desktop-thread-name { grid-area: name; padding: 0; background: none; border: 0; color: var(--ink); text-align: left; font-size: 13px; line-height: 1.35; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.desktop-thread-status { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.desktop-thread-status::before { content: ""; display: inline-block; width: 5px; height: 5px; border-radius: 50%; margin-right: 5px; background: #8c8394; vertical-align: 1px; }
+.desktop-thread-status.state-working::before { background: #67cd99; }
+.desktop-thread-status.state-needs-input::before { background: #efbb63; }
+.desktop-thread-actions { grid-area: actions; display: flex; gap: 4px; }
+.desktop-thread-provider { background: #28212f; border: 1px solid #4a3c55; border-radius: 5px; padding: 4px 5px; color: var(--purple); font-size: 10px; }
+.desktop-thread-provider:hover:not(:disabled) { background: #3a2b44; }
+.desktop-compact.desktop-show-sidebar #work-sidebar { display: block; position: static; height: auto; max-height: 220px; overflow: auto; border-bottom: 1px solid var(--line); }
+
+.desktop-thread-meta { grid-area: meta; display: flex; gap: 8px; align-items: center; min-width: 0; }
+.desktop-thread-repo { color: #bb9fc9; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-thread-status { flex-shrink: 0; }
+.desktop-compact .toolbar-controls { display: flex; flex-wrap: nowrap; align-items: center; }
+.desktop-compact .search-field { flex: 1; min-width: 0; width: auto; }
+.desktop-compact #work-search { width: 100%; }
+.desktop-compact .popover summary { height: 30px; font-size: 11px; padding: 4px 8px; background: #28212f; border-color: #4a3c55; }
+.desktop-compact .popover-panel { width: min(365px, calc(100vw - 24px)); max-height: calc(100vh - 155px); overflow-y: auto; top: 36px; padding: 12px; gap: 8px; background: #241d2c; border-color: #4a3c55; }
+.desktop-compact .popover-panel::before { content: "Filter & sort threads"; font-size: 13px; }
+.desktop-compact .popover-panel label { font-size: 11px; }
+.desktop-compact .popover-panel select,
+.desktop-compact .popover-panel input,
+.desktop-compact .toolbar-select-button,
+.desktop-compact .toolbar-select-menu { background: #302637; border-color: #4a3c55; color: var(--ink); }
+.desktop-compact .popover-panel .toolbar-select-button { height: 30px; font-size: 12px; }
+.desktop-compact .toolbar-select-menu { position: static; max-height: 145px; margin-top: 4px; }
+.desktop-compact .toolbar-select-option { font-size: 12px; padding: 5px 8px; }
+.desktop-compact .toolbar-select-option:hover,
+.desktop-compact .toolbar-select-option[aria-selected="true"] { background: #45314f; }
+.desktop-compact #sort-direction { color: var(--purple); background: #302637; border-color: #4a3c55; }
+
+.desktop-thread-history-warning { color: #d9ac68; font-size: 10px; white-space: nowrap; }
+.desktop-thread-identity { grid-area: name; display: flex; align-items: center; gap: 5px; min-width: 0; }
+.desktop-thread-identity .desktop-thread-name { min-width: 0; }
+.desktop-thread-rename { flex-shrink: 0; padding: 2px 4px; border: 0; background: transparent; color: var(--muted); font-size: 13px; }
+.desktop-thread-rename:hover { color: var(--purple); }
+.desktop-thread-identity .inline-rename { width: 100%; min-width: 0; font-size: 13px; background: var(--surface); color: var(--ink); }
+.desktop-thread-star, .desktop-thread-snooze { flex-shrink: 0; padding: 2px 3px; border: 0; background: transparent; color: var(--muted); font-size: 14px; }
+.desktop-thread-star[aria-pressed="true"] { color: #efbb63; }
+.desktop-thread-snooze:hover, .desktop-thread-star:hover { color: var(--purple); }
+.desktop-thread-age { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.desktop-thread-meta { flex-wrap: wrap; column-gap: 7px; row-gap: 2px; }
+.desktop-thread-repo { max-width: 125px; }
+.desktop-thread-reminder { font-size: 10px; color: #efbb63; }
+.desktop-thread.is-snoozed .desktop-thread-name { color: var(--muted); }
+#snooze-dialog { width: min(340px, calc(100vw - 32px)); box-sizing: border-box; padding: 18px; }
+#snooze-dialog h2 { margin: 0; font-size: 17px; }
+.snooze-thread-title { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.snooze-presets { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0; }
+.snooze-presets button { padding: 5px 8px; font-size: 12px; }
+#snooze-dialog label { display: block; font-size: 12px; margin-bottom: 6px; }
+.snooze-time { width: 100%; box-sizing: border-box; }
+#snooze-dialog .dialog-actions { flex-wrap: wrap; margin-top: 16px; gap: 6px; }
+#snooze-dialog .dialog-actions button { font-size: 12px; }
+.desktop-compact #snooze-dialog { background: var(--bg); color: var(--ink); border-color: var(--line); color-scheme: dark; }
+.desktop-compact #snooze-dialog button { background: var(--hover); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; }
+.desktop-compact #snooze-dialog .primary-button { background: var(--purple); color: #19151f; }

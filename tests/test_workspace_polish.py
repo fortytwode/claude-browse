@@ -39,6 +39,7 @@ def fresh_token(task, provider="claude", full_access=False):
 
 @pytest.mark.parametrize("provider", ("claude", "codex"))
 def test_task_new_ignores_missing_transcript_and_executes_fresh_argv(tmp_path, monkeypatch, provider):
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
     task, cwd = task_at(tmp_path)
     token = fresh_token(task, provider, full_access=True)
     assert launches.get(token)["source_session_id"] == "original"
@@ -51,7 +52,7 @@ def test_task_new_ignores_missing_transcript_and_executes_fresh_argv(tmp_path, m
     spec = get_provider(provider)
     expected = [spec.binary]
     if provider == "codex":
-        expected.extend(["-c", "tui.terminal_title=[]"])
+        expected.extend(["-c", "tui.terminal_title=[]", "--no-daemon"])
     if spec.handoff_yolo_flag:
         expected.append(spec.handoff_yolo_flag)
     assert calls == [("cwd", str(cwd)), (spec.binary, expected)]

@@ -135,13 +135,21 @@ def test_parse_args_supports_resume_and_start():
         "abc",
         "hello there",
         False,
+        None,
     )
-    assert mobile._parse_args(["start", "hello"]) == (None, "hello", False)
-    assert mobile._parse_args(["hello"]) == (None, "hello", False)
+    assert mobile._parse_args(["start", "hello"]) == (None, "hello", False, None)
+    assert mobile._parse_args(["hello"]) == (None, "hello", False, None)
+    assert mobile._parse_args(["fork", "abc", "hello", "there"]) == (
+        None,
+        "hello there",
+        False,
+        "abc",
+    )
     assert mobile._parse_args(["--yolo", "resume", "abc", "hello"]) == (
         "abc",
         "hello",
         True,
+        None,
     )
 
 
@@ -203,10 +211,11 @@ def test_main_repl_turn_does_not_reprint_user_block(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(mobile.sys, "stdin", Tty())
     monkeypatch.setattr(mobile, "read_prompt", lambda: next(prompts))
+    monkeypatch.setattr(mobile, "_pick_session", lambda: None)
     monkeypatch.setattr(
         mobile,
         "run_turn",
-        lambda prompt, session_id=None, show_user_block=True, yolo=False: (
+        lambda prompt, *, session_id=None, show_user_block=True, yolo=False: (
             calls.append((prompt, session_id, show_user_block, yolo)) or "new-id"
         ),
     )

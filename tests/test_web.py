@@ -95,6 +95,7 @@ def web_server(monkeypatch):
     board_db_path = db_path + "-board"
     monkeypatch.setattr(store, "_DB_PATH", Path(board_db_path))
     monkeypatch.setattr(store, "_conn_cache", None)
+    monkeypatch.setattr(web.session_names, "rename_session", lambda *_args: {"updated": True, "reason": ""})
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), web._Handler)
     server.launch_cwd = "/w/home"
@@ -474,6 +475,71 @@ def test_automatic_thread_update_and_board_roundtrip(web_server):
     assert [item["title"] for item in board["tasks"]] == ["Ship it"]
 
 
+def test_star_and_snooze_patch_persist_without_activity_or_presence_changes(web_server):
+    base, _server = web_server
+    task = _board_thread("task-preferences", cwd="/w/home")
+    store.upsert("task-preferences", working_since=1_700_000_000.0, paused_at=1_700_000_100.0)
+    index_conn = fts.open_db()
+    _seed(index_conn, "task-preferences", cwd="/w/home")
+    index_conn.close()
+    _status, before = _get_json(base + "/api/board")
+    prior = next(row for row in before["tasks"] if row["task_id"] == task["task_id"])
+    until = datetime.now().timestamp() + 7200
+
+    _status, response = _mutate_json(
+        base + f"/api/tasks/{task['task_id']}", "PATCH",
+        {"starred": True, "snoozed_until": until},
+    )
+    assert response["task"]["starred"] is True
+    assert response["task"]["snoozed_until"] == pytest.approx(until)
+    _status, board = _get_json(base + "/api/board")
+    updated = next(row for row in board["tasks"] if row["task_id"] == task["task_id"])
+    assert updated["starred"] is True
+    assert updated["snoozed_until"] == pytest.approx(until)
+    assert updated["work_status"] == "active"
+    assert updated["terminal_presence"] == prior["terminal_presence"]
+    assert updated["last_active_at"] == prior["last_active_at"]
+    assert updated["last_activity_at"] == prior["last_activity_at"]
+    assert updated["sort_key"] == prior["sort_key"]
+    assert response["task"]["last_active_at"] == prior["last_active_at"]
+    assert response["task"]["last_activity_at"] == prior["last_activity_at"]
+    assert [row["task_id"] for row in work_items.list_items()] == [task["task_id"]]
+
+    for body in (
+        {"starred": 1}, {"starred": None}, {"snoozed_until": True},
+        {"snoozed_until": "tomorrow"}, {"snoozed_until": float("nan")},
+    ):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _mutate_json(base + f"/api/tasks/{task['task_id']}", "PATCH", body)
+        assert exc.value.code == 400
+
+    _mutate_json(base + f"/api/tasks/{task['task_id']}", "PATCH", {"snoozed_until": None})
+    assert work_items.get(task["task_id"])["snoozed_until"] is None
+
+
+def test_closed_indexed_task_preferences_keep_activity_and_closed_state(web_server):
+    base, _server = web_server
+    task = _board_thread("closed-preferences", cwd="/w/home")
+    index_conn = fts.open_db()
+    _seed(index_conn, "closed-preferences", cwd="/w/home")
+    index_conn.close()
+    work_items.mutate(task["task_id"], status="done")
+    _, board = _get_json(base + "/api/board")
+    before = next(row for row in board["tasks"] if row["task_id"] == task["task_id"])
+
+    _, response = _mutate_json(
+        base + f"/api/tasks/{task['task_id']}", "PATCH",
+        {"starred": True, "snoozed_until": datetime.now().timestamp() + 3600},
+    )
+    assert response["task"]["work_status"] == "done"
+    assert response["task"]["last_active_at"] == before["last_active_at"]
+    _, board = _get_json(base + "/api/board")
+    after = next(row for row in board["tasks"] if row["task_id"] == task["task_id"])
+    assert after["work_status"] == "done"
+    assert after["starred"] is True
+    assert after["snoozed_until"] == pytest.approx(response["task"]["snoozed_until"])
+
+
 def test_board_search_matches_full_history_from_an_earlier_continuation(web_server):
     base, _server = web_server
     conn = fts.open_db(fts.DB_PATH)
@@ -756,7 +822,7 @@ def test_board_normalizes_today_states_actions_and_order(web_server, monkeypatch
     assert tasks["quiet"]["actions"]["claude"]["label"] == "Resume Claude"
     assert tasks["quiet"]["actions"]["codex"]["label"] == "Continue in CodeX"
     assert tasks["quiet"]["actions"]["codex"]["available"] is False
-    assert "transcript" in tasks["quiet"]["actions"]["codex"]["reason"].lower()
+    assert "history is missing" in tasks["quiet"]["actions"]["codex"]["reason"].lower()
 
 
 def test_today_excludes_old_updates_even_when_due_or_needing_input(web_server):
@@ -1001,7 +1067,14 @@ def test_history_launch_uses_canonical_task_intent_and_preserves_history(
     task = work_items.ensure_for_session(store.get("home1"))
     space = workspace.snapshot()["spaces"][0]
     listing = workspace.create_list("Destination", space["space_id"], working_directory=str(destination))
+    work_items.mutate(
+        task["task_id"], starred=True,
+        snoozed_until=datetime.now().timestamp() + 3600,
+    )
     workspace.move_task(task["task_id"], listing["list_key"], task["project_key"])
+    moved = work_items.get(task["task_id"])
+    assert moved["starred"] is True
+    assert moved["snoozed_until"] is not None
     monkeypatch.setattr(web, "_provider_available", lambda _provider: True)
     monkeypatch.setattr(web.launches, "_available", lambda _provider: True)
     opened = []
@@ -1112,3 +1185,108 @@ def test_server_can_reuse_a_local_port_without_widening_host(monkeypatch):
     with pytest.raises(BoundAddress):
         web.run_server("/tmp", port=51444)
     assert addresses == [("127.0.0.1", 51444)]
+
+
+def test_desktop_server_reports_ready_without_opening_browser(monkeypatch):
+    """A native host can discover the origin while existing HTTP guards remain active."""
+    ready = []
+    opened = []
+    servers = []
+    original = web.ThreadingHTTPServer
+
+    def make_server(address, handler):
+        server = original(address, handler)
+        servers.append(server)
+        return server
+
+    monkeypatch.setattr(web, "ThreadingHTTPServer", make_server)
+    monkeypatch.setattr(web, "_capture_and_reconcile", lambda: None)
+    monkeypatch.setattr(web, "_reconcile_periodically", lambda *args: None)
+    monkeypatch.setattr(web.webbrowser, "open", opened.append)
+
+    def on_ready(url):
+        ready.append(url)
+        # Shutdown must happen off the serving thread.
+        def inspect():
+            try:
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    ready.append(response.status)
+            finally:
+                servers[0].shutdown()
+        threading.Thread(target=inspect, daemon=True).start()
+
+    web.run_server("/tmp", open_browser=False, on_ready=on_ready)
+    assert len(ready) == 2
+    assert ready[0].startswith("http://127.0.0.1:")
+    assert ready[1] == 200
+    assert opened == []
+    assert servers[0].socket.fileno() == -1
+
+
+def test_desktop_activity_ignores_task_edits_and_reports_repo(web_server, tmp_path):
+    base, _server = web_server
+    task = _board_thread("desktop-old", cwd=str(tmp_path))
+    yesterday = datetime.combine(date.today() - timedelta(days=1), time(hour=12)).timestamp()
+    store.upsert("desktop-old", paused_at=yesterday)
+    store._raw_set_updated_at("desktop-old", yesterday)
+    work_items.mutate(task["task_id"], title="Edited today")
+    transcript = tmp_path / "desktop-old.jsonl"
+    transcript.write_text('{"type":"custom-title","customTitle":"Edited today"}\n')
+    store.upsert("desktop-old", transcript_path=str(transcript))
+    _, board = _get_json(base + "/api/board")
+    rendered = next(item for item in board["tasks"] if item["task_id"] == task["task_id"])
+    assert rendered["in_today"] is True  # Existing full-board task-update contract.
+    assert rendered["active_today"] is False
+    assert rendered["last_active_at"] == yesterday
+    assert rendered["repo_name"] == tmp_path.name
+    assert rendered["repo_path"] == str(tmp_path.resolve())
+
+
+def test_desktop_includes_unidentified_live_windows_without_creating_threads(web_server, monkeypatch):
+    base, _ = web_server
+    window = {"pid": 123, "provider": "codex", "tty": "ttys006", "cwd": "/repos/YogaNidra", "started": "Tue Nov  3 12:00:00 2026"}
+    monkeypatch.setattr(web.presence, "unidentified_terminals", lambda: [window])
+    _, normal = _get_json(base + "/api/board")
+    _, desktop = _get_json(base + "/api/board?desktop=1")
+    assert normal["terminal_windows"] == []
+    row, = desktop["terminal_windows"]
+    assert row["repo_name"] == "YogaNidra"
+    assert row["terminal_presence"] == "open"
+    assert row["last_active_at"] == 0
+    assert row["terminal_window"] == window
+    assert all(not action["available"] for action in row["actions"].values())
+    assert desktop["tasks"] == normal["tasks"]
+
+
+def test_process_focus_route_is_guarded_and_passes_identity(web_server, monkeypatch):
+    base, _ = web_server
+    calls = []
+    def focus(**identity):
+        calls.append(identity)
+        return {"focused": True, "reason": ""}
+    monkeypatch.setattr(terminal_focus, "focus_process", focus)
+    identity = {"pid": 123, "provider": "codex", "started": "Tue Nov  3 12:00:00 2026"}
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _mutate_json(base + "/api/terminal-windows/focus", "POST", identity, token="wrong")
+    assert exc.value.code == 403
+    assert calls == []
+    _, result = _mutate_json(base + "/api/terminal-windows/focus", "POST", identity)
+    assert result["focused"] is True
+    assert calls == [identity]
+
+
+def test_task_rename_updates_provider_and_terminal_with_current_session(web_server, monkeypatch):
+    base, _ = web_server
+    task = _board_thread("rename-target", provider="codex")
+    calls = []
+    def rename(sid, provider, title):
+        calls.append((sid, provider, title))
+        return {"updated": False, "reason": "Provider unavailable"}
+    monkeypatch.setattr(web.session_names, "rename_session", rename)
+    monkeypatch.setattr(terminal_focus, "set_session_title", lambda *args: {"updated": True, "reason": ""})
+    _, data = _mutate_json(base + "/api/tasks/" + task["task_id"], "PATCH", {"title": "Yoga Nidra launch"})
+    assert calls == [("rename-target", "codex", "Yoga Nidra launch")]
+    assert data["task"]["title"] == "Yoga Nidra launch"
+    assert data["task"]["session_name_updated"] is False
+    assert data["task"]["session_name_reason"] == "Provider unavailable"
+    assert data["task"]["terminal_title_updated"] is True

@@ -214,13 +214,19 @@ def session_for_launch(
         path = _valid_path((indexed or {}).get("path"))
     if path is None:
         path = _raw_provider_path(source_provider, session_id)
+    # Activity metadata must describe the resolved file, never an old index
+    # location. Keep size and mtime from the same filesystem snapshot.
+    session.pop("source_mtime", None)
     if path:
-        session["path"] = path
         try:
-            session["source_size"] = os.path.getsize(path)
+            source_stat = os.stat(path)
         except OSError:
-            session["source_size"] = int(session.get("source_size") or 0)
-    else:
+            path = None
+        else:
+            session["path"] = path
+            session["source_size"] = source_stat.st_size
+            session["source_mtime"] = source_stat.st_mtime
+    if not path:
         session.pop("path", None)
     return session
 
