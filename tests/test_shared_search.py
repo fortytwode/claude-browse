@@ -158,3 +158,19 @@ def test_partial_publish_resumes_from_committed_batch():
     report = _publish(conn, client=client, host="mac", batch_size=1)
     assert report.published == 1 and report.unchanged == 1
     assert len(client.store) == 2
+
+
+def test_large_titles_split_batches_by_bytes(monkeypatch):
+    conn, client = _db(), _Client()
+    conn.execute("UPDATE sessions SET title = ?", ("x" * 5_000,))
+    conn.execute(
+        "INSERT INTO semantic_windows VALUES (?, ?, ?, ?, ?)",
+        (8, "s/one", 1, "2026-01-02", "another window"),
+    )
+    conn.execute(
+        "INSERT INTO dense_embeddings VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (8, "s/one", "embedding", 2, "hash-2", struct.pack("<2f", 2.0, 3.0), 4.0),
+    )
+    monkeypatch.setattr(shared_search, "MAX_BATCH_BYTES", 1_000)
+    report = _publish(conn, client=client, host="mac")
+    assert report.published == 2 and report.batches == 2

@@ -21,6 +21,9 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 MAX_BODY = 64 * 1024
 MAX_FRAME = 16 * 1024 * 1024
+RECONNECT_MIN_SECONDS = 1.0
+RECONNECT_MAX_SECONDS = 60.0
+RECONNECT_STABLE_SECONDS = 60.0
 CHUNK_SIZE = 480 * 1024
 _LOCK = os.path.expanduser("~/.claude/agent-board/relay.lock")
 _ID = r"[^/?#]+"
@@ -277,6 +280,32 @@ class RelayWorker:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _is_connection_loss(exc: BaseException) -> bool:
+    """True for a dropped socket; rejected auth and bad frames still exit."""
+    if isinstance(exc, (OSError, asyncio.TimeoutError, EOFError)):
+        return True
+    return type(exc).__module__.split(".")[0] == "websockets"
+
+
+def run_forever(worker: RelayWorker, url: str, *, sleep=time.sleep, clock=time.monotonic) -> None:
+    """Reconnect after ordinary disconnects instead of crashing to launchd."""
+    delay = RECONNECT_MIN_SECONDS
+    while True:
+        started = clock()
+        try:
+            asyncio.run(worker.run(url))
+            reason = "closed"
+        except Exception as exc:
+            if not _is_connection_loss(exc):
+                raise
+            reason = type(exc).__name__
+        if clock() - started >= RECONNECT_STABLE_SECONDS:
+            delay = RECONNECT_MIN_SECONDS
+        print(f"relay disconnected ({reason}); reconnecting in {delay:.0f}s", flush=True)
+        sleep(delay)
+        delay = min(delay * 2, RECONNECT_MAX_SECONDS)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Relay a local agent board through Mission Control"
@@ -289,9 +318,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     with _single_worker():
-        asyncio.run(
-            RelayWorker(args.machine_id, read_token(args.token_file), args.port).run(args.url)
-        )
+        run_forever(RelayWorker(args.machine_id, read_token(args.token_file), args.port), args.url)
     return 0
 
 
