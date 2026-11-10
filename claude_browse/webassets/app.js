@@ -33,6 +33,7 @@
       priority: "any",
       terminal: "any",
       due: "any",
+      starred: "any",
       presence: "any",
       lastUpdate: "any",
       dueFrom: "",
@@ -340,6 +341,7 @@
     return (
       (queueMode === "all" && statusFilter !== "all") ||
       filters.provider !== "any" ||
+      (filters.starred || "any") !== "any" ||
       filters.priority !== "any" ||
       filters.terminal !== "any" ||
       (filters.due !== "any" && (filters.due !== "custom" || filters.dueFrom || filters.dueTo)) ||
@@ -377,6 +379,7 @@
     $("filter-terminal").value = filters.terminal;
     $("filter-due").value = filters.due;
     $("filter-presence").value = filters.presence;
+    $("filter-starred").value = filters.starred || "any";
     $("filter-last-update").value = filters.lastUpdate;
     ["due", "last-update"].forEach(function (name) {
       var field = name === "due" ? "due" : "lastUpdate";
@@ -610,7 +613,13 @@
     var status = task.work_status === "done" ? "completed" : task.work_status;
     if (queueMode === "all" && statusFilter !== "all" && status !== statusFilter)
       return false;
-    if (queueMode === "open" && taskPresence(task) !== "open" && !(desktopMode && reminderDue(task))) return false;
+    if (queueMode === "open") {
+      if (task.work_status === "archived" || task.work_status === "done") return false;
+      if (desktopMode && (task.terminal_window || !activityTime(task))) return false;
+      if (!(desktopMode && reminderDue(task)) &&
+          (taskPresence(task) !== "open" || ["ended", "gone"].indexOf(task.terminal_runtime_state || task.terminal_state) >= 0)) return false;
+    }
+    if ((queueMode === "starred" || filters.starred === "only") && !task.starred) return false;
     if (queueMode === "today" && !(desktopMode && reminderDue(task)) && !(desktopMode && task.active_today !== undefined ? task.active_today : task.in_today)) return false;
     var query = $("work-search").value.trim().toLowerCase();
     var serverMatch = Boolean(
@@ -729,7 +738,7 @@
   }
   function selectScope(scope) {
     if (!afterPendingEdits(function () {})) return;
-    if (["open", "all", "today"].indexOf(scope) < 0) scope = "open";
+    if (["open", "all", "today", "starred"].indexOf(scope) < 0) scope = "open";
     queueMode = scope;
     activeSavedView = null;
     restoreViewSettings();
@@ -1972,8 +1981,8 @@
     renderProjectDetail();
     syncToolbarControls();
     updateReorderReason();
-    var filterCount = ["provider", "priority", "terminal", "due", "presence", "lastUpdate"].filter(function (field) {
-      return filters[field] !== "any" && (filters[field] !== "custom" || filters[field + "From"] || filters[field + "To"]);
+    var filterCount = ["provider", "priority", "terminal", "due", "presence", "starred", "lastUpdate"].filter(function (field) {
+      return (filters[field] || "any") !== "any" && (filters[field] !== "custom" || filters[field + "From"] || filters[field + "To"]);
     }).length;
     $("filter-summary").textContent = filterCount
       ? filterCount + " Filters"
@@ -1982,7 +1991,9 @@
     $("today-note").hidden = queueMode !== "today";
     $("work-heading").textContent = selectedProjectData()
       ? projectName(selectedProjectData())
-      : queueMode === "today"
+      : queueMode === "starred"
+        ? "Starred"
+        : queueMode === "today"
         ? "Today"
         : queueMode === "open"
         ? "Open terminals on this Mac"
@@ -2066,13 +2077,13 @@
       });
       presets.appendChild(button);
     });
-    function persist(value) {
+    function persist(value, archive) {
       if (saving) return;
       saving = true;
       save.disabled = true;
-      return saveDesktopPreference(task, "snoozed_until", value).then(function () {
+      return saveDesktopPreference(task, archive ? "status" : "snoozed_until", archive ? "archived" : value).then(function () {
         if (generation === snoozeDialogGeneration) dialog.close();
-        toast(value === null ? "Reminder cleared" : "Snoozed until " + new Date(value * 1000).toLocaleString());
+        toast(archive ? "Thread archived — find it in All threads" : value === null ? "Reminder cleared" : "Snoozed until " + new Date(value * 1000).toLocaleString());
       }).catch(function (failure) {
         error.textContent = failure.message;
         error.hidden = false;
@@ -2096,7 +2107,10 @@
       clear.addEventListener("click", function () { return persist(null); });
       actions.appendChild(clear);
     }
-    actions.append(cancel, save);
+    var archive = el("button", "snooze-archive", "Archive thread");
+    archive.type = "button";
+    archive.addEventListener("click", function () { return persist(null, true); });
+    actions.append(archive, cancel, save);
     dialog.replaceChildren(header, name, presets, label, input, error, actions);
     dialog.showModal();
     input.focus();
@@ -2385,7 +2399,7 @@
       return announce(
         "Save or cancel the project description before changing views.",
       );
-    queueMode = snapshot.scope === "closed" || snapshot.scope === "completed" || snapshot.scope === "archived" || snapshot.scope === "all-status" ? "all" : ["open", "all", "today"].indexOf(snapshot.scope) >= 0 ? snapshot.scope : "open";
+    queueMode = snapshot.scope === "closed" || snapshot.scope === "completed" || snapshot.scope === "archived" || snapshot.scope === "all-status" ? "all" : ["open", "all", "today", "starred"].indexOf(snapshot.scope) >= 0 ? snapshot.scope : "open";
     statusFilter = snapshot.scope === "closed" || snapshot.scope === "completed"
       ? "completed"
       : snapshot.scope === "archived"
@@ -2430,6 +2444,7 @@
         ["any", "today", "none", "custom"].concat(Object.keys(FILTER_WINDOWS)).indexOf(savedFilters.due) >= 0
           ? savedFilters.due
           : "any",
+      starred: savedFilters.starred === "only" ? "only" : "any",
       presence: ["any", "open", "closed", "unknown"].indexOf(savedFilters.presence) >= 0 ? savedFilters.presence : "any",
       lastUpdate: ["any", "custom"].concat(Object.keys(FILTER_WINDOWS)).indexOf(savedFilters.lastUpdate) >= 0 ? savedFilters.lastUpdate : "any",
       dueFrom: validFilterDate(savedFilters.dueFrom),
@@ -2746,7 +2761,7 @@
   $("filter-status").addEventListener("change", function () {
     selectStatus(this.value);
   });
-  ["provider", "priority", "terminal", "due", "presence", "last-update"].forEach(function (name) {
+  ["provider", "priority", "terminal", "due", "presence", "starred", "last-update"].forEach(function (name) {
     $("filter-" + name).addEventListener("change", function () {
       filters[name === "last-update" ? "lastUpdate" : name] = this.value;
       activeSavedView = null;
@@ -2765,8 +2780,8 @@
     });
   });
   $("clear-filters").addEventListener("click", function () {
-    filters = { provider: "any", priority: "any", terminal: "any", due: "any", presence: "any", lastUpdate: "any", dueFrom: "", dueTo: "", lastUpdateFrom: "", lastUpdateTo: "" };
-    ["provider", "priority", "terminal", "due", "presence", "last-update"].forEach(function (name) {
+    filters = { provider: "any", priority: "any", terminal: "any", due: "any", starred: "any", presence: "any", lastUpdate: "any", dueFrom: "", dueTo: "", lastUpdateFrom: "", lastUpdateTo: "" };
+    ["provider", "priority", "terminal", "due", "presence", "starred", "last-update"].forEach(function (name) {
       $("filter-" + name).value = "any";
     });
     renderBoard(latestBoard);
@@ -2937,7 +2952,7 @@
   $("task-codex").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) continueOrFocusTask(task, "codex"); });
   $("task-fresh-claude").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) startFreshTask(task, "claude"); });
   $("task-fresh-codex").addEventListener("click", function () { var task = latestBoard && latestBoard.tasks.find(function (item) { return item.task_id === $("task-dialog").dataset.taskId; }); if (task) startFreshTask(task, "codex"); });
-  ["filter-status", "group-by", "sort-by", "filter-provider", "filter-priority", "filter-terminal", "filter-presence", "filter-due", "filter-last-update"].forEach(enhanceSelect);
+  ["filter-status", "group-by", "sort-by", "filter-starred", "filter-provider", "filter-priority", "filter-terminal", "filter-presence", "filter-due", "filter-last-update"].forEach(enhanceSelect);
   document.addEventListener("click", function (event) {
     if (event.target && event.target.closest && event.target.closest(".toolbar-select")) return;
     Array.prototype.forEach.call(document.querySelectorAll(".toolbar-select-menu"), function (menu) {

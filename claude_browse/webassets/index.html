@@ -133,7 +133,14 @@
             role="tab"
             aria-selected="false"
           >
-            Today</button>
+            Today</button
+          ><button
+            class="scope-tab"
+            data-scope="starred"
+            role="tab"
+            aria-selected="false"
+          >
+            Starred</button>
         </div>
         <div class="board-toolbar">
           <div>
@@ -162,6 +169,11 @@
               <summary id="filter-summary">Filters</summary>
               <div class="popover-panel">
                 <label
+                  >Stars<select id="filter-starred">
+                    <option value="any">All threads</option>
+                    <option value="only">Starred only</option>
+                  </select></label
+                ><label
                   >Provider<select id="filter-provider">
                     <option value="any">Any provider</option>
                     <option value="claude">Claude</option>

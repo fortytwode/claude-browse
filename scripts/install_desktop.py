@@ -19,10 +19,17 @@ EXECUTABLE_NAME = "AgentBoardDesktop"
 BUNDLE_ID = "com.fortytwode.agent-board-desktop"
 BUILD_SCHEMA = "1"
 SIGNING_REQUIREMENT = f'=designated => identifier "{BUNDLE_ID}"'
+APPLICATIONS_DIR = Path("/Applications")
+HOME_APPLICATIONS_DIR = Path.home() / "Applications"
 
 
 def app_path() -> Path:
-    return Path.home() / "Applications" / APP_NAME
+    directory = APPLICATIONS_DIR if os.access(APPLICATIONS_DIR, os.W_OK) else HOME_APPLICATIONS_DIR
+    return directory / APP_NAME
+
+
+def home_compatibility_path() -> Path:
+    return HOME_APPLICATIONS_DIR / APP_NAME
 
 
 def executable_path(bundle: Path | None = None) -> Path:
@@ -91,6 +98,47 @@ def is_current(bundle: Path | None = None) -> bool:
     return executable.is_file() and os.access(executable, os.X_OK) and _installed_hash(bundle) == _build_hash()
 
 
+def _bundle_id(bundle: Path) -> str | None:
+    try:
+        with (bundle / "Contents/Info.plist").open("rb") as handle:
+            return plistlib.load(handle).get("CFBundleIdentifier")
+    except (OSError, plistlib.InvalidFileException):
+        return None
+
+
+def _ensure_home_compatibility_link(canonical: Path) -> tuple[bool, str]:
+    compatibility = home_compatibility_path()
+    if compatibility.is_symlink():
+        try:
+            if compatibility.resolve(strict=True) == canonical.resolve(strict=True):
+                return True, f"compatibility link at {compatibility} is current"
+        except OSError:
+            pass
+        return False, f"refusing to replace unrelated link at {compatibility}"
+    if compatibility.exists() and _bundle_id(compatibility) != BUNDLE_ID:
+        return False, f"refusing to replace unrelated app at {compatibility}"
+
+    backup = compatibility.with_name(f".{APP_NAME}.migration-{os.getpid()}")
+    try:
+        compatibility.parent.mkdir(parents=True, exist_ok=True)
+        if backup.exists():
+            return False, f"migration backup already exists at {backup}"
+        if compatibility.exists():
+            compatibility.rename(backup)
+        compatibility.symlink_to(canonical)
+        if compatibility.resolve(strict=True) != canonical.resolve(strict=True):
+            raise OSError("compatibility link did not resolve to the installed app")
+        if backup.exists():
+            shutil.rmtree(backup)
+    except OSError as exc:
+        if compatibility.is_symlink():
+            compatibility.unlink()
+        if backup.exists() and not compatibility.exists():
+            backup.rename(compatibility)
+        return False, f"could not migrate home app path ({exc})"
+    return True, f"home path now links to {canonical}"
+
+
 def _swiftc() -> str | None:
     compiler = shutil.which("swiftc")
     if compiler:
@@ -116,9 +164,15 @@ def install(open_after: bool = False) -> tuple[bool, str]:
         return False, f"desktop app source is missing: {SOURCE}"
     destination = app_path()
     if is_current(destination):
+        if destination.parent == APPLICATIONS_DIR:
+            ok, migration_status = _ensure_home_compatibility_link(destination)
+            if not ok:
+                return False, migration_status
+        else:
+            migration_status = f"using fallback install at {destination}"
         if open_after:
             subprocess.run(["open", str(destination)], check=False)
-        return True, f"desktop app already current at {destination}"
+        return True, f"desktop app current at {destination}; {migration_status}"
     compiler = _swiftc()
     if not compiler:
         return False, "Swift compiler not found"
@@ -161,7 +215,13 @@ def install(open_after: bool = False) -> tuple[bool, str]:
 
     if open_after:
         subprocess.run(["open", str(destination)], check=False)
-    return True, f"installed desktop app at {destination}. If already running, quit and reopen to use the update."
+    if destination.parent == APPLICATIONS_DIR:
+        ok, migration_status = _ensure_home_compatibility_link(destination)
+        if not ok:
+            return False, migration_status
+    else:
+        migration_status = f"using fallback install at {destination}"
+    return True, f"installed desktop app at {destination}; {migration_status}. If already running, quit and reopen to use the update."
 
 
 def check() -> tuple[bool, str]:
@@ -170,8 +230,14 @@ def check() -> tuple[bool, str]:
     destination = app_path()
     if not destination.exists():
         return False, f"desktop app is not installed at {destination}"
+    if destination.parent == APPLICATIONS_DIR and destination.is_symlink():
+        return False, f"canonical app at {destination} must be a real bundle"
     if not is_current(destination):
         return False, f"desktop app at {destination} is stale or incomplete"
+    if destination.parent == APPLICATIONS_DIR:
+        compatibility = home_compatibility_path()
+        if not compatibility.is_symlink() or compatibility.resolve() != destination.resolve():
+            return False, f"home compatibility path at {compatibility} is not linked to the canonical app"
     return True, f"desktop app is current at {destination}"
 
 
