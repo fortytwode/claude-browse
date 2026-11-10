@@ -292,6 +292,7 @@ function activeTask(overrides = {}) {
     terminal_state: "idle",
     order: 0,
     title: "Task one",
+    last_active_at: 1793700000,
     ...overrides,
   };
 }
@@ -1131,13 +1132,13 @@ test("rendering restored view state keeps every toolbar control synchronized", (
   assert.equal(elementFor("filter-due").value, "today");
 });
 
-test("Open terminals is presence-only while unknown remains available in All threads", () => {
+test("Open terminals excludes completed work while unknown remains available in All threads", () => {
   const { api, elementFor } = loadApp();
   const openCompleted = activeTask({ work_status: "done", terminal_presence: "open" });
   const unknown = activeTask({ task_id: "unknown", terminal_presence: "unknown" });
   api.setState({ queueMode: "open", statusFilter: "active", filters: { provider: "any", priority: "any", terminal: "any", due: "any", presence: "any", lastUpdate: "any" } });
   elementFor("work-search").value = "";
-  assert.equal(api.taskMatches(openCompleted), true, "presence, not work completion, defines Open terminals");
+  assert.equal(api.taskMatches(openCompleted), false, "completed work stays out even with an open terminal");
   assert.equal(api.taskMatches(unknown), false);
   api.setState({ queueMode: "all", statusFilter: "all", filters: { provider: "any", priority: "any", terminal: "any", due: "any", presence: "unknown", lastUpdate: "any" } });
   assert.equal(api.taskMatches(unknown), true);
@@ -1499,7 +1500,7 @@ test("desktop activity age uses conversation activity and handles future and mis
   assert.equal(api.activityAge(activeTask({ last_active_at: nowSeconds - 3 * 3600 })), "Updated 3h ago");
   assert.equal(api.activityAge(activeTask({ last_active_at: nowSeconds - 2 * 86400 })), "Updated 2d ago");
   assert.equal(api.activityAge(activeTask({ last_active_at: nowSeconds + 60 })), "Updated just now");
-  assert.equal(api.activityAge(activeTask({})), "Update time unknown");
+  assert.equal(api.activityAge(activeTask({ last_active_at: null })), "Update time unknown");
 });
 
 test("desktop ordering puts due reminders first, starred next, and future snoozes last", () => {
@@ -1914,7 +1915,7 @@ test("closed or unknown compact rows never show a stale working status dot", () 
 });
 
 
-test("compact includes verified process windows and focuses without inventing a session", async () => {
+test("All threads includes unidentified process windows and focuses without inventing a session", async () => {
   const requests = [];
   const { api, elementFor } = loadApp({ desktop: true, fetchImpl: (path, options) => {
     requests.push({ path, body: JSON.parse(options.body) });
@@ -1922,7 +1923,7 @@ test("compact includes verified process windows and focuses without inventing a 
   }});
   const terminal_window = { pid: 123, provider: "codex", started: "Tue Nov 3 12:00:00 2026" };
   const rowTask = activeTask({ title: "CodeX terminal · ttys006", repo_name: "YogaNidra", terminal_presence: "open", session_provider: "codex", terminal_window, actions: {} });
-  api.setState({ queueMode: "open" });
+  api.setState({ queueMode: "all", statusFilter: "all" });
   api.renderBoard({ tasks: [], terminal_windows: [rowTask], projects: [], folders: [] });
   const row = elementFor("task-groups").children[0];
   assert.equal(findByClass(row, "desktop-thread-repo").textContent, "YogaNidra");
@@ -1965,4 +1966,51 @@ test("compact rename saves via the session-backed task endpoint and reports sync
   assert.equal(requests[0].body.title, "Renamed session");
   assert.equal(findByClass(row, "desktop-thread-name").textContent, "Renamed session");
   assert.match(elementFor("toast").textContent, /Provider name could not be updated/);
+});
+
+
+test("Open excludes ended, unidentified and undated rows but keeps due ended reminders", () => {
+  const { api } = loadApp({ desktop: true });
+  api.setState({ queueMode: "open" });
+  const task = activeTask({ terminal_presence: "open" });
+  assert.equal(api.taskMatches(task), true);
+  for (const change of [{ terminal_runtime_state: "ended" }, { terminal_runtime_state: "gone" }, { terminal_window: { pid: 123 } }, { last_active_at: null }, { work_status: "archived" }, { work_status: "done" }]) {
+    assert.equal(api.taskMatches({ ...task, ...change }), false, JSON.stringify(change));
+  }
+  assert.equal(api.taskMatches({ ...task, terminal_runtime_state: "ended", snoozed_until: 1 }), true);
+  assert.equal(api.taskMatches({ ...task, work_status: "archived", snoozed_until: 1 }), false);
+  assert.equal(api.taskMatches({ ...task, last_active_at: null, snoozed_until: 1 }), false);
+  api.setState({ queueMode: "all", statusFilter: "all" });
+  assert.equal(api.taskMatches({ ...task, terminal_runtime_state: "ended" }), true);
+});
+
+test("Starred scope includes closed stars and starred-only filter survives saved views", () => {
+  const { api } = loadApp({ desktop: true });
+  api.applySnapshot({ scope: "starred", filters: { starred: "only" } });
+  assert.equal(api.getState().queueMode, "starred");
+  assert.equal(api.taskMatches(activeTask({ starred: true, terminal_presence: "closed" })), true);
+  assert.equal(api.taskMatches(activeTask({ starred: false })), false);
+  assert.equal(api.snapshotView().filters.starred, "only");
+  api.applySnapshot({ scope: "all", status: "all", filters: { starred: "only" } });
+  assert.equal(api.taskMatches(activeTask({ starred: false })), false);
+  api.applySnapshot({ scope: "all", status: "all" });
+  assert.equal(api.taskMatches(activeTask({ starred: false })), true);
+});
+
+test("Archive from snooze persists archive and removes even an open due reminder", async () => {
+  const requests = [];
+  const task = activeTask({ terminal_presence: "open", snoozed_until: 1 });
+  const { api, elementFor } = loadApp({ desktop: true, fetchImpl: (path, options) => {
+    requests.push({ path, body: JSON.parse(options.body) });
+    return Promise.resolve({ ok: true, json: async () => ({ task: { ...task, work_status: "archived" } }) });
+  }});
+  api.openSnooze(task);
+  await findByClass(elementFor("snooze-dialog"), "snooze-archive").dispatch("click");
+  await flush();
+  assert.equal(requests[0].body.status, "archived");
+  assert.equal(task.work_status, "archived");
+  assert.equal(elementFor("snooze-dialog").open, false);
+  assert.equal(api.taskMatches(task), false);
+  api.setState({ queueMode: "all", statusFilter: "all" });
+  assert.equal(api.taskMatches(task), true);
 });

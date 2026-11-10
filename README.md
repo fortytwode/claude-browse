@@ -451,6 +451,13 @@ the banner entirely -- it never auto-dismisses.
 ./install.sh
 ```
 
+The native desktop installer keeps one signed bundle at
+`/Applications/Agent Board.app` so it is available in Applications and
+Spotlight. `~/Applications/Agent Board.app` is a compatibility symlink to
+that bundle, preserving the existing Agent Browse shortcuts and app identity.
+If `/Applications` is not writable, the installer falls back to
+`~/Applications/Agent Board.app`.
+
 This idempotently wires hooks + a statusLine command into
 `~/.claude/settings.json` and hooks into `~/.codex/hooks.json` (backing
 each up before a change; safe to re-run), symlinks `agent-board`, disables Claude
