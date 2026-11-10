@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from claude_browse.board import relay
 from claude_browse.board.relay import RelayWorker, allowed
 
 
@@ -100,3 +101,22 @@ def test_token_file_requires_0600(tmp_path):
         read_token(str(path))
     os.chmod(path, 0o600)
     assert read_token(str(path)) == "x" * 32
+
+
+def test_run_forever_reconnects_with_backoff_and_stops_on_rejection():
+    class Closed(ConnectionError):
+        pass
+
+    class Worker:
+        calls = 0
+
+        async def run(self, _url):
+            Worker.calls += 1
+            if Worker.calls < 3:
+                raise Closed("dropped")
+            raise RuntimeError("Mission Control rejected relay authentication")
+
+    delays = []
+    with pytest.raises(RuntimeError, match="rejected"):
+        relay.run_forever(Worker(), "wss://example", sleep=delays.append, clock=lambda: 0.0)
+    assert delays == [1.0, 2.0]
