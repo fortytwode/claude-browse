@@ -183,7 +183,7 @@ def test_reopened_nested_thread_executes_in_its_saved_folder(tmp_path, monkeypat
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(browse, "_require_binary", lambda _provider: None)
     monkeypatch.setattr(browse, "_session_holder", lambda *_args: None)
-    monkeypatch.setattr(browse, "_use_codex_mobile_mode", lambda _provider: False)
+    monkeypatch.setattr(browse, "_use_codex_inline_mode", lambda _provider: False)
     monkeypatch.setattr(browse, "build_import_markdown", lambda *_args, **_kwargs: "Prior conversation")
     import_file = tmp_path / "import.md"
     import_file.write_text("Prior conversation")

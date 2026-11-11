@@ -209,10 +209,15 @@ def build_import_markdown(
                 else "- Previous folder: unknown"
             ),
         ])
-        if transcript_path:
+        if transcript_path and (provider != "codex" or os.path.isfile(transcript_path)):
             lines.append(
                 f"- Full original transcript: `{transcript_path}` — read it if you "
                 "need detail beyond the recent turns below."
+            )
+        elif provider == "codex":
+            lines.append(
+                "- Original transcript is unavailable. Saved CodeX history may "
+                "contain only user messages; verify prior outcomes before acting."
             )
     if compact_continuation:
         lines.extend([
