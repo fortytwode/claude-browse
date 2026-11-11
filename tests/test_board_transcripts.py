@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from claude_browse.board import commands, projects, store
+from claude_browse.board import commands, launches, projects, store
 from claude_browse.providers import claude as claude_provider
 from claude_browse.providers import codex as codex_provider
 
@@ -52,6 +52,7 @@ def test_valid_index_path_beats_a_stale_hook_path_and_keeps_manual_runtime_field
         "name": "Keep this manual name",
         "path": str(transcript),
         "source_size": len(b"indexed"),
+        "source_mtime": transcript.stat().st_mtime,
     }
 
 
@@ -93,6 +94,7 @@ def test_hook_only_session_finds_exact_builtin_transcript_without_fts(
     assert session["cwd"] == str(tmp_path)
     assert session["path"] == str(transcript)
     assert session["source_size"] == len(b"fixture")
+    assert session["source_mtime"] == transcript.stat().st_mtime
     assert commands.action_status(
         session,
         "codex" if provider == "claude" else "claude",
@@ -112,6 +114,7 @@ def test_missing_known_transcript_remains_unavailable_for_handoff(tmp_path, monk
     )
 
     assert "path" not in session
+    assert "source_mtime" not in session
     assert status == {
         "label": "Continue in CodeX",
         "available": False,
@@ -253,3 +256,74 @@ def test_claude_history_backed_discovery_keeps_only_exact_rooted_paths(tmp_path,
     store.upsert("history-session", provider="claude", cwd=str(tmp_path))
 
     assert commands.session_for_launch("history-session", indexed=None)["path"] == str(transcript)
+
+
+@pytest.mark.parametrize("provider", ("claude", "codex"))
+def test_stale_hook_and_index_paths_recover_only_the_exact_provider_session(
+    tmp_path, monkeypatch, provider
+):
+    session_id = "one-two-three-four-five"
+    root = tmp_path / provider
+    project = root / "project"
+    project.mkdir(parents=True)
+    if provider == "claude":
+        monkeypatch.setattr(claude_provider, "SESSIONS_DIR", str(root))
+        monkeypatch.setattr(claude_provider, "HISTORY_PATH", str(tmp_path / "no-history"))
+        transcript = project / f"{session_id}.jsonl"
+    else:
+        monkeypatch.setattr(codex_provider, "CODEX_SESSIONS_DIR", str(root))
+        transcript = project / f"rollout-2026-01-01T00-00-00-{session_id}.jsonl"
+    transcript.write_text("original context")
+    os.utime(transcript, (1234, 1234))
+    (project / f"{session_id}-other.jsonl").write_text("unrelated context")
+    runtime = {
+        "provider": provider, "cwd": str(tmp_path),
+        "transcript_path": str(tmp_path / "stale-hook.jsonl"),
+    }
+    indexed = {
+        "provider": provider, "path": str(tmp_path / "stale-index.jsonl"),
+        "source_size": 999, "source_mtime": 999,
+    }
+
+    session = commands.session_for_launch(session_id, indexed, runtime)
+
+    assert session["path"] == str(transcript)
+    assert session["source_size"] == len("original context")
+    assert session["source_mtime"] == 1234
+    target = "codex" if provider == "claude" else "claude"
+    context = {"working_directory": str(tmp_path)}
+    assert launches.action_status(
+        session, context, target, availability_check=lambda _provider: True
+    )["available"]
+
+    transcript.unlink()
+    session = commands.session_for_launch(session_id, indexed, runtime)
+    assert "path" not in session
+    assert "source_mtime" not in session
+    assert not launches.action_status(
+        session, context, target, availability_check=lambda _provider: True
+    )["available"]
+
+
+def test_transcript_disappearing_before_stat_stays_unavailable(tmp_path, monkeypatch):
+    transcript = tmp_path / "gone.jsonl"
+    transcript.write_text("context")
+    real_stat = commands.os.stat
+
+    def stat_then_remove(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if str(path) == str(transcript):
+            transcript.unlink()
+        return result
+
+    monkeypatch.setattr(commands.os, "stat", stat_then_remove)
+    session = commands.session_for_launch(
+        "gone", indexed=None,
+        runtime={"provider": "claude", "cwd": str(tmp_path), "transcript_path": str(transcript)},
+    )
+
+    assert "path" not in session
+    assert "source_mtime" not in session
+    assert not commands.action_status(
+        session, "codex", availability_check=lambda _provider: True
+    )["available"]

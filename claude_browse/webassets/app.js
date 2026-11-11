@@ -1,6 +1,13 @@
 // Agent Board local UI. Vanilla JS; all persistence is browser-local or local API calls.
 (function () {
   "use strict";
+  var desktopMode = new URLSearchParams(window.location.search).get("desktop") === "1";
+  if (desktopMode) {
+    document.documentElement.classList.add("desktop-compact");
+    document.getElementById("work-search").placeholder = "Find a thread…";
+    // The compact surface has no permission-mode control. Resume with normal permissions.
+    document.getElementById("full-access").checked = false;
+  }
   var csrfToken = "",
     latestBoard = null,
     sharedWorkResults = [],
@@ -14,8 +21,8 @@
   var queueMode = "open",
     statusFilter = "all",
     groupBy = "priority",
-    sortBy = "manual",
-    sortDirection = "asc",
+    sortBy = desktopMode ? "updated" : "manual",
+    sortDirection = desktopMode ? "desc" : "asc",
     selectedProject = null,
     draggedTask = null,
     draggedProject = null,
@@ -71,7 +78,7 @@
     };
   var SAVED_VIEWS_KEY = "agent-board.saved-views.v1";
   // v2 changes the initial board from unfinished work to verified-open terminals.
-  var VIEW_SETTINGS_KEY = "agent-board.view-settings.v2";
+  var VIEW_SETTINGS_KEY = desktopMode ? "agent-board.desktop-view-settings.v1" : "agent-board.view-settings.v2";
   var DATA_COLUMNS = ["name", "status", "due", "updated", "priority", "terminal", "agent"];
   var columnOrder = DATA_COLUMNS.slice(),
     columnWidths = Object.create(null),
@@ -584,10 +591,11 @@
     var filter = filters.lastUpdate || "any";
     if (filter === "any") return true;
     if (filter === "custom" && !filters.lastUpdateFrom && !filters.lastUpdateTo) return true;
-    if (!task.last_activity_at) return false;
-    if (filter === "custom") return matchesDateRange(localDateString(task.last_activity_at), filters.lastUpdateFrom, filters.lastUpdateTo);
+    var timestamp = activityTime(task);
+    if (!timestamp) return false;
+    if (filter === "custom") return matchesDateRange(localDateString(timestamp), filters.lastUpdateFrom, filters.lastUpdateTo);
     var days = FILTER_WINDOWS[filter];
-    return !days || Number(task.last_activity_at) >= Date.now() / 1000 - days * 86400;
+    return !days || timestamp >= Date.now() / 1000 - days * 86400;
   }
   function taskMatches(task) {
     if (selectedProject && taskProjectKey(task) !== selectedProject) return false;
@@ -595,7 +603,7 @@
     if (queueMode === "all" && statusFilter !== "all" && status !== statusFilter)
       return false;
     if (queueMode === "open" && taskPresence(task) !== "open") return false;
-    if (queueMode === "today" && !task.in_today) return false;
+    if (queueMode === "today" && !(desktopMode && task.active_today !== undefined ? task.active_today : task.in_today)) return false;
     var query = $("work-search").value.trim().toLowerCase();
     var serverMatch = Boolean(
       query &&
@@ -611,6 +619,8 @@
         task.title,
         task.summary,
         task.project_name,
+        task.repo_name,
+        task.session_cwd,
         task.session_provider,
         task.session_id,
       ]
@@ -634,7 +644,7 @@
     return true;
   }
   function visibleTasks() {
-    return latestBoard ? latestBoard.tasks.filter(taskMatches) : [];
+    return latestBoard ? latestBoard.tasks.concat(desktopMode ? latestBoard.terminal_windows || [] : []).filter(taskMatches) : [];
   }
   function taskGroupKey(task) {
     return groupBy === "priority"
@@ -642,6 +652,9 @@
       : groupBy === "terminal"
         ? (task.terminal_runtime_state || task.terminal_state || "unknown")
         : "all";
+  }
+  function activityTime(task) {
+    return Number(desktopMode && task.last_active_at !== undefined ? task.last_active_at : task.last_activity_at) || 0;
   }
   function taskComparator(a, b) {
     var priorityRank = { urgent: 0, high: 1, normal: 2, low: 3 };
@@ -651,12 +664,12 @@
     else if (sortBy === "priority") comparison = (priorityRank[a.priority] === undefined ? 99 : priorityRank[a.priority]) - (priorityRank[b.priority] === undefined ? 99 : priorityRank[b.priority]);
     else if (sortBy === "terminal") comparison = (terminalRank[a.terminal_runtime_state || a.terminal_state] === undefined ? 99 : terminalRank[a.terminal_runtime_state || a.terminal_state]) - (terminalRank[b.terminal_runtime_state || b.terminal_state] === undefined ? 99 : terminalRank[b.terminal_runtime_state || b.terminal_state]);
     else if (sortBy === "agent") comparison = String(a.session_provider || "").localeCompare(String(b.session_provider || ""));
-    else if (sortBy === "updated") comparison = Number(a.last_activity_at || 0) - Number(b.last_activity_at || 0);
+    else if (sortBy === "updated") comparison = activityTime(a) - activityTime(b);
     else if (sortBy === "due") comparison = String(a.due_date || "9999-12-31").localeCompare(String(b.due_date || "9999-12-31"));
     if (comparison) return sortDirection === "desc" ? -comparison : comparison;
     if (sortBy === "updated")
       return (
-        (Number(a.last_activity_at || 0) - Number(b.last_activity_at || 0)) * (sortDirection === "desc" ? -1 : 1) ||
+        (activityTime(a) - activityTime(b)) * (sortDirection === "desc" ? -1 : 1) ||
         String(a.task_id).localeCompare(String(b.task_id))
       );
     if (sortBy === "due")
@@ -1289,18 +1302,21 @@
   function inlineRename(task, identity, crumb, title, pencil) {
     var input = el("input", "inline-rename");
     input.value = task.title || ""; input.maxLength = 500; input.setAttribute("aria-label", "Rename " + (task.title || "task"));
+    input.title = "Enter to save · Escape to cancel";
     identity.replaceChildren(crumb, input);
     input.focus(); input.select();
     function cancel() { identity.replaceChildren(crumb, title, pencil); pencil.focus(); }
     function save() {
+      if (input.disabled) return;
       var next = input.value.trim();
       if (!next || next === task.title) return cancel();
       input.disabled = true;
       saveTask(task, "title", next).then(function (saved) {
         Object.assign(task, saved); title.textContent = task.title; cancel();
-        if (saved.terminal_title_updated === false)
-          toast("Task renamed. Terminal title unchanged: " + saved.terminal_title_reason, true);
-        else toast("Task renamed");
+        var warnings = [];
+        if (saved.session_name_updated === false) warnings.push(saved.session_name_reason);
+        if (saved.terminal_title_updated === false && taskPresence(saved) === "open") warnings.push(saved.terminal_title_reason);
+        toast(warnings.length ? "Saved in Agent Board. " + warnings.join(" ") : "Session renamed" + (saved.session_name_reason ? ". " + saved.session_name_reason : ""), Boolean(warnings.length));
       }).catch(function (error) { input.disabled = false; input.setAttribute("aria-invalid", "true"); toast("Could not rename: " + error.message, true); });
     }
     input.addEventListener("keydown", function (event) { if (event.key === "Enter") { event.preventDefault(); save(); } if (event.key === "Escape") { event.preventDefault(); cancel(); } });
@@ -1945,6 +1961,10 @@
       tasks = visibleTasks();
     root.replaceChildren();
     if (!tasks.length) return empty(root, queueMode === "open" ? "No verified open terminals. Choose All threads to review saved work." : "No tasks match this view.");
+    if (desktopMode) {
+      sorted(tasks).forEach(function (task) { root.appendChild(renderDesktopThread(task)); });
+      return;
+    }
     if (groupBy === "none") return appendGroup(root, "all", "Tasks", tasks);
     var keys = groupBy === "priority" ? PRIORITY_GROUPS : TERMINAL_GROUPS,
       labels = groupBy === "priority" ? PRIORITY_LABELS : TERMINAL_LABELS;
@@ -1956,6 +1976,77 @@
         appendGroup(root, key, labels[key], matches);
       }
     });
+  }
+  function renderDesktopThread(task) {
+    var row = el("div", "desktop-thread"),
+      isOpen = taskPresence(task) === "open",
+      title = el("button", "desktop-thread-name", task.title || "Untitled thread"),
+      identity = el("div", "desktop-thread-identity"),
+      actions = el("div", "desktop-thread-actions"),
+      runtime = task.terminal_runtime_state || task.terminal_state || "unknown",
+      metadata = el("div", "desktop-thread-meta"),
+      repo = el("span", "desktop-thread-repo", task.repo_name || task.project_name || "Unknown repo"),
+      status = el("span", "desktop-thread-status state-" + (isOpen ? runtime : "unknown"),
+        task.terminal_window ? "Thread unidentified" : isOpen ? (TERMINAL_LABELS[runtime] || "Open") : taskPresence(task) === "closed" ? "Closed" : "Unknown"),
+      controls = [], busy = false;
+    function available(provider) {
+      return (isOpen && provider === task.session_provider) || launchAction(task.actions, provider, "Continue").available;
+    }
+    function updateControls() {
+      title.disabled = busy || !available(task.session_provider);
+      controls.forEach(function (control) { control.button.disabled = busy || !available(control.provider); });
+    }
+    function activate(provider) {
+      if (busy || !available(provider)) return;
+      busy = true;
+      updateControls();
+      var operation = task.terminal_window
+        ? mutate("/api/terminal-windows/focus", "POST", {
+            pid: task.terminal_window.pid, provider: task.terminal_window.provider, started: task.terminal_window.started,
+          }).then(function (result) {
+            toast(result.focused ? "Opened the existing terminal" : result.reason, !result.focused);
+          }).catch(function (error) { toast(error.message, true); })
+        : continueOrFocusTask(task, provider);
+      return Promise.resolve(operation).finally(function () {
+        busy = false;
+        updateControls();
+      });
+    }
+    title.type = "button";
+    title.title = task.title || "Untitled thread";
+    title.addEventListener("click", function () { return activate(task.session_provider); });
+    identity.appendChild(title);
+    if (!task.terminal_window) {
+      var pencil = el("button", "desktop-thread-rename", "✎"), crumb = el("span", "");
+      crumb.hidden = true;
+      pencil.type = "button";
+      pencil.title = "Rename session";
+      pencil.setAttribute("aria-label", "Rename " + (task.title || "thread"));
+      pencil.addEventListener("click", function () { inlineRename(task, identity, crumb, title, pencil); });
+      identity.appendChild(pencil);
+    }
+    ["claude", "codex"].forEach(function (provider) {
+      var action = launchAction(task.actions, provider, "Continue"),
+        button = el("button", "desktop-thread-provider " + provider, providerName(provider));
+      button.type = "button";
+      button.setAttribute("aria-label", "Open " + (task.title || "thread") + " in " + providerName(provider));
+      button.title = !available(provider) ? action.reason || "Unavailable"
+        : isOpen && provider === task.session_provider ? "Show existing " + providerName(provider) + " terminal"
+        : "Continue this thread in " + providerName(provider);
+      button.addEventListener("click", function () { return activate(provider); });
+      controls.push({ button: button, provider: provider });
+      actions.appendChild(button);
+    });
+    updateControls();
+    repo.title = task.repo_path || task.session_cwd || "";
+    metadata.append(repo, status);
+    if (task.transcript_available === false) {
+      var warning = el("span", "desktop-thread-history-warning", "History missing");
+      warning.title = "The saved thread name exists, but its conversation file is missing on this Mac. Switching agents requires that history.";
+      metadata.appendChild(warning);
+    }
+    row.append(identity, metadata, actions);
+    return row;
   }
   function renderBoardWithFocus(id) {
     renderBoard(latestBoard);
@@ -2012,7 +2103,7 @@
     if (!force && hasProtectedWorkControls()) return Promise.resolve();
     var seq = ++boardSeq,
       query = $("work-search").value.trim(),
-      path = "/api/board" + (query ? "?" + new URLSearchParams({ q: query }) : ""),
+      path = "/api/board" + (query || desktopMode ? "?" + new URLSearchParams(Object.assign(query ? { q: query } : {}, desktopMode ? { desktop: "1" } : {})) : ""),
       boardRequest = request(path);
     fetchSharedSearch(query).then(function (results) {
       if (seq === boardSeq) {
@@ -2172,8 +2263,8 @@
     columnOrder = DATA_COLUMNS.slice();
     columnWidths = Object.create(null);
     collapsedGroups = Object.create(null);
-    sortBy = "manual";
-    sortDirection = "asc";
+    sortBy = desktopMode ? "updated" : "manual";
+    sortDirection = desktopMode ? "desc" : "asc";
     sidebarWidth = 250;
     sidebarManualOrder = false;
     try {
@@ -2182,7 +2273,7 @@
       var settings = (saved.views || {})[(selectedProject || queueMode) + ""] || {};
       if (!settings || typeof settings !== "object" || Array.isArray(settings)) settings = {};
       if (["manual", "name", "updated", "due", "priority", "terminal", "agent"].indexOf(settings.sort) >= 0) sortBy = settings.sort;
-      sortDirection = settings.sortDirection === "desc" ? "desc" : "asc";
+      if (settings.sortDirection === "desc" || settings.sortDirection === "asc") sortDirection = settings.sortDirection;
       columnOrder = normalizedColumns(settings.columns);
       if (settings.widths && typeof settings.widths === "object") Object.keys(settings.widths).forEach(function (column) { if (DATA_COLUMNS.indexOf(column) >= 0) setColumnWidth(column, settings.widths[column]); });
       collapsedGroups = settings.collapsedGroups && typeof settings.collapsedGroups === "object" ? Object.assign(Object.create(null), settings.collapsedGroups) : Object.create(null);
@@ -2665,6 +2756,11 @@
       if (button) button.setAttribute("aria-expanded", "false");
     });
   });
+  if (desktopMode) {
+    var panel = document.querySelector("#filter-popover .popover-panel");
+    document.querySelector('#sort-by option[value="updated"]').textContent = "Latest activity";
+    panel.prepend($("sort-by").closest("label"), $("sort-direction"));
+  }
   restoreViewSettings();
   request("/api/meta")
     .then(function (meta) {

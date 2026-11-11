@@ -23,7 +23,10 @@ COLLECTION = os.environ.get("CLAUDE_BROWSE_SHARED_SEARCH_COLLECTION", "shared_se
 ENV_FLAG = "CLAUDE_BROWSE_SHARED_SEARCH_ENABLED"
 MODEL = "text-embedding-3-small"
 DIMENSIONS = 256
-DEFAULT_BATCH_SIZE = 400  # Firestore permits at most 500 writes per batch.
+DEFAULT_BATCH_SIZE = 200  # Firestore permits at most 500 writes per batch.
+# Firestore also caps a commit at 10 MiB including index entries. Titles can be
+# tens of KB and repeat on every window, so the count alone is not a safe bound.
+MAX_BATCH_BYTES = 2 * 1024 * 1024
 SNIPPET_LIMIT = 1_200
 
 
@@ -132,11 +135,11 @@ def publish(
     }
     collection = client.collection(COLLECTION)
     seen: set[str] = set()
-    scanned = published = deleted = batches = 0
+    scanned = published = deleted = batches = pending_bytes = 0
     pending: list[tuple[str, str, dict[str, Any] | None, str | None]] = []
 
     def flush() -> None:
-        nonlocal published, deleted, batches
+        nonlocal published, deleted, batches, pending_bytes
         if not pending:
             return
         batch = client.batch()
@@ -170,6 +173,7 @@ def publish(
         conn.commit()
         batches += 1
         pending.clear()
+        pending_bytes = 0
 
     for row in rows:
         scanned += 1
@@ -216,8 +220,9 @@ def publish(
         seen.add(doc_id)
         digest = _payload_hash(payload)
         if force or previous.get(doc_id) != digest:
+            pending_bytes += len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
             pending.append(("set", doc_id, payload, digest))
-            if len(pending) >= batch_size:
+            if len(pending) >= batch_size or pending_bytes >= MAX_BATCH_BYTES:
                 flush()
     for doc_id in previous.keys() - seen:
         pending.append(("delete", doc_id, None, None))

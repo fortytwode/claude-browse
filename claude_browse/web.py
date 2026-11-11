@@ -36,6 +36,7 @@ from .board import (
     launches,
     presence,
     projects,
+    session_names,
     store,
     terminal_focus,
     work_items,
@@ -195,7 +196,11 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             body = self._read_json()
-            if parsed.path == "/api/tasks/reorder":
+            if parsed.path == "/api/terminal-windows/focus":
+                if set(body) != {"pid", "provider", "started"}:
+                    raise ValueError("pid, provider and started are required")
+                self._send_json(terminal_focus.focus_process(**body))
+            elif parsed.path == "/api/tasks/reorder":
                 self._reorder_tasks(body)
             elif parsed.path == "/api/workspace/spaces":
                 self._workspace_create_space(body)
@@ -317,7 +322,13 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send_json({"error": "task not found"}, status=404)
                     return
                 terminal_title_result: dict[str, object] | None = None
+                session_name_result: dict[str, object] | None = None
                 if "title" in body and task.get("session_id"):
+                    session_name_result = session_names.rename_session(
+                        str(task["session_id"]),
+                        str(task.get("session_provider") or store.DEFAULT_PROVIDER),
+                        str(task.get("title") or ""),
+                    )
                     terminal_title_result = terminal_focus.set_session_title(
                         str(task["session_id"]),
                         str(task.get("session_provider") or store.DEFAULT_PROVIDER),
@@ -328,6 +339,9 @@ class _Handler(BaseHTTPRequestHandler):
 
                     _spawn_sync(publish_session)
                 public_task = self._task_to_json(task)
+                if session_name_result is not None:
+                    public_task["session_name_updated"] = bool(session_name_result["updated"])
+                    public_task["session_name_reason"] = str(session_name_result["reason"])
                 if terminal_title_result is not None:
                     public_task["terminal_title_updated"] = bool(
                         terminal_title_result["updated"]
@@ -548,6 +562,14 @@ class _Handler(BaseHTTPRequestHandler):
             "cwd": cwd,
         }
         context = workspace.context_for_task(task, seeded=workspace_seeded)
+        repo = projects.resolve_project(cwd)
+        last_active = max(
+            _timestamp_seconds((runtime or {}).get("working_since")),
+            _timestamp_seconds((runtime or {}).get("paused_at")),
+            _timestamp_seconds((runtime or {}).get("done_at")),
+            _timestamp_seconds((indexed_session or {}).get("last_timestamp")),
+            _timestamp_seconds((indexed_session or {}).get("timestamp")),
+        )
         availability_check = _availability_check(availability)
         actions = {
             target: launches.action_status(
@@ -597,6 +619,11 @@ class _Handler(BaseHTTPRequestHandler):
             "unattended": unattended,
             "in_today": in_today,
             "last_activity_at": last_activity,
+            "last_active_at": last_active,
+            "active_today": bool(last_active and datetime.fromtimestamp(last_active).date() == date.today()),
+            "repo_name": repo["name"],
+            "repo_path": repo["path"],
+            "transcript_available": bool(launch_session.get("path") and os.path.isfile(launch_session["path"])),
             "project_available": cwd_available,
             "actions": actions,
             "start_actions": start_actions,
@@ -674,8 +701,28 @@ class _Handler(BaseHTTPRequestHandler):
             space["counts"] = _thread_counts([
                 task for task in tasks if task["space_id"] == space["space_id"]
             ])
+        terminal_windows = []
+        if ((qs or {}).get("desktop") or [""])[0] == "1":
+            for window in presence.unidentified_terminals():
+                repo = projects.resolve_project(window["cwd"])
+                terminal_windows.append({
+                    "task_id": f"terminal:{window['pid']}",
+                    "title": f"{provider_display_name(window['provider'])} terminal · {window['tty']}",
+                    "session_provider": window["provider"],
+                    "session_cwd": window["cwd"],
+                    "repo_name": repo["name"], "repo_path": repo["path"],
+                    "project_name": repo["name"], "project_key": repo["key"],
+                    "terminal_presence": "open", "terminal_runtime_state": "unknown",
+                    "work_status": "active", "priority": "normal",
+                    "terminal_window": window, "last_active_at": 0, "active_today": False,
+                    "actions": {provider: {
+                        "available": False,
+                        "reason": "The current conversation is not identified yet. Open the existing terminal.",
+                    } for provider in work_items.PROVIDERS},
+                })
         self._send_json({
             "tasks": tasks,
+            "terminal_windows": terminal_windows,
             "projects": projects_json,
             "folders": work_items.list_folders(),
             "workspace": workspace_snapshot,
@@ -913,6 +960,8 @@ def run_server(
     limit: int = _SESSIONS_LIMIT,
     *,
     port: int = 0,
+    open_browser: bool = True,
+    on_ready=None,
 ) -> None:
     """Start the local viewer in the foreground until Ctrl+C.
 
@@ -948,10 +997,13 @@ def run_server(
     url = f"http://127.0.0.1:{port}/"
     print(f"claude-browse web viewer: {url}", file=sys.stderr)
     print("Press Ctrl+C to stop.", file=sys.stderr)
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass  # headless/SSH sessions still have the URL printed above
+    if on_ready is not None:
+        on_ready(url)
+    if open_browser:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass  # headless/SSH sessions still have the URL printed above
     try:
         server.serve_forever()
     except KeyboardInterrupt:
