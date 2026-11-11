@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **SSH sessions keep Codex's native scrollable transcript.** Browser launches
+  and the `codexmobile` compatibility command use compact native presentation
+  while preserving the composer, approvals, and saved threads.
+- **Missing Codex rollouts can continue from saved history.** The handoff
+  explains that remaining history may contain only user messages and avoids
+  granting access to a missing transcript directory.
 - **Codex launches survive a deleted daemon socket.** When the shared daemon's
   socket symlink points to a missing temporary file, browser launches use
   `--no-daemon` automatically, preserving active sessions and saved threads.

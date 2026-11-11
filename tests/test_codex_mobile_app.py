@@ -1,4 +1,4 @@
-"""codexmobile: transport choice, thread-holder handling, catch-up, picker rows.
+"""Explicit app-server client: transport, thread holders, catch-up, picker rows.
 
 The fake in fixtures/fake_codex_app_server.py speaks both transports: JSON
 lines on stdio (`app-server`) and WebSocket frames (`app-server proxy`).
@@ -41,7 +41,7 @@ def run(args, tmp_path, scenario="ok", daemon=True, stdin="", seen=None, extra=N
     )
     env.update(extra or {})
     proc = subprocess.run(
-        [sys.executable, str(ROOT / "codexmobile"), *args],
+        [sys.executable, "-m", "claude_browse.codex_mobile_app", *args],
         input=stdin, capture_output=True, text=True, env=env, timeout=60,
     )
     return proc, home

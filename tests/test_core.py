@@ -961,6 +961,15 @@ def test_build_import_markdown_relocate_adds_provenance_block(monkeypatch):
     assert "read it if you" in text
 
 
+def test_build_import_markdown_missing_codex_rollout_explains_limited_history(monkeypatch):
+    _patch_relo(monkeypatch)
+    session = {**_RELO_SESSION, "provider": "codex"}
+    text = core.build_import_markdown(session, "codex", relocate=True)
+    assert "Original transcript is unavailable" in text
+    assert "Saved CodeX history may contain only user messages" in text
+    assert "Full original transcript" not in text
+
+
 def test_build_import_markdown_default_has_no_provenance_block(monkeypatch):
     _patch_relo(monkeypatch)
     text = core.build_import_markdown(_RELO_SESSION, "claude")
