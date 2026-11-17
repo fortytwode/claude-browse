@@ -2093,3 +2093,22 @@ test("simultaneous resume events share one pending refresh", async () => {
   window.dispatch("focus");
   assert.equal(requests.filter((path) => path === "/api/board").length, 2);
 });
+
+test("restoring after pagehide supersedes a pending resume read without losing the new guard", async () => {
+  const reads = [];
+  const { api, window } = loadApp({ initialize: true, fetchImpl: (path) => {
+    if (path === "/api/meta") return new Promise(() => {});
+    return new Promise((resolve) => reads.push(resolve));
+  }});
+  window.dispatch("pageshow");
+  window.dispatch("pagehide");
+  window.dispatch("pageshow");
+  assert.equal(reads.length, 2, "restoring must not wait for a stale pre-hide read");
+  reads[0]({ ok: true, json: async () => ({ tasks: [activeTask({ title: "Old" })], projects: [], folders: [] }) });
+  await flush();
+  window.dispatch("focus");
+  assert.equal(reads.length, 2, "finishing the old read must not clear the new pending guard");
+  reads[1]({ ok: true, json: async () => ({ tasks: [activeTask({ title: "Fresh" })], projects: [], folders: [] }) });
+  await flush();
+  assert.equal(api.getState().latestBoard.tasks[0].title, "Fresh");
+});

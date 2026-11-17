@@ -45,6 +45,7 @@
   var boardTimer = null,
     boardPollingPaused = false,
     boardResumePending = false,
+    boardResumeGeneration = 0,
     boardSeq = 0,
     sessionsSeq = 0,
     rowMutationTails = Object.create(null),
@@ -2348,7 +2349,9 @@
     boardPollingPaused = false;
     if (boardResumePending) return;
     boardResumePending = true;
+    var generation = ++boardResumeGeneration;
     fetchBoard().finally(function () {
+      if (generation !== boardResumeGeneration) return;
       boardResumePending = false;
       scheduleBoardPoll();
     });
@@ -3007,6 +3010,8 @@
     });
   window.addEventListener("pagehide", function () {
     boardPollingPaused = true;
+    ++boardResumeGeneration;
+    boardResumePending = false;
     if (boardTimer !== null) clearTimeout(boardTimer);
     boardTimer = null;
   });
