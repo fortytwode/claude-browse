@@ -2112,3 +2112,36 @@ test("restoring after pagehide supersedes a pending resume read without losing t
   await flush();
   assert.equal(api.getState().latestBoard.tasks[0].title, "Fresh");
 });
+
+test("toolbar shows saved filter values and sort direction without opening a menu", () => {
+  const { api, elementFor } = loadApp({ desktop: true });
+  elementFor("sort-by").options = [{ value: "updated", textContent: "Latest updated" }, { value: "priority_number", textContent: "Priority number" }, { value: "manual", textContent: "Manual" }];
+  elementFor("filter-provider").options = [{ value: "codex", textContent: "CodeX" }];
+  elementFor("filter-status").options = [{ value: "archived", textContent: "Archived" }];
+  elementFor("filter-starred").options = [{ value: "only", textContent: "Starred only" }];
+  api.applySnapshot({ scope: "all", status: "archived", sort: "updated", sortDirection: "desc", filters: { provider: "codex", starred: "only", lastUpdate: "custom", lastUpdateFrom: "2026-11-01", lastUpdateTo: "2026-11-17" } });
+  api.syncToolbarControls();
+  assert.equal(elementFor("sort-summary").textContent, "Latest updated ↓");
+  assert.equal(elementFor("sort-summary").getAttribute("aria-label"), "Sort by Latest updated, Newest first");
+  assert.equal(elementFor("filter-summary").textContent, "Filters · 4");
+  assert.deepEqual(elementFor("active-filter-list").children.map((chip) => chip.textContent), ["Work: Archived", "Provider: CodeX", "Starred only", "Updated: 2026-11-01 – 2026-11-17"]);
+  api.setState({ sortBy: "priority_number", sortDirection: "asc" });
+  api.syncToolbarControls();
+  assert.equal(elementFor("sort-summary").textContent, "Priority number ↑");
+  assert.equal(elementFor("sort-summary").getAttribute("aria-label"), "Sort by Priority number, Lowest number first");
+});
+
+test("cleared or empty custom filters leave no stale chips or count", () => {
+  const { api, elementFor } = loadApp({ desktop: true });
+  api.applySnapshot({ scope: "all", status: "all", sort: "manual", filters: { due: "custom", dueTo: "2026-11-17" } });
+  api.syncToolbarControls();
+  assert.equal(elementFor("active-filter-list").children[0].textContent, "Due: Until 2026-11-17");
+  api.applySnapshot({ scope: "all", status: "all", sort: "manual", filters: { due: "custom" } });
+  api.syncToolbarControls();
+  assert.equal(elementFor("filter-summary").textContent, "No filters");
+  assert.equal(elementFor("filter-summary").getAttribute("data-active"), "false");
+  assert.equal(elementFor("active-filter-list").hidden, true);
+  assert.equal(elementFor("active-filter-list").children.length, 0);
+  assert.equal(elementFor("sort-summary").textContent.includes("↑"), false);
+  assert.equal(elementFor("sort-summary").textContent.includes("↓"), false);
+});

@@ -405,6 +405,45 @@
     $("sort-direction").setAttribute("aria-label", "Sort " + label);
     $("sort-direction").hidden = sortBy === "manual";
     refreshCustomSelects();
+    var sortLabel = selectedOptionText("sort-by", sortBy),
+      sortSummary = $("sort-summary");
+    sortSummary.textContent = sortLabel + (sortBy === "manual" ? "" : sortDirection === "desc" ? " ↓" : " ↑");
+    sortSummary.setAttribute("aria-label", "Sort by " + sortLabel + (sortBy === "manual" ? "" : ", " + label));
+    var filterLabels = [];
+    if (queueMode === "all" && statusFilter !== "all")
+      filterLabels.push("Work: " + selectedOptionText("filter-status", statusFilter));
+    [
+      ["provider", "Provider"], ["priority", "Priority"], ["terminal", "State"],
+      ["presence", "Terminal"], ["starred", ""], ["due", "Due"], ["lastUpdate", "Updated"],
+    ].forEach(function (entry) {
+      var field = entry[0], value = filters[field] || "any";
+      if (value === "any") return;
+      var text;
+      if (value === "custom") {
+        var from = filters[field + "From"], to = filters[field + "To"];
+        if (!from && !to) return;
+        text = from && to ? from + " – " + to : from ? "From " + from : "Until " + to;
+      } else {
+        text = selectedOptionText("filter-" + (field === "lastUpdate" ? "last-update" : field), value);
+      }
+      filterLabels.push((entry[1] ? entry[1] + ": " : "") + text);
+    });
+    var summary = $("filter-summary"), chips = $("active-filter-list");
+    summary.textContent = filterLabels.length ? "Filters · " + filterLabels.length : "No filters";
+    summary.setAttribute("data-active", filterLabels.length ? "true" : "false");
+    summary.setAttribute("aria-label", filterLabels.length ? "Filters: " + filterLabels.join(", ") : "No filters applied");
+    summary.title = filterLabels.join(" · ");
+    chips.replaceChildren();
+    chips.hidden = !filterLabels.length;
+    filterLabels.forEach(function (text) {
+      var chip = el("span", "active-filter", text);
+      chip.setAttribute("role", "listitem");
+      chips.appendChild(chip);
+    });
+  }
+  function selectedOptionText(id, value) {
+    var option = Array.prototype.find.call($(id).options || [], function (item) { return item.value === value; });
+    return option ? option.textContent : value;
   }
   var customSelects = Object.create(null);
   function refreshCustomSelect(id) {
@@ -1985,13 +2024,6 @@
     renderProjectDetail();
     syncToolbarControls();
     updateReorderReason();
-    var filterCount = ["provider", "priority", "terminal", "due", "presence", "starred", "lastUpdate"].filter(function (field) {
-      return (filters[field] || "any") !== "any" && (filters[field] !== "custom" || filters[field + "From"] || filters[field + "To"]);
-    }).length;
-    $("filter-summary").textContent = filterCount
-      ? filterCount + " Filters"
-      : "Filters";
-    $("filter-summary").setAttribute("data-active", filterCount ? "true" : "false");
     $("today-note").hidden = queueMode !== "today";
     $("work-heading").textContent = selectedProjectData()
       ? projectName(selectedProjectData())

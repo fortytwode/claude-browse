@@ -461,6 +461,25 @@ button:disabled {
   flex-wrap: wrap;
   gap: 7px;
 }
+.active-filter-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0 0 10px;
+}
+.active-filter-list:empty,
+.active-filter-list[hidden] { display: none; }
+.active-filter {
+  max-width: 100%;
+  padding: 3px 8px;
+  border: 1px solid #e6e2ed;
+  border-radius: 999px;
+  background: #faf9fc;
+  color: #62616b;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
 .toolbar-controls > label {
   display: grid;
   gap: 4px;
@@ -516,6 +535,7 @@ select {
   display: none;
 }
 .toolbar-select-button {
+  position: relative;
   width: 100%;
   height: 34px;
   padding: 5px 29px 5px 11px;
@@ -531,16 +551,29 @@ select {
   cursor: pointer;
 }
 .toolbar-select-button::after {
-  content: "⌄";
+  content: "";
   position: absolute;
-  top: 5px;
-  right: 10px;
+  top: 50%;
+  right: 11px;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: translateY(-70%) rotate(45deg);
   color: var(--muted);
-  font-size: 18px;
+  pointer-events: none;
+}
+.toolbar-select-button[aria-expanded="true"]::after {
+  transform: translateY(-20%) rotate(225deg);
 }
 .toolbar-select-button[aria-expanded="true"] {
   border-color: var(--purple);
   box-shadow: 0 0 0 3px rgba(108, 76, 231, .11);
+}
+.toolbar-select-button:focus-visible,
+.popover summary:focus-visible {
+  outline: 2px solid var(--purple);
+  outline-offset: 2px;
 }
 .toolbar-select-menu {
   position: absolute;
@@ -583,11 +616,13 @@ select {
   position: relative;
 }
 .popover summary {
+  position: relative;
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 5px;
   height: 34px;
-  padding: 6px 13px;
+  padding: 6px 27px 6px 13px;
   border: 1px solid #cfc2ff;
   border-radius: 10px;
   color: var(--purple);
@@ -598,9 +633,19 @@ select {
   cursor: pointer;
 }
 .popover summary::after {
-  content: "⌄";
-  color: var(--muted);
-  font-size: 13px;
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 11px;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+.popover[open] summary::after {
+  transform: translateY(-20%) rotate(225deg);
 }
 .popover[open] summary,
 .popover summary[data-active="true"] {
@@ -608,11 +653,6 @@ select {
   background: var(--purple-soft);
   color: var(--purple);
   box-shadow: 0 0 0 3px rgba(108, 76, 231, .11);
-}
-.popover summary[data-active="true"]::before {
-  content: "•";
-  font-size: 17px;
-  line-height: 0;
 }
 .popover summary::-webkit-details-marker {
   display: none;
@@ -1539,7 +1579,10 @@ dialog::backdrop {
 .desktop-compact .toolbar-controls { display: flex; flex-wrap: nowrap; align-items: center; }
 .desktop-compact .search-field { flex: 1; min-width: 0; width: auto; }
 .desktop-compact #work-search { width: 100%; }
-.desktop-compact .popover summary { height: 30px; font-size: 11px; padding: 4px 8px; background: #28212f; border-color: #4a3c55; }
+.desktop-compact .popover summary { flex: 0 0 auto; height: 30px; min-width: max-content; font-size: 11px; padding: 4px 25px 4px 8px; background: #28212f; border-color: #4a3c55; }
+.desktop-compact .popover summary::after { right: 9px; }
+.desktop-compact .active-filter-list { margin: 0 10px 6px; }
+.desktop-compact .active-filter { border-color: #4a3c55; background: #28212f; color: var(--muted); font-size: 10px; }
 .desktop-compact .popover-panel { width: min(365px, calc(100vw - 24px)); max-height: calc(100vh - 155px); overflow-y: auto; top: 36px; padding: 12px; gap: 8px; background: #241d2c; border-color: #4a3c55; }
 .desktop-compact .popover-panel::before { content: "Filter threads"; font-size: 13px; }
 .desktop-compact .popover-panel label { font-size: 11px; }
