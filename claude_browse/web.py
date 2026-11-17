@@ -650,6 +650,10 @@ class _Handler(BaseHTTPRequestHandler):
         query = ((qs or {}).get("q") or [""])[0].strip()
         availability = _provider_availability()
         availability_check = _availability_check(availability)
+        # Read tasks before seeding the workspace snapshot. A concurrent task
+        # import can create a project/list; taking the snapshot first would
+        # leave this request with a task whose list is absent from the seed.
+        raw_tasks = work_items.list_items(include_done=True)
         workspace_snapshot = workspace.snapshot()
         for listing in workspace_snapshot["lists"]:
             listing.update(workspace.context_for_list(listing["list_key"], seeded=True))
@@ -658,7 +662,6 @@ class _Handler(BaseHTTPRequestHandler):
                     None, listing, target, availability_check=availability_check
                 ) for target in work_items.PROVIDERS
             }
-        raw_tasks = work_items.list_items(include_done=True)
         runtime_rows = [
             store.get(session_id) if (session_id := str(task.get("session_id") or "")) else None
             for task in raw_tasks
