@@ -173,8 +173,6 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/board":
                 self._serve_board(parse_qs(parsed.query))
-            elif path == "/api/shared-search":
-                self._serve_shared_search(parse_qs(parsed.query))
             elif path.startswith("/api/tasks/") and path.endswith("/history"):
                 task_id = unquote(path[len("/api/tasks/") : -len("/history")])
                 self._serve_task_history(task_id)
@@ -196,7 +194,12 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             body = self._read_json()
-            if parsed.path == "/api/terminal-windows/focus":
+            if parsed.path == "/api/shared-search":
+                query = body.get("q", "")
+                if not isinstance(query, str):
+                    raise ValueError("q must be a string")
+                self._serve_shared_search(query.strip())
+            elif parsed.path == "/api/terminal-windows/focus":
                 if set(body) != {"pid", "provider", "started"}:
                     raise ValueError("pid, provider and started are required")
                 self._send_json(terminal_focus.focus_process(**body))
@@ -456,14 +459,13 @@ class _Handler(BaseHTTPRequestHandler):
             conn.close()
         self._send_json({"sessions": [_session_to_json(r, prefixes) for r in rows]})
 
-    def _serve_shared_search(self, qs: dict[str, list[str]]) -> None:
+    def _serve_shared_search(self, query: str) -> None:
         """Return optional cross-machine semantic matches without failing local search.
 
         This endpoint deliberately exposes only the compact, indexed result
         metadata. A thread still belongs to the Mac that captured it, so the
         browser must present these results as read-only context.
         """
-        query = (qs.get("q") or [""])[0].strip()
         if not query:
             self._send_json({"query": query, "matches": []})
             return

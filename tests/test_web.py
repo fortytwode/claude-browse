@@ -198,8 +198,8 @@ def test_shared_search_returns_cross_machine_excerpts_without_local_launch_data(
         ],
     )
 
-    status, payload = _get_json(
-        base + "/api/shared-search?q=" + urllib.parse.quote("find my review of Anna")
+    status, payload = _mutate_json(
+        base + "/api/shared-search", "POST", {"q": "find my review of Anna"}
     )
 
     assert status == 200
@@ -221,6 +221,19 @@ def test_shared_search_returns_cross_machine_excerpts_without_local_launch_data(
     }
 
 
+def test_shared_search_requires_authorized_post(web_server, monkeypatch):
+    base, _server = web_server
+    calls = []
+    monkeypatch.setattr("claude_browse.shared_search_query.search", calls.append)
+    with pytest.raises(urllib.error.HTTPError) as old_route:
+        _get_json(base + "/api/shared-search?q=example")
+    assert old_route.value.code == 404
+    with pytest.raises(urllib.error.HTTPError) as missing_token:
+        _mutate_json(base + "/api/shared-search", "POST", {"q": "example"}, token="")
+    assert missing_token.value.code == 403
+    assert not calls
+
+
 def test_shared_search_is_empty_when_optional_index_is_unavailable(web_server, monkeypatch):
     base, _server = web_server
     monkeypatch.setattr(
@@ -228,7 +241,7 @@ def test_shared_search_is_empty_when_optional_index_is_unavailable(web_server, m
         lambda _query: (_ for _ in ()).throw(RuntimeError("Firestore unavailable")),
     )
 
-    status, payload = _get_json(base + "/api/shared-search?q=review%20Anna")
+    status, payload = _mutate_json(base + "/api/shared-search", "POST", {"q": "review Anna"})
 
     assert status == 200
     assert payload == {"query": "review Anna", "matches": []}
@@ -383,7 +396,7 @@ def test_web_assets_define_reading_first_work_and_history_contract():
     assert "setLaunchBusy" in javascript
     assert "rowMutationTails" in javascript
     assert "delete rowMutationTails[key]" in javascript
-    assert '"/api/shared-search?"' in javascript
+    assert 'request("/api/shared-search", {' in javascript
     assert "Cross-machine semantic matches" in javascript
     assert "Read-only excerpts from indexed Macs" in javascript
     assert "sharedSearchCache" in javascript

@@ -2310,13 +2310,23 @@
       container.appendChild(hit);
     });
   }
+  function requestSharedSearch(query) {
+    // Mission Control mounts its own owner-authenticated index at this page.
+    if (window.location.pathname.replace(/\/$/, "") === "/tools/agent-board") {
+      return request("/api/shared-search?" + new URLSearchParams({ q: query }));
+    }
+    return request("/api/shared-search", {
+      method: "POST",
+      body: JSON.stringify({ q: query }),
+    });
+  }
   function fetchSharedSearch(query) {
     if (!query || query.length < 8) return Promise.resolve([]);
     var cached = sharedSearchCache[query],
       now = Date.now();
     if (cached && cached.expiresAt > now) return Promise.resolve(cached.results);
     if (sharedSearchInFlight[query]) return sharedSearchInFlight[query];
-    sharedSearchInFlight[query] = request("/api/shared-search?" + new URLSearchParams({ q: query }))
+    sharedSearchInFlight[query] = requestSharedSearch(query)
       .then(function (data) {
         var results = Array.isArray(data.matches)
           ? data.matches
