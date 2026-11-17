@@ -163,11 +163,11 @@
               />
             </div>
             <details id="sort-popover" class="popover desktop-sort">
-              <summary>Sort</summary>
+              <summary id="sort-summary">Latest updated ↓</summary>
               <div class="popover-panel"></div>
             </details>
             <details id="filter-popover" class="popover">
-              <summary id="filter-summary">Filters</summary>
+              <summary id="filter-summary">No filters</summary>
               <div class="popover-panel">
                 <label
                   >Stars<select id="filter-starred">
@@ -270,6 +270,7 @@
             ><button id="sort-direction" class="sort-direction" type="button" aria-label="Sort descending">↓ Newest first</button>
           </div>
         </div>
+        <div id="active-filter-list" class="active-filter-list" role="list" aria-label="Active filters" hidden></div>
         <p id="reorder-reason" class="reorder-reason" aria-live="polite"></p>
         <section id="shared-work-results" class="shared-search-results" hidden aria-live="polite" aria-label="Cross-machine semantic matches"></section>
         <div id="task-groups"></div>
