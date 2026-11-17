@@ -13,6 +13,7 @@ final class DesktopDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
     var pinItem: NSMenuItem!
     var stopping = false
     var generation = 0
+    var wakeObserver: NSObjectProtocol?
     var pinned = UserDefaults.standard.object(forKey: "pinned") as? Bool ?? true
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -55,6 +56,9 @@ final class DesktopDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         window.minSize = NSSize(width: 380, height: 380)
         window.isReleasedWhenClosed = false
         window.delegate = self
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.resumeBoard() }
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         if !window.setFrameUsingName("AgentBoardDesktop") {
             if let visible = NSScreen.main?.visibleFrame {
@@ -82,13 +86,15 @@ final class DesktopDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
     }
 
     func showWindow() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+    func applicationDidBecomeActive(_ notification: Notification) { resumeBoard() }
     @objc func toggleWindow() { if window.isVisible { window.orderOut(nil) } else { showWindow() } }
     func windowShouldClose(_ sender: NSWindow) -> Bool { sender.orderOut(nil); return false }
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return true }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); resumeBoard(); return true }
     func applyPin() { window.level = pinned ? .floating : .normal; pinItem.state = pinned ? .on : .off }
     @objc func togglePin() { pinned.toggle(); UserDefaults.standard.set(pinned, forKey: "pinned"); applyPin() }
     @objc func toggleSpaces() { webView.evaluateJavaScript("document.documentElement.classList.toggle('desktop-show-sidebar')", completionHandler: nil) }
     @objc func reloadBoard() { if let url = boardURL { webView.load(URLRequest(url: url)) } else { restartBackend() } }
+    func resumeBoard() { webView.evaluateJavaScript("window.dispatchEvent(new Event('agent-board-resume'))", completionHandler: nil) }
     @objc func openBrowser() { if let url = boardURL { var c = URLComponents(url: url, resolvingAgainstBaseURL: false)!; c.query = nil; if let fullURL = c.url { NSWorkspace.shared.open(fullURL) } } }
     @objc func requestTerminalAccess() {
         // Ask through the native app so macOS records the permission under Agent Board.
@@ -113,7 +119,11 @@ final class DesktopDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
         output = nil
         boardURL = nil
     }
-    func applicationWillTerminate(_ notification: Notification) { stopping = true; stopBackend() }
+    func applicationWillTerminate(_ notification: Notification) {
+        stopping = true
+        if let observer = wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        stopBackend()
+    }
 
     func message(_ detail: String) {
         let safe = detail.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
@@ -184,6 +194,7 @@ final class DesktopDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         if (error as NSError).code != NSURLErrorCancelled { message("Could not load the board. Restart Connection from the menu bar.") }
     }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { reloadBoard() }
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
         let alert = NSAlert(); alert.messageText = message; alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { completionHandler($0 == .alertFirstButtonReturn) }

@@ -103,12 +103,13 @@ class FakeElement {
 }
 
 function matchesSelector(node, selector) {
+  if (selector.includes(",")) return selector.split(",").some((part) => matchesSelector(node, part.trim()));
   if (selector.startsWith("#")) return node.id === selector.slice(1);
   const open = selector.endsWith("[open]");
   const className = selector.replace(/^\./, "").replace("[open]", "");
   if (selector.startsWith("."))
     return node.classList.contains(className) && (!open || Boolean(node.open));
-  return node.tagName.toLowerCase() === selector.toLowerCase();
+  return node.tagName.toLowerCase() === selector.replace("[open]", "").toLowerCase() && (!open || Boolean(node.open));
 }
 
 function localDate(instant, year, monthIndex, day) {
@@ -210,6 +211,7 @@ function loadApp({ DateImpl = Date, fetchImpl, initialize = false, setTimeoutImp
   const testExports = `
 globalThis.testApi = {
   fetchBoard,
+  scheduleBoardPoll,
   renderBoard,
   syncToolbarControls,
   isDueTodayOrOverdue,
@@ -2013,4 +2015,81 @@ test("Archive from snooze persists archive and removes even an open due reminder
   assert.equal(api.taskMatches(task), false);
   api.setState({ queueMode: "all", statusFilter: "all" });
   assert.equal(api.taskMatches(task), true);
+});
+
+
+test("Sort and Filters popovers do not freeze live terminal updates", async () => {
+  const board = { tasks: [activeTask({ title: "This morning", terminal_presence: "open" })], projects: [], folders: [] };
+  const { api, document } = loadApp({ desktop: true, fetchImpl: () => Promise.resolve({ ok: true, json: async () => board }) });
+  for (const id of ["sort-popover", "filter-popover"]) {
+    const popup = document.createElement("details");
+    popup.id = id;
+    popup.open = true;
+    await api.fetchBoard();
+    assert.equal(api.getState().latestBoard.tasks[0].title, "This morning");
+    assert.equal(popup.open, true, "polling preserves the open toolbar");
+    popup.open = false;
+  }
+});
+
+test("a stalled board read times out and the next poll recovers", async () => {
+  const timers = [], requests = [];
+  const { api, elementFor } = loadApp({
+    setTimeoutImpl: (callback, delay) => { const timer = { callback, delay }; timers.push(timer); return timer; },
+    clearTimeoutImpl: (timer) => { timer.cleared = true; },
+    fetchImpl: (path, options) => new Promise((resolve, reject) => {
+      requests.push({ path, options, resolve });
+      if (options.signal) options.signal.addEventListener("abort", () => reject(new Error("aborted")));
+    }),
+  });
+  const read = api.fetchBoard();
+  assert.ok(requests[0].options.signal, "board reads need a deadline to keep polling alive");
+  timers.find((timer) => timer.delay === 15000).callback();
+  await read;
+  assert.match(elementFor("board-error").textContent, /refresh.*timed out.*retry/i);
+  const retry = api.fetchBoard();
+  requests[1].resolve({ ok: true, json: async () => ({ tasks: [activeTask({ title: "Recovered" })], projects: [], folders: [] }) });
+  await retry;
+  assert.equal(api.getState().latestBoard.tasks[0].title, "Recovered");
+  assert.equal(elementFor("board-error").hidden, true);
+});
+
+test("returning after pagehide restarts one poll loop and immediately refreshes", async () => {
+  const timers = [], requests = [];
+  const { window } = loadApp({ initialize: true,
+    setTimeoutImpl: (callback, delay) => { const timer = { callback, delay }; timers.push(timer); return timer; },
+    clearTimeoutImpl: (timer) => { timer.cleared = true; },
+    fetchImpl: (path) => { requests.push(path); return Promise.resolve({ ok: true, json: async () => path === "/api/meta" ? { csrf_token: "test" } : { tasks: [], projects: [], folders: [] } }); },
+  });
+  await flush();
+  assert.equal(timers.filter((timer) => timer.delay === 10000 && !timer.cleared).length, 1);
+  window.dispatch("pagehide");
+  assert.equal(timers.filter((timer) => timer.delay === 10000 && !timer.cleared).length, 0);
+  const before = requests.filter((path) => path === "/api/board").length;
+  window.dispatch("pageshow");
+  await flush();
+  assert.equal(requests.filter((path) => path === "/api/board").length, before + 1);
+  window.dispatch("focus");
+  await flush();
+  assert.equal(timers.filter((timer) => timer.delay === 10000 && !timer.cleared).length, 1, "resume must not multiply poll loops");
+});
+
+
+test("simultaneous resume events share one pending refresh", async () => {
+  const requests = [];
+  let resolveRead;
+  const { window } = loadApp({ initialize: true, fetchImpl: (path) => {
+    requests.push(path);
+    if (path === "/api/meta") return new Promise(() => {});
+    return new Promise((resolve) => { resolveRead = resolve; });
+  }});
+  window.dispatch("pageshow");
+  window.dispatch("focus");
+  window.dispatch("online");
+  window.dispatch("agent-board-resume");
+  assert.equal(requests.filter((path) => path === "/api/board").length, 1);
+  resolveRead({ ok: true, json: async () => ({ tasks: [], projects: [], folders: [] }) });
+  await flush();
+  window.dispatch("focus");
+  assert.equal(requests.filter((path) => path === "/api/board").length, 2);
 });

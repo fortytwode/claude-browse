@@ -43,6 +43,8 @@
     },
     collapsedFolders = Object.create(null);
   var boardTimer = null,
+    boardPollingPaused = false,
+    boardResumePending = false,
     boardSeq = 0,
     sessionsSeq = 0,
     rowMutationTails = Object.create(null),
@@ -103,18 +105,18 @@
       options.headers["Content-Type"] = "application/json";
       options.headers["X-Agent-Board-Token"] = csrfToken;
     }
-    // A stalled task edit must not hold its save queue or detail dialog open
-    // indefinitely. Aborting the response does not prove the server rolled back.
-    var controller =
-        options.method === "PATCH" && path.indexOf("/api/tasks/") === 0
-          ? new AbortController()
-          : null,
+    // Bound board reads too: polling waits for this promise before scheduling
+    // its next attempt. A lost connection must not stop updates indefinitely.
+    var taskEdit = options.method === "PATCH" && path.indexOf("/api/tasks/") === 0,
+      boardRead = path === "/api/meta" || path.split("?")[0] === "/api/board",
+      controller = taskEdit || boardRead ? new AbortController() : null,
       timer = controller
         ? setTimeout(function () {
             controller.abort();
           }, 15000)
         : null;
     if (controller) options.signal = controller.signal;
+    if (boardRead) options.cache = "no-store";
     return fetch(path, options)
       .then(function (res) {
         return res
@@ -131,7 +133,8 @@
       .catch(function (error) {
         if (controller && controller.signal.aborted)
           throw new Error(
-            "Saving timed out. The change may have reached the server; check again before retrying",
+            taskEdit ? "Saving timed out. The change may have reached the server; check again before retrying"
+              : "Board refresh timed out. Retrying automatically.",
           );
         throw error;
       })
@@ -498,7 +501,7 @@
       activePointerGesture ||
       Boolean(document.querySelector(".inline-rename")) ||
       hasFocusedPriority() ||
-      Boolean(document.querySelector("details[open], dialog[open]"))
+      Boolean(document.querySelector("dialog[open]"))
     );
   }
   function queueReorder(key, operation) {
@@ -2301,7 +2304,10 @@
     return sharedSearchInFlight[query];
   }
   function fetchBoard(force) {
-    if (!force && hasProtectedWorkControls()) return Promise.resolve();
+    if (!force && hasProtectedWorkControls()) {
+      $("board-sync").textContent = "Live updates paused while editing";
+      return Promise.resolve();
+    }
     var seq = ++boardSeq,
       query = $("work-search").value.trim(),
       path = "/api/board" + (query || desktopMode ? "?" + new URLSearchParams(Object.assign(query ? { q: query } : {}, desktopMode ? { desktop: "1" } : {})) : ""),
@@ -2317,19 +2323,35 @@
         if (seq === boardSeq && !hasProtectedWorkControls()) {
           $("board-error").hidden = true;
           renderBoard(data);
+          $("board-sync").textContent = "Live · checked " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
         }
       })
       .catch(function (error) {
         if (seq === boardSeq) {
+          $("board-sync").textContent = "Update delayed · retrying automatically";
           $("board-error").textContent = error.message;
           $("board-error").hidden = false;
         }
       });
   }
   function scheduleBoardPoll() {
+    if (boardTimer !== null) clearTimeout(boardTimer);
+    boardTimer = null;
+    if (boardPollingPaused) return;
     boardTimer = setTimeout(function () {
+      boardTimer = null;
       fetchBoard().finally(scheduleBoardPoll);
     }, 10000);
+  }
+  function resumeBoardPolling() {
+    if (document.hidden) return;
+    boardPollingPaused = false;
+    if (boardResumePending) return;
+    boardResumePending = true;
+    fetchBoard().finally(function () {
+      boardResumePending = false;
+      scheduleBoardPoll();
+    });
   }
   function validSavedViews(value) {
     return Array.isArray(value)
@@ -2984,8 +3006,14 @@
       fetchBoard().finally(scheduleBoardPoll);
     });
   window.addEventListener("pagehide", function () {
-    if (boardTimer) clearTimeout(boardTimer);
+    boardPollingPaused = true;
+    if (boardTimer !== null) clearTimeout(boardTimer);
+    boardTimer = null;
   });
+  window.addEventListener("pageshow", resumeBoardPolling);
+  window.addEventListener("focus", resumeBoardPolling);
+  window.addEventListener("online", resumeBoardPolling);
+  document.addEventListener("visibilitychange", resumeBoardPolling);
   window.addEventListener("beforeunload", function (event) {
     if (
       projectDescriptionDirty() ||

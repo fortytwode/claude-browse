@@ -793,6 +793,32 @@ def test_board_get_is_read_only_and_does_not_enroll_fts_only_or_late_runtime_row
     assert work_items.get_for_session("late-runtime") is None
 
 
+def test_board_refresh_handles_project_created_after_workspace_snapshot(
+    web_server, monkeypatch
+):
+    base, _server = web_server
+    _board_thread("already-listed", cwd="/w/home", name="Existing")
+    snapshot = workspace.snapshot
+
+    def snapshot_then_import_project():
+        result = snapshot()
+        _board_thread("imported-during-refresh", cwd="/w/new-project", name="Imported")
+        return result
+
+    monkeypatch.setattr(workspace, "snapshot", snapshot_then_import_project)
+
+    status, board = _get_json(base + "/api/board")
+
+    assert status == 200
+    assert {task["session_id"] for task in board["tasks"]} == {"already-listed"}
+    assert work_items.get_for_session("imported-during-refresh") is not None
+
+    _status, next_board = _get_json(base + "/api/board")
+    assert {task["session_id"] for task in next_board["tasks"]} == {
+        "already-listed", "imported-during-refresh"
+    }
+
+
 def test_board_normalizes_today_states_actions_and_order(web_server, monkeypatch):
     base, _server = web_server
     monkeypatch.setattr(web, "_provider_available", lambda _provider: True)

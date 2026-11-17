@@ -1600,3 +1600,6 @@ dialog::backdrop {
 .desktop-compact #snooze-dialog .snooze-thread-title { color: #d5c5df; }
 .desktop-compact #sort-popover .popover-panel label { grid-template-columns: 40px minmax(0, 1fr); }
 .desktop-compact #sort-popover .toolbar-select-button { white-space: nowrap; }
+
+.board-sync { margin: 6px 0; font-size: 11px; color: var(--muted); }
+.desktop-compact .board-sync { margin: 5px 10px 0; font-size: 10px; }
