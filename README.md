@@ -248,10 +248,13 @@ Examples:
   - `where i was asking about teammate feedback`
   - `last closeout session for client`
   - `brand brief where we questioned the opportunities`
-  - `runna sca2` matches the phrase `runna sca2`; several bare words typed
-    together are one phrase, not a broad AND over each word. Only when no
-    thread contains the phrase does the picker relax to all-words-anywhere,
-    and it labels those rows `near phrase`.
+  - Browse and Agent Board look for the full phrase first, even when you
+    type a sentence without quotes. When the phrase has no hits, text search
+    can broaden to related wording.
+  - Paste a full HTTP or HTTPS link to find mentions of that URL. The query
+    string and fragment are part of the match. ClickUp links match by task ID.
+  - Open **All threads** in Agent Board to include closed threads. Search
+    checks earlier conversations attached to each thread too.
   - `"runna sca2"` forces the phrase inside a longer sentence-style query
 
 - In `claude-browse`, a Claude thread resumes natively in Claude and CodeX or Gemini threads start fresh Claude sessions with imported context.

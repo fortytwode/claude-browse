@@ -457,7 +457,13 @@ class _Handler(BaseHTTPRequestHandler):
                 rows = fts.list_recent(conn, limit=limit, cwd=cwd)
         finally:
             conn.close()
-        self._send_json({"sessions": [_session_to_json(r, prefixes) for r in rows]})
+        kind = rows[0].get("search_match_kind", "") if rows else ""
+        if fts.is_url_query(query):
+            kind = "url"
+        self._send_json({
+            "sessions": [_session_to_json(row, prefixes) for row in rows],
+            "search_match_kind": kind,
+        })
 
     def _serve_shared_search(self, query: str) -> None:
         """Return optional cross-machine semantic matches without failing local search.
@@ -671,6 +677,7 @@ class _Handler(BaseHTTPRequestHandler):
         presence_states = presence.snapshot([row for row in runtime_rows if row])
         indexed: dict[str, dict] = {}
         search_task_ids: set[str] = set()
+        search_match_kind = "url" if fts.is_url_query(query) else ""
         try:
             conn = fts.open_db(read_only=True)
             try:
@@ -680,11 +687,10 @@ class _Handler(BaseHTTPRequestHandler):
                     if row:
                         indexed[session_id] = row
                 if query:
-                    search_task_ids = work_items.task_ids_for_sessions(
-                        fts.matching_session_ids(
-                            conn, query, candidate_sids=work_items.searchable_session_ids()
-                        )
+                    session_ids, search_match_kind = fts.work_search_matches(
+                        conn, query, candidate_sids=work_items.searchable_session_ids()
                     )
+                    search_task_ids = work_items.task_ids_for_sessions(session_ids)
             finally:
                 conn.close()
         except (OSError, sqlite3.Error):
@@ -748,6 +754,7 @@ class _Handler(BaseHTTPRequestHandler):
             "workspace": workspace_snapshot,
             "counts": _thread_counts(tasks),
             "search_query": query,
+            "search_match_kind": search_match_kind,
             "search_task_ids": sorted(search_task_ids),
         })
 

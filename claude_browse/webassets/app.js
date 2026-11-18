@@ -12,6 +12,8 @@
     latestBoard = null,
     sharedWorkResults = [],
     sharedSessionResults = [],
+    sharedWorkQuery = null,
+    sharedSessionQuery = null,
     sharedSearchCache = Object.create(null),
     sharedSearchInFlight = Object.create(null),
     activeSid = null,
@@ -672,10 +674,8 @@
       latestBoard.search_task_lookup &&
       latestBoard.search_task_lookup[task.task_id]
     );
-    if (
-      query &&
-      !serverMatch &&
-      [
+    var authoritativeSearch = Boolean(latestBoard && String(latestBoard.search_query || "").toLowerCase() === query && ["url", "phrase"].indexOf(latestBoard.search_match_kind) >= 0);
+    if (query && !(serverMatch || (!authoritativeSearch && [
         task.title,
         task.summary,
         task.project_name,
@@ -686,9 +686,7 @@
       ]
         .join(" ")
         .toLowerCase()
-        .indexOf(query) < 0
-    )
-      return false;
+        .indexOf(query) >= 0))) return false;
     if (
       filters.provider !== "any" &&
       task.session_provider !== filters.provider
@@ -2346,6 +2344,27 @@
       });
     return sharedSearchInFlight[query];
   }
+  function containsHttpUrl(query) {
+    return /https?:\/\/\S+/i.test(query || "");
+  }
+  function showSharedSearch(containerId, query, seq, currentSeq, localResult) {
+    var inputId = containerId === "shared-work-results" ? "work-search" : "search-input";
+    if (seq !== currentSeq() || $(inputId).value.trim() !== query) return Promise.resolve();
+    if (localResult && (localResult.search_match_kind === "url" || localResult.search_match_kind === "phrase")) {
+      if (containerId === "shared-work-results") sharedWorkResults = [];
+      else sharedSessionResults = [];
+      renderSharedResults(containerId, []);
+      return Promise.resolve();
+    }
+    if (containsHttpUrl(query)) return Promise.resolve();
+    return fetchSharedSearch(query).then(function (results) {
+      if (seq === currentSeq() && $(inputId).value.trim() === query) {
+        if (containerId === "shared-work-results") sharedWorkResults = results;
+        else sharedSessionResults = results;
+        renderSharedResults(containerId, results);
+      }
+    });
+  }
   function fetchBoard(force) {
     if (!force && hasProtectedWorkControls()) {
       $("board-sync").textContent = "Live updates paused while editing";
@@ -2355,14 +2374,14 @@
       query = $("work-search").value.trim(),
       path = "/api/board" + (query || desktopMode ? "?" + new URLSearchParams(Object.assign(query ? { q: query } : {}, desktopMode ? { desktop: "1" } : {})) : ""),
       boardRequest = request(path);
-    fetchSharedSearch(query).then(function (results) {
-      if (seq === boardSeq) {
-        sharedWorkResults = results;
-        renderSharedResults("shared-work-results", results);
-      }
-    });
+    if (sharedWorkQuery !== query) {
+      sharedWorkQuery = query;
+      sharedWorkResults = [];
+      renderSharedResults("shared-work-results", []);
+    }
     return boardRequest
       .then(function (data) {
+        showSharedSearch("shared-work-results", query, seq, function () { return boardSeq; }, data);
         if (seq === boardSeq && !hasProtectedWorkControls()) {
           $("board-error").hidden = true;
           renderBoard(data);
@@ -2370,6 +2389,7 @@
         }
       })
       .catch(function (error) {
+        showSharedSearch("shared-work-results", query, seq, function () { return boardSeq; }, null);
         if (seq === boardSeq) {
           $("board-sync").textContent = "Update delayed · retrying automatically";
           $("board-error").textContent = error.message;
@@ -2604,19 +2624,20 @@
     if (query) params.set("q", query);
     if ($("here-toggle").checked) params.set("here", "1");
     var seq = ++sessionsSeq;
-    fetchSharedSearch(query).then(function (results) {
-      if (seq === sessionsSeq) {
-        sharedSessionResults = results;
-        renderSharedResults("shared-session-results", results);
-      }
-    });
+    if (sharedSessionQuery !== query) {
+      sharedSessionQuery = query;
+      sharedSessionResults = [];
+      renderSharedResults("shared-session-results", []);
+    }
     request("/api/sessions?" + params)
       .then(function (data) {
+        showSharedSearch("shared-session-results", query, seq, function () { return sessionsSeq; }, data);
         if (seq === sessionsSeq) {
           renderSessionList(data.sessions || []);
         }
       })
       .catch(function (error) {
+        showSharedSearch("shared-session-results", query, seq, function () { return sessionsSeq; }, null);
         if (seq === sessionsSeq) {
           empty($("session-list"), error.message);
         }
@@ -2870,6 +2891,15 @@
       storeViewSettings(); renderBoard(latestBoard);
     }
   });
+  $("work-search").addEventListener("input", function () {
+    var query = $("work-search").value.trim();
+    boardSeq++;
+    if (sharedWorkQuery !== query) {
+      sharedWorkQuery = query;
+      sharedWorkResults = [];
+      renderSharedResults("shared-work-results", []);
+    }
+  });
   $("work-search").addEventListener(
     "input",
     debounce(function () {
@@ -2998,6 +3028,15 @@
     $("discard-task-edits").hidden = true;
     renderBoard(latestBoard);
     fetchBoard();
+  });
+  $("search-input").addEventListener("input", function () {
+    var query = $("search-input").value.trim();
+    sessionsSeq++;
+    if (sharedSessionQuery !== query) {
+      sharedSessionQuery = query;
+      sharedSessionResults = [];
+      renderSharedResults("shared-session-results", []);
+    }
   });
   $("search-input").addEventListener("input", debounce(fetchSessions, 250));
   $("here-toggle").addEventListener("change", fetchSessions);

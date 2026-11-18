@@ -1338,3 +1338,52 @@ def test_task_rename_updates_provider_and_terminal_with_current_session(web_serv
     assert data["task"]["session_name_updated"] is False
     assert data["task"]["session_name_reason"] == "Provider unavailable"
     assert data["task"]["terminal_title_updated"] is True
+
+
+def test_board_and_history_share_literal_search_across_continuations(web_server):
+    base, _server = web_server
+    url = "https://example.test/review/a_b?view=long+notes&rev=%20#draft"
+    phrase = "reopen the design review tomorrow"
+    conn = fts.open_db(fts.DB_PATH)
+    for sid, text in (
+        ("literal-previous", f"{phrase}. Here is [the document]({url})."),
+        ("literal-unrelated", f"Reopen later. The design review is tomorrow. {url}-2"),
+        ("literal-current", "Follow-up from a fresh conversation."),
+    ):
+        _seed(conn, sid, cwd="/w/search")
+        cursor = conn.execute(
+            """INSERT INTO segments (sid, segment_idx, role, timestamp, text)
+               VALUES (?, 1, 'assistant', '2026-05-01T10:00:00Z', ?)""",
+            (sid, text),
+        )
+        conn.execute(
+            """INSERT INTO segments_fts (rowid, sid, segment_idx, role, timestamp, text)
+               VALUES (?, ?, 1, 'assistant', '2026-05-01T10:00:00Z', ?)""",
+            (cursor.lastrowid, sid, text),
+        )
+    conn.commit()
+    conn.close()
+    previous = _board_thread("literal-previous", cwd="/w/search")
+    work_items.attach_continuation(
+        previous["task_id"],
+        {"session_id": "literal-current", "provider": "claude", "cwd": "/w/search"},
+        "literal-previous",
+    )
+    _board_thread("literal-unrelated", cwd="/w/search")
+
+    for query, kind, found in [
+        (url, "url", True),
+        (phrase, "phrase", True),
+        (url.replace("rev=%20", "rev=%21"), "url", False),
+    ]:
+        params = urllib.parse.urlencode({"q": query})
+        _, history = _get_json(base + "/api/sessions?" + params)
+        _, board = _get_json(base + "/api/board?desktop=1&" + params)
+        assert board["search_match_kind"] == history["search_match_kind"] == kind
+        assert [row["session_id"] for row in history["sessions"]] == (
+            ["literal-previous"] if found else []
+        )
+        assert board["search_task_ids"] == ([previous["task_id"]] if found else [])
+        assert next(
+            row["session_id"] for row in board["tasks"] if row["task_id"] == previous["task_id"]
+        ) == "literal-current"

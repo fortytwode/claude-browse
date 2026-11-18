@@ -184,7 +184,7 @@ function loadApp({ DateImpl = Date, fetchImpl, initialize = false, setTimeoutImp
   };
   const windowListeners = {};
   const window = {
-    location: { search: desktop ? "?desktop=1" : "" },
+    location: { search: desktop ? "?desktop=1" : "", pathname: "/" },
     addEventListener(type, listener) { (windowListeners[type] ||= []).push(listener); },
     removeEventListener(type, listener) {
       windowListeners[type] = (windowListeners[type] || []).filter((item) => item !== listener);
@@ -211,6 +211,7 @@ function loadApp({ DateImpl = Date, fetchImpl, initialize = false, setTimeoutImp
   const testExports = `
 globalThis.testApi = {
   fetchBoard,
+  fetchSessions,
   scheduleBoardPoll,
   renderBoard,
   syncToolbarControls,
@@ -381,6 +382,38 @@ test("Work search includes tasks matched by the server's full transcript index",
   assert.equal(api.taskMatches(task), true);
   elementFor("work-search").value = "different";
   assert.equal(api.taskMatches(task), false, "stale server results must not match a newer query");
+});
+
+test("literal URL and phrase searches trust only current server IDs", () => {
+  const { api, elementFor } = loadApp();
+  const listed = activeTask({ task_id: "literal-hit", title: "unrelated" });
+  const loose = activeTask({ task_id: "loose-hit", title: "a pasted URL with extra suffix" });
+  elementFor("work-search").value = "https://example.test/path";
+  api.setState({ latestBoard: { tasks: [listed, loose], projects: [], folders: [], search_query: "https://example.test/path", search_match_kind: "url", search_task_lookup: { "literal-hit": true }, search_task_ids: ["literal-hit"] }, queueMode: "all", statusFilter: "all", filters: { provider: "any", priority: "any", terminal: "any", due: "any", presence: "any", lastUpdate: "any" } });
+  assert.equal(api.taskMatches(listed), true);
+  assert.equal(api.taskMatches(loose), false);
+  elementFor("work-search").value = "full phrase";
+  api.setState({ latestBoard: { tasks: [listed, loose], search_query: "full phrase", search_match_kind: "phrase", search_task_lookup: { "literal-hit": true }, search_task_ids: ["literal-hit"] } });
+  assert.equal(api.taskMatches(listed), true);
+  assert.equal(api.taskMatches({ ...loose, title: "full phrase appears in metadata" }), false);
+});
+
+test("Work URL queries never reach semantic fallback, including relay errors", async () => {
+  const requests = [];
+  const { api, elementFor } = loadApp({ fetchImpl: (path) => { requests.push(path); return Promise.reject(new Error("offline")); } });
+  elementFor("work-search").value = "https://example.test/synthetic";
+  await api.fetchBoard(true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requests, ["/api/board?q=https%3A%2F%2Fexample.test%2Fsynthetic"]);
+});
+
+test("History waits for ordinary local results and suppresses URL semantic fallback", async () => {
+  const requests = [];
+  const { api, elementFor } = loadApp({ fetchImpl: (path) => { requests.push(path); return Promise.resolve({ ok: true, json: () => Promise.resolve({ sessions: [], search_match_kind: "url" }) }); } });
+  elementFor("search-input").value = "https://example.test/synthetic";
+  api.fetchSessions();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requests, ["/api/sessions?q=https%3A%2F%2Fexample.test%2Fsynthetic"]);
 });
 
 test("fetchBoard sends the Work query to the full-history search endpoint", async () => {

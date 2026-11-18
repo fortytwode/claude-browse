@@ -203,6 +203,13 @@ def _match_provenance(info: Mapping[str, object], query: str) -> dict[str, str]:
             "match_confidence": "",
         }
 
+    match_kind = info.get("search_match_kind")
+    if match_kind in ("url", "phrase"):
+        return {
+            "match_label": "exact URL" if match_kind == "url" else "exact phrase",
+            "match_confidence": "high",
+        }
+
     plan = build_query_plan(query)
     anchor_terms = [str(term).strip(".*").lower() for term in plan.anchor_terms if term]
     normalized = set(plan.normalized_terms)

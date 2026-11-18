@@ -39,7 +39,7 @@ def search(
     make the Firestore contract testable without credentials or network calls.
     """
     query = query.strip()
-    if len(query) < 8:
+    if len(query) < 8 or fts.is_url_query(query):
         return []
     if client is None and not shared_search.enabled():
         return []

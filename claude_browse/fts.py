@@ -233,7 +233,7 @@ _CODE_REFERENCE_WINDOW_CUES = (
     "scripts",
     "marp",
 )
-_EXACT_URL_RE = re.compile(r"https?://[^\s<>)\"']+", re.IGNORECASE)
+_EXACT_URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
 _EXACT_ID_RE = re.compile(r"\b[a-z0-9][a-z0-9_-]{15,}\b", re.IGNORECASE)
 _CLICKUP_TASK_URL_RE = re.compile(
     r"https?://(?:app\.)?clickup\.com/t/(?:\d+/)?([a-z0-9_-]{6,})",
@@ -1561,15 +1561,13 @@ def _exact_identifier_terms(query: str) -> tuple[str, ...]:
         match.group(1).lower() for match in _CLICKUP_TASK_URL_RE.finditer(query)
     ]
     if clickup_task_ids:
-        terms.extend(f"clickup-task:{task_id}" for task_id in clickup_task_ids)
-    else:
-        for match in _EXACT_URL_RE.finditer(query):
-            url = match.group(0).rstrip(".,;:)]}")
-            if url:
-                terms.append(url.lower())
-                base_url = url.split("?", 1)[0].rstrip("/")
-                if base_url and base_url != url:
-                    terms.append(base_url.lower())
+        return _unique_terms(tuple(f"clickup-task:{task_id}" for task_id in clickup_task_ids))
+    for match in _EXACT_URL_RE.finditer(query):
+        url = match.group(0).rstrip(".,;:)]}")
+        terms.append(url.lower())
+        base_url = url.split("?", 1)[0].rstrip("/")
+        if base_url and base_url != url:
+            terms.append(base_url.lower())
     for match in _EXACT_ID_RE.finditer(query.lower()):
         raw = match.group(0).strip("_-")
         compact = raw.replace("-", "").replace("_", "")
@@ -3650,6 +3648,164 @@ def _load_sessions_by_ids(
     return [_row_to_dict(r) for r in rows]
 
 
+def _pasted_url(query: str) -> str:
+    text = query.strip().strip('<>"')
+    return text.lower() if _EXACT_URL_RE.fullmatch(text) else ""
+
+
+def is_url_query(query: str) -> bool:
+    """Whether a query asks for a link rather than related conversation."""
+    return bool(_pasted_url(query) or _CLICKUP_TASK_URL_RE.search(query))
+
+
+def _contains_url(text: str, url: str) -> bool:
+    for match in _EXACT_URL_RE.finditer(text):
+        found = match.group().lower()
+        # A link may be followed by sentence punctuation or a Markdown
+        # closing delimiter. Keep balanced parentheses inside the URL itself.
+        cleaned = found.rstrip(".,;:")
+        for opening, closing in (("(", ")"), ("[", "]"), ("{", "}")):
+            while cleaned.endswith(closing) and cleaned.count(closing) > cleaned.count(opening):
+                cleaned = cleaned[:-1].rstrip(".,;:")
+        if url in (found, cleaned):
+            return True
+    return False
+
+
+def _literal_session_matches(
+    conn: sqlite3.Connection,
+    query: str,
+    allowed_sids: set[str] | None = None,
+) -> tuple[str, dict[str, dict]]:
+    """Find exact URL or adjacent-word hits before using broader recall.
+
+    Both indexes matter: append-only transcripts can have newer turns in
+    segments_fts than in sessions_fts. Work can use the complete set of IDs
+    without applying Browse's result limit.
+    """
+    if _CLICKUP_TASK_URL_RE.search(query):
+        # Keep the established task-ID matching across ClickUp link forms.
+        rows = _exact_identifier_results(conn, query, -1)
+        return "url", {
+            row["session_id"]: {
+                field: row[field]
+                for field in ("context", "match_context", "match_timestamp",
+                              "match_segment_idx", "exact_identifier_match")
+                if field in row
+            }
+            for row in rows
+            if allowed_sids is None or row["session_id"] in allowed_sids
+        }
+
+    url = _pasted_url(query)
+    phrase = " ".join(query.split()).lower()
+    if url:
+        return "url", _literal_url_matches(conn, url, allowed_sids)
+    if len(phrase.split()) < 2 or '"' in phrase or "*" in phrase:
+        return "", {}
+
+    match_query = _terms_to_fts_query([phrase])
+    hits = {
+        sid: {}
+        for (sid,) in conn.execute(
+            "SELECT sid FROM sessions_fts WHERE sessions_fts MATCH ?", (match_query,)
+        )
+        if allowed_sids is None or sid in allowed_sids
+    }
+    # SQLite returns the bare columns from the row with the maximum index.
+    # Keep a single matching turn per session, without rendering every snippet.
+    for sid, idx, timestamp, rowid in conn.execute(
+        """SELECT sid, MAX(segment_idx), timestamp, rowid
+           FROM segments_fts WHERE segments_fts MATCH ? GROUP BY sid""",
+        (match_query,),
+    ):
+        if allowed_sids is None or sid in allowed_sids:
+            hits[sid] = {
+                "match_timestamp": timestamp, "match_segment_idx": idx, "rowid": rowid,
+            }
+    return ("phrase" if hits else ""), hits
+
+
+def _literal_url_matches(
+    conn: sqlite3.Connection, url: str, allowed_sids: set[str] | None,
+) -> dict[str, dict]:
+    # FTS finds candidates quickly. Verify the URL itself because FTS tokens
+    # cannot distinguish links that differ only in punctuation.
+    match_query = _terms_to_fts_query([url])
+    hits = {}
+    for sid, *fields in conn.execute(
+        """SELECT sid, cwd, title, first_msg, user_text, asst_text, boilerplate
+           FROM sessions_fts WHERE sessions_fts MATCH ?""",
+        (match_query,),
+    ):
+        if allowed_sids is not None and sid not in allowed_sids:
+            continue
+        for field in fields:
+            if field and _contains_url(field, url):
+                hits[sid] = {"match_context": _highlight_context(field, (url,))}
+                break
+    for sid, idx, timestamp, text in conn.execute(
+        """SELECT sid, segment_idx, timestamp, text
+           FROM segments_fts WHERE segments_fts MATCH ?""",
+        (match_query,),
+    ):
+        if allowed_sids is not None and sid not in allowed_sids:
+            continue
+        if idx > hits.get(sid, {}).get("match_segment_idx", -1) and _contains_url(text, url):
+            hits[sid] = {
+                "match_context": _highlight_context(text, (url,)),
+                "match_timestamp": timestamp,
+                "match_segment_idx": idx,
+            }
+    return hits
+
+
+def _literal_search_results(
+    conn: sqlite3.Connection, query: str, kind: str, hits: dict[str, dict], limit: int,
+) -> list[dict]:
+    ids = list(hits)
+    rows = []
+    for start in range(0, len(ids), _WORK_SEMANTIC_SID_BATCH_SIZE):
+        batch = ids[start : start + _WORK_SEMANTIC_SID_BATCH_SIZE]
+        rows.extend(_load_sessions_by_ids(conn, batch))
+    rows.sort(
+        key=lambda row: (
+            _timestamp_sort_key(
+                hits[row["session_id"]].get("match_timestamp")
+                or row.get("last_timestamp")
+                or row.get("timestamp")
+            ),
+            row["mtime"] or 0,
+        ),
+        reverse=True,
+    )
+    results = rows[:limit]
+    phrase_query = _terms_to_fts_query([" ".join(query.split())])
+    snippet_length = min(64, max(12, len(query.split())))
+    for row in results:
+        hit = dict(hits[row["session_id"]])
+        rowid = hit.pop("rowid", None)
+        if kind == "phrase":
+            if rowid is not None:
+                snippet = conn.execute(
+                    """SELECT snippet(segments_fts, 4, '\x01', '\x02', '…', ?)
+                       FROM segments_fts WHERE rowid = ? AND segments_fts MATCH ?""",
+                    (snippet_length, rowid, phrase_query),
+                ).fetchone()
+            else:
+                snippet = conn.execute(
+                    """SELECT snippet(sessions_fts, -1, '\x01', '\x02', '…', ?)
+                       FROM sessions_fts WHERE sid = ? AND sessions_fts MATCH ?""",
+                    (snippet_length, row["session_id"], phrase_query),
+                ).fetchone()
+            if snippet:
+                hit["match_context"] = snippet[0]
+        row.update(hit)
+        row["context"] = hit.get("match_context") or row.get("context", "")
+        row["search_match_kind"] = kind
+    return results
+
+
 def search(
     conn: sqlite3.Connection, query: str, limit: int = 200
 ) -> list[dict]:
@@ -3663,8 +3819,9 @@ def search(
     if not query.strip():
         return list_recent(conn, limit)
 
-    if _CLICKUP_TASK_URL_RE.search(query):
-        return _exact_identifier_results(conn, query, limit)
+    kind, hits = _literal_session_matches(conn, query)
+    if kind:
+        return _literal_search_results(conn, query, kind, hits, limit)
 
     plan = build_query_plan(query)
     if plan.low_confidence:
@@ -3859,7 +4016,17 @@ def matching_session_ids(
     *,
     candidate_sids: Iterable[str] | None = None,
 ) -> list[str]:
-    """Return every indexed session ID matching a non-empty Work query.
+    """Return every indexed session ID matching a non-empty Work query."""
+    return work_search_matches(conn, query, candidate_sids=candidate_sids)[0]
+
+
+def work_search_matches(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    candidate_sids: Iterable[str] | None = None,
+) -> tuple[list[str], str]:
+    """Return matching Work session IDs and the literal match kind, if any.
 
     Work search needs set membership, not snippets or ranking. Keeping this
     ID-only path separate avoids capping task visibility at the Thread History
@@ -3870,15 +4037,18 @@ def matching_session_ids(
     path for callers that have no Work candidate set.
     """
     if not query.strip():
-        return []
+        return [], ""
     scoped_sids = (
         list(dict.fromkeys(str(sid) for sid in candidate_sids if sid))
         if candidate_sids is not None
         else None
     )
     if scoped_sids == []:
-        return []
+        return [], "url" if is_url_query(query) else ""
     allowed_sids = set(scoped_sids) if scoped_sids is not None else None
+    kind, literal_matches = _literal_session_matches(conn, query, allowed_sids)
+    if kind:
+        return list(literal_matches), kind
 
     strict_plan = build_query_plan(query)
     exact = _exact_identifier_results(conn, query, 200)
@@ -3888,7 +4058,7 @@ def matching_session_ids(
         if allowed_sids is None or str(row["session_id"]) in allowed_sids
     ]
     if strict_plan.low_confidence:
-        return exact_ids
+        return exact_ids, ""
 
     plan = _discriminative_query_plan(conn, strict_plan)
     candidates: list[QueryPlan | None] = []
@@ -3931,14 +4101,14 @@ def matching_session_ids(
         lexical_ids = exact_ids
 
     if scoped_sids is None:
-        return lexical_ids
+        return lexical_ids, ""
     semantic_ids = _work_semantic_session_ids(
         conn,
         query,
         plan=plan,
         candidate_sids=scoped_sids,
     )
-    return list(dict.fromkeys([*lexical_ids, *semantic_ids]))
+    return list(dict.fromkeys([*lexical_ids, *semantic_ids])), ""
 
 
 # --- ranker_v1 -----------------------------------------------------------
@@ -3983,18 +4153,22 @@ def search_ranked(
     if not query.strip():
         return list_recent(conn, limit)
 
+    kind, hits = _literal_session_matches(conn, query)
+    if kind == "url":
+        return _literal_search_results(conn, query, kind, hits, limit)
+
+    # Phrase membership is decided before anchor extraction or semantic recall.
+    # Run those exact hits through the existing ranker for context and ordering.
     plan = build_query_plan(query)
-    exact_results = _exact_identifier_results(conn, query, max(limit * 2, 50))
-    if _CLICKUP_TASK_URL_RE.search(query) and not exact_results:
-        # A ClickUp task URL expresses a specific task identity. Falling
-        # through to lexical URL tokens like `clickup` or `task` turns a miss
-        # into plausible but incorrect results from unrelated tasks.
-        return []
+    if kind == "phrase":
+        exact_results = _literal_search_results(conn, query, kind, hits, max(limit * 5, 200))
+    else:
+        exact_results = _exact_identifier_results(conn, query, max(limit * 2, 50))
     if plan.low_confidence and not exact_results:
         return list_recent(conn, limit)
     plan = _discriminative_query_plan(conn, plan)
     strict_plan = plan
-    fts_query = "" if plan.low_confidence else _plan_fts_query(plan)
+    fts_query = "" if kind or plan.low_confidence else _plan_fts_query(plan)
     if not fts_query and not exact_results:
         return list_recent(conn, limit)
     descriptive = plan.descriptive
@@ -4147,10 +4321,10 @@ def search_ranked(
     match_map = _latest_segment_matches(
         conn,
         query,
-        sids=None if descriptive else list(existing_ids),
+        sids=None if descriptive and not kind else list(existing_ids),
         plan=plan,
     )
-    if descriptive:
+    if descriptive and not kind:
         semantic_map = _semantic_window_matches(
             conn,
             query,
@@ -4170,7 +4344,7 @@ def search_ranked(
                 "match_semantic_overlap",
                 0,
             )
-    dense_map = _dense_window_matches(
+    dense_map = {} if kind else _dense_window_matches(
         conn,
         query,
         plan=plan,
