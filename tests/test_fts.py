@@ -3054,3 +3054,35 @@ def test_incremental_semantic_terms_match_full_rebuild(db, tmp_path, monkeypatch
         """
     ).fetchone()[0]
     assert orphaned == 0
+
+
+@pytest.mark.parametrize("phrase", ["reopen the design review tomorrow", "The client asked for a preview before Friday"])
+def test_unquoted_phrase_search_uses_word_order_in_browse_and_board(db, phrase):
+    _seed(db, "exact", "Unrelated opening.", segments=[("assistant", phrase, "2026-05-02T00:00:00Z")])
+    _seed(db, "scattered", " later ".join(phrase.split()))
+    _seed(db, "other", "General planning.")
+    _refresh_semantic(db)
+
+    for search in (fts.search, fts.search_ranked):
+        rows = search(db, phrase)
+        assert [row["session_id"] for row in rows] == ["exact"]
+        assert phrase.lower() in rows[0]["context"].lower()
+    assert fts.matching_session_ids(db, phrase, candidate_sids=["exact", "scattered", "other"]) == ["exact"]
+
+
+def test_pasted_url_matches_complete_link_in_later_turn_in_browse_and_board(db):
+    url = "https://example.test/review/a_b?view=notes#draft"
+    _seed(
+        db, "mentions_link", "Unrelated opening.", provider="codex",
+        segments=[("assistant", f"Here is [the document]({url}).", "2026-05-02T00:00:00Z")],
+    )
+    _seed(db, "different_link", url.replace("a_b", "a-b"))
+    _seed(db, "longer_link", url + "-2")
+    _seed(db, "different_query", url.replace("view=notes", "view=summary"))
+    candidates = ["mentions_link", "different_link", "longer_link", "different_query"]
+
+    for search in (fts.search, fts.search_ranked):
+        assert [row["session_id"] for row in search(db, url)] == ["mentions_link"]
+        assert search(db, url.replace("notes", "missing")) == []
+    assert fts.matching_session_ids(db, url, candidate_sids=candidates) == ["mentions_link"]
+    assert fts.matching_session_ids(db, url, candidate_sids=candidates[1:]) == []
